@@ -1,0 +1,58 @@
+openapi: 3.1.0
+info:
+  title: CloudSDD API
+  version: "0.1.0-draft"
+  description: >
+    Bozza. Nessun endpoint HTTP è ancora implementato (vedi docs/api.md).
+    Questo documento espone per ora solo lo schema del componente
+    Specification, definito in docs/rfc/001-core-architecture-and-json-schema.md
+    e implementato in internal/spec, così da poter essere referenziato dalle
+    RFC future che introdurranno l'API layer.
+paths: {}
+components:
+  schemas:
+    Specification:
+      type: object
+      additionalProperties: false
+      required: [sdd_version, intent, resources]
+      properties:
+        sdd_version:
+          type: string
+          const: "1.0"
+        intent:
+          type: string
+          enum: [deploy, update, destroy, plan]
+        resources:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/Resource"
+        policies:
+          $ref: "#/components/schemas/Policies"
+    Resource:
+      type: object
+      additionalProperties: false
+      required: [id, type, provider, properties]
+      properties:
+        id:
+          type: string
+          pattern: "^[a-zA-Z0-9_-]{1,63}$"
+        type:
+          type: string
+          enum: [relational_database, object_storage, compute_instance, container_service]
+        provider:
+          type: string
+          enum: [agnostic, aws, gcp, azure]
+        properties:
+          type: object
+    Policies:
+      type: object
+      additionalProperties: false
+      properties:
+        max_cost_monthly:
+          type: number
+          exclusiveMinimum: 0
+        allowed_regions:
+          type: array
+          items:
+            type: string
