@@ -3,11 +3,11 @@ info:
   title: CloudSDD API
   version: "0.1.0-draft"
   description: >
-    Bozza. Nessun endpoint HTTP è ancora implementato (vedi docs/api.md).
-    Questo documento espone per ora solo lo schema del componente
-    Specification, definito in docs/rfc/001-core-architecture-and-json-schema.md
-    e implementato in internal/spec, così da poter essere referenziato dalle
-    RFC future che introdurranno l'API layer.
+    Draft. No HTTP endpoint is implemented yet (see docs/api.md).
+    This document currently only exposes the Specification component
+    schema, defined in docs/rfc/001-core-architecture-and-json-schema.md
+    and implemented in internal/spec, so it can be referenced by future
+    RFCs that introduce the API layer.
 paths: {}
 components:
   schemas:
@@ -39,12 +39,84 @@ components:
           pattern: "^[a-zA-Z0-9_-]{1,63}$"
         type:
           type: string
-          enum: [relational_database, object_storage, compute_instance, container_service]
+          enum: [relational_database, object_storage, compute_instance, container_service, cross_account_role]
         provider:
           type: string
           enum: [agnostic, aws, gcp, azure]
+        account:
+          type: string
+          maxLength: 64
+          description: >
+            Symbolic name of a DeploymentTarget configured at the engine
+            level (RFC 004 §2.2), not strictly part of the Specification:
+            never an ARN or a credential, only a reference resolved by
+            the engine. Optional: if absent, the provider's default
+            credentials are used (RFC 002 §2.4).
         properties:
           type: object
+    S3ObjectStorageProperties:
+      description: >
+        Properties of a Resource with type=object_storage, provider=aws
+        (RFC 002 §2.6). Encryption and block_public_access are secure by
+        default when absent.
+      type: object
+      additionalProperties: false
+      required: [bucket_name, region]
+      properties:
+        bucket_name:
+          type: string
+          minLength: 3
+          maxLength: 63
+        region:
+          type: string
+        versioning:
+          type: boolean
+          default: false
+        encryption:
+          type: boolean
+          default: true
+        block_public_access:
+          type: boolean
+          default: true
+    AWSCrossAccountRoleProperties:
+      description: >
+        Properties of a Resource with type=cross_account_role,
+        provider=aws (RFC 003 §2.2). Requires a non-empty
+        Policies.allowed_regions (fail-closed, RFC 003 §2.3).
+      type: object
+      additionalProperties: false
+      required: [role_name, trusted_account_id, external_id, permissions, resource_arns]
+      properties:
+        enabled:
+          type: boolean
+          default: true
+          description: Explicit toggle to suspend the grant without removing the resource from the Specification.
+        role_name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        trusted_account_id:
+          type: string
+          pattern: "^[0-9]{12}$"
+        external_id:
+          type: string
+          minLength: 8
+          description: Mitigation for the confused deputy problem (mandatory, no default).
+        permissions:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            type: string
+            not:
+              const: "*"
+        resource_arns:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            type: string
+            pattern: "^arn:"
     Policies:
       type: object
       additionalProperties: false

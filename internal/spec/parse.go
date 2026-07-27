@@ -7,15 +7,15 @@ import (
 	"io"
 )
 
-// ErrTrailingData indica che il payload contiene dati oltre il primo valore JSON valido.
+// ErrTrailingData indicates that the payload contains data beyond the first valid JSON value.
 var ErrTrailingData = errors.New("spec: unexpected trailing data after JSON value")
 
-// Parse decodifica una Specifica da r in modo strict: campi JSON non
-// previsti nello schema causano un errore invece di essere silenziosamente
-// ignorati o assegnati (difesa da Mass Assignment, RFC 001 §3).
+// Parse decodes a Specification from r in strict mode: JSON fields not
+// anticipated by the schema cause an error instead of being silently
+// ignored or assigned (defense against Mass Assignment, RFC 001 §3).
 //
-// Parse non esegue alcuna validazione di dominio: chiamare Validate (o usare
-// ParseAndValidate) prima di considerare la Specifica attendibile.
+// Parse performs no domain validation: call Validate (or use
+// ParseAndValidate) before considering the Specification trustworthy.
 func Parse(r io.Reader) (*Specification, error) {
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
@@ -31,7 +31,7 @@ func Parse(r io.Reader) (*Specification, error) {
 	return &s, nil
 }
 
-// ParseAndValidate decodifica e valida in un solo passo una Specifica da r.
+// ParseAndValidate decodes and validates a Specification from r in a single step.
 func ParseAndValidate(r io.Reader) (*Specification, error) {
 	s, err := Parse(r)
 	if err != nil {

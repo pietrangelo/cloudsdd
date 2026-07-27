@@ -1,5 +1,5 @@
-// Package engine orchestra l'applicazione di una Specifica SDD sui
-// CloudProvider registrati, come da
+// Package engine orchestrates applying an SDD Specification onto the
+// registered CloudProviders, as per
 // docs/rfc/001-core-architecture-and-json-schema.md §2.3.
 package engine
 
@@ -10,19 +10,19 @@ import (
 	"cloudsdd/internal/spec"
 )
 
-// Engine espone il ciclo di vita di una Specifica: validazione, calcolo del
-// piano (diff) e applicazione, senza conoscere i dettagli di alcun provider
-// concreto.
+// Engine exposes the lifecycle of a Specification: validation, plan
+// (diff) computation, and apply, without knowing the details of any
+// concrete provider.
 type Engine interface {
-	// Validate verifica la Specifica (validazione di dominio) e, per ogni
-	// risorsa, delega la validazione specifica del provider risolto.
+	// Validate checks the Specification (domain validation) and, for each
+	// resource, delegates to the resolved provider's specific validation.
 	Validate(ctx context.Context, s spec.Specification) error
 
-	// Plan calcola il Diff per ogni risorsa della Specifica senza applicare
-	// alcuna modifica.
+	// Plan computes the Diff for every resource in the Specification
+	// without applying any change.
 	Plan(ctx context.Context, s spec.Specification) ([]provider.Diff, error)
 
-	// Apply applica la Specifica, risorsa per risorsa, tramite i
-	// CloudProvider registrati.
+	// Apply applies the Specification, resource by resource, through the
+	// registered CloudProviders.
 	Apply(ctx context.Context, s spec.Specification) ([]provider.Result, error)
 }

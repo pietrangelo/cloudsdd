@@ -1,5 +1,5 @@
-// Package provider definisce il contratto cloud-agnostico che ogni backend
-// concreto (AWS, GCP, Azure, ...) deve implementare, come da
+// Package provider defines the cloud-agnostic contract that every concrete
+// backend (AWS, GCP, Azure, ...) must implement, as per
 // docs/rfc/001-core-architecture-and-json-schema.md §2.3.
 package provider
 
@@ -9,7 +9,7 @@ import (
 	"cloudsdd/internal/spec"
 )
 
-// Action descrive l'operazione che un Diff rappresenta per una risorsa.
+// Action describes the operation a Diff represents for a resource.
 type Action string
 
 const (
@@ -19,16 +19,16 @@ const (
 	ActionNoop    Action = "noop"
 )
 
-// Diff rappresenta lo scarto tra lo stato desiderato (dalla Specifica) e lo
-// stato attuale rilevato dal provider per una singola risorsa, prima
-// dell'applicazione.
+// Diff represents the gap between the desired state (from the
+// Specification) and the current state detected by the provider for a
+// single resource, before it is applied.
 type Diff struct {
 	ResourceID string         `json:"resource_id"`
 	Action     Action         `json:"action"`
 	Changes    map[string]any `json:"changes,omitempty"`
 }
 
-// Status descrive l'esito dell'applicazione di una risorsa.
+// Status describes the outcome of applying a resource.
 type Status string
 
 const (
@@ -37,32 +37,39 @@ const (
 	StatusDestroyed Status = "destroyed"
 )
 
-// Result rappresenta l'esito dell'applicazione (o distruzione) di una singola risorsa.
+// Result represents the outcome of applying (or destroying) a single resource.
 type Result struct {
 	ResourceID string         `json:"resource_id"`
 	Status     Status         `json:"status"`
 	Details    map[string]any `json:"details,omitempty"`
 }
 
-// CloudProvider è il contratto implementato da ogni backend cloud concreto.
-// Le implementazioni sono responsabili di decodificare Resource.Properties
-// in una struct tipizzata propria del ResourceType gestito, validandola
-// prima di ogni operazione (difesa da Mass Assignment a livello di provider).
+// CloudProvider is the contract implemented by every concrete cloud
+// backend. Implementations are responsible for decoding Resource.Properties
+// into a struct typed for the ResourceType they handle, validating it
+// before every operation (defense against Mass Assignment at the provider
+// level).
+//
+// Every method also receives spec.Policies (RFC 002 §2.5): without it a
+// provider would have no way to enforce constraints such as
+// Policies.AllowedRegions, which RFC 001 §3 explicitly lists as a
+// security/cost defense.
 type CloudProvider interface {
-	// Name identifica il provider (es. "aws", "gcp", "azure").
+	// Name identifies the provider (e.g. "aws", "gcp", "azure").
 	Name() string
 
-	// Validate verifica che la risorsa sia esprimibile da questo provider,
-	// senza effettuare alcuna chiamata verso l'infrastruttura reale.
-	Validate(ctx context.Context, r spec.Resource) error
+	// Validate checks that the resource can be expressed by this provider
+	// and complies with the Specification's Policies, without making any
+	// call to real infrastructure.
+	Validate(ctx context.Context, r spec.Resource, p spec.Policies) error
 
-	// Plan calcola il Diff tra stato desiderato e stato attuale, senza
-	// applicare alcuna modifica.
-	Plan(ctx context.Context, r spec.Resource) (Diff, error)
+	// Plan computes the Diff between the desired and current state,
+	// without applying any change.
+	Plan(ctx context.Context, r spec.Resource, p spec.Policies) (Diff, error)
 
-	// Apply applica lo stato desiderato per la risorsa in modo idempotente.
-	Apply(ctx context.Context, r spec.Resource) (Result, error)
+	// Apply idempotently applies the desired state for the resource.
+	Apply(ctx context.Context, r spec.Resource, p spec.Policies) (Result, error)
 
-	// Destroy rimuove la risorsa dall'infrastruttura reale.
-	Destroy(ctx context.Context, r spec.Resource) error
+	// Destroy removes the resource from real infrastructure.
+	Destroy(ctx context.Context, r spec.Resource, p spec.Policies) error
 }

@@ -74,6 +74,21 @@ func TestValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "cross_account_role is a valid resource type",
+			mutate:  func(s *Specification) { s.Resources[0].Type = ResourceTypeCrossAccountRole },
+			wantErr: false,
+		},
+		{
+			name:    "valid account reference",
+			mutate:  func(s *Specification) { s.Resources[0].Account = "prod-target" },
+			wantErr: false,
+		},
+		{
+			name:    "account reference too long",
+			mutate:  func(s *Specification) { s.Resources[0].Account = string(make([]byte, 65)) },
+			wantErr: true,
+		},
+		{
 			name:    "invalid provider",
 			mutate:  func(s *Specification) { s.Resources[0].Provider = "on-premise" },
 			wantErr: true,

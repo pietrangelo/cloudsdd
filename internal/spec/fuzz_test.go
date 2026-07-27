@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// FuzzParse esercita Parse contro input JSON malformati o ostili
-// (RFC 001 §3 "Fuzzing"). L'obiettivo non è che Parse accetti l'input, ma
-// che non vada mai in panic e restituisca sempre un errore esplicito per
-// input non validi.
+// FuzzParse exercises Parse against malformed or hostile JSON input
+// (RFC 001 §3 "Fuzzing"). The goal is not for Parse to accept the input,
+// but for it to never panic and to always return an explicit error for
+// invalid input.
 func FuzzParse(f *testing.F) {
 	seeds := []string{
 		`{"sdd_version": "1.0", "intent": "deploy", "resources": [{"id": "a", "type": "relational_database", "provider": "agnostic", "properties": {}}]}`,

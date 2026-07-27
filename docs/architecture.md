@@ -1,16 +1,17 @@
-# Architettura CloudSDD
+# CloudSDD Architecture
 
-> Stato corrente del sistema. Le decisioni di design sono tracciate nelle RFC
-> in `docs/rfc/`; questo documento riflette cosa è stato **effettivamente
-> implementato**, non le proposte.
+> Current state of the system. Design decisions are tracked in the RFCs
+> under `docs/rfc/`; this document reflects what has **actually been
+> implemented**, not proposals.
 
-## Panoramica
+## Overview
 
-CloudSDD converte una Specifica SDD (JSON) in operazioni su provider cloud,
-tramite un motore Go cloud-agnostico. Il flusso end-to-end previsto è:
+CloudSDD converts an SDD Specification (JSON) into operations on cloud
+providers, through a cloud-agnostic Go engine. The intended end-to-end
+flow is:
 
 ```
-Richiesta NL ──(non ancora implementato)──► Specifica JSON ──► Engine.Validate
+NL request ──(not yet implemented)──► JSON Specification ──► Engine.Validate
                                                                       │
                                                                       ▼
                                                                 Engine.Plan
@@ -19,118 +20,204 @@ Richiesta NL ──(non ancora implementato)──► Specifica JSON ──► E
                                                                 Engine.Apply
 ```
 
-Solo la parte "Specifica JSON → Engine" è implementata ad oggi (RFC 001).
-La traduzione linguaggio naturale → Specifica e l'API layer HTTP sono fuori
-scope e non hanno ancora una RFC dedicata.
+The "JSON Specification → Engine → Provider" part is implemented for AWS
+(RFC 002, 003, 004). Natural-language translation → Specification and the
+HTTP API layer remain out of scope and do not yet have a dedicated RFC.
 
-## Struttura del modulo
+## Module structure
 
 ```
 cloudsdd/
-├── cmd/                    # Entry point eseguibili (vuoto: nessuna RFC li ha ancora definiti)
+├── cmd/                    # Executable entry points (empty: no RFC has defined them yet)
 ├── internal/
-│   ├── spec/                # Tipi della Specifica, parsing strict, validazione di dominio
-│   ├── provider/             # Interfaccia CloudProvider, tipi Diff/Result
-│   └── engine/                # Interfaccia Engine e implementazione DefaultEngine
-├── pkg/                     # Vuoto: nessun tipo pubblico esposto ancora
+│   ├── spec/                # Specification types, strict parsing, domain validation
+│   ├── provider/             # CloudProvider interface, Diff/Result types
+│   │   └── aws/                # Concrete AWS implementation (RFC 002/003/004)
+│   └── engine/                # Engine interface, DefaultEngine, DeploymentTarget (RFC 004)
+├── pkg/                     # Empty: no public type exposed yet
 └── docs/
-    ├── rfc/001-...           # RFC di fondazione (approvata)
-    ├── architecture.md        # Questo documento
-    ├── api.md                 # Stato dell'API HTTP (non ancora implementata)
-    └── openapi.yaml            # Schema OpenAPI (solo componente Specification, no paths)
+    ├── rfc/001-004...        # Foundation RFC + AWS provider + cross-account + multi-account (approved)
+    ├── architecture.md        # This document
+    ├── api.md                 # HTTP API status (not yet implemented) + programmatic usage
+    └── openapi.yaml            # OpenAPI schema (Specification + AWS properties, no paths)
 ```
 
-## Pacchetto `internal/spec`
+## Package `internal/spec`
 
-Rappresenta e valida la Specifica SDD (`Specification`, `Resource`, `Policies`).
+Represents and validates the SDD Specification (`Specification`,
+`Resource`, `Policies`).
 
-- **`Parse(io.Reader) (*Specification, error)`**: decodifica JSON strict
-  (`json.Decoder.DisallowUnknownFields`) e rifiuta dati JSON residui dopo il
-  primo valore. Questo è il primo livello di difesa contro il **Mass
-  Assignment**: qualunque campo non previsto dallo schema causa un errore
-  esplicito invece di essere ignorato o assegnato silenziosamente.
-- **`Validate(*Specification) error`**: secondo livello di validazione,
-  tramite `go-playground/validator`, che applica le regole di dominio (tag
-  `validate` sulle struct): `sdd_version` fissata a `"1.0"`, `intent`
-  vincolato a un enum, almeno una risorsa, `id` risorsa vincolato al pattern
-  `^[a-zA-Z0-9_-]{1,63}$` (tag custom `resourceid`), `type` e `provider`
-  vincolati a enum, `max_cost_monthly` positivo se presente.
-- **`ParseAndValidate`**: combina i due passi.
-- `Resource.Properties` resta `map[string]any`: è un contenitore di
-  trasporto JSON generico. La decodifica tipizzata e validata delle
-  proprietà specifiche per `ResourceType`/provider è responsabilità di ogni
-  `CloudProvider` concreto (non ancora implementato).
+- **`Parse(io.Reader) (*Specification, error)`**: strict JSON decoding
+  (`json.Decoder.DisallowUnknownFields`) that rejects leftover JSON data
+  after the first value. This is the first line of defense against
+  **Mass Assignment**: any field not anticipated by the schema causes an
+  explicit error instead of being silently ignored or assigned.
+- **`Validate(*Specification) error`**: second tier of validation, via
+  `go-playground/validator`, applying domain rules (`validate` tags on
+  the structs): `sdd_version` fixed to `"1.0"`, `intent` constrained to
+  an enum, at least one resource, resource `id` constrained to the
+  pattern `^[a-zA-Z0-9_-]{1,63}$` (custom `resourceid` tag), `type`
+  (including `cross_account_role`, RFC 003) and `provider` constrained to
+  enums, `max_cost_monthly` positive if present. `Resource.Account` (RFC
+  004 §2.2) is optional: it references, by name, a `DeploymentTarget`
+  resolved by the `Engine`, never an ARN or a credential.
+- **`ParseAndValidate`**: combines the two steps.
+- `Resource.Properties` remains `map[string]any`: a generic JSON transport
+  container. Typed and validated decoding of properties specific to each
+  `ResourceType`/provider is the responsibility of each concrete
+  `CloudProvider`.
 
-Il parser è coperto da un fuzz test nativo Go (`FuzzParse`), eseguito contro
-input malformati, JSON annidato, campi sconosciuti e input vuoto: l'invariante
-verificata è l'assenza di panic, non l'accettazione dell'input.
+The parser is covered by a native Go fuzz test (`FuzzParse`), run against
+malformed input, nested JSON, unknown fields, and empty input: the
+invariant being verified is the absence of panics, not the acceptance of
+the input.
 
-## Pacchetto `internal/provider`
+## Package `internal/provider`
 
-Definisce il contratto `CloudProvider` che ogni backend concreto (AWS, GCP,
-Azure, ...) dovrà implementare in RFC future:
+Defines the `CloudProvider` contract that every concrete backend (AWS,
+GCP, Azure, ...) implements:
 
 ```go
 type CloudProvider interface {
     Name() string
-    Validate(ctx context.Context, r spec.Resource) error
-    Plan(ctx context.Context, r spec.Resource) (Diff, error)
-    Apply(ctx context.Context, r spec.Resource) (Result, error)
-    Destroy(ctx context.Context, r spec.Resource) error
+    Validate(ctx context.Context, r spec.Resource, p spec.Policies) error
+    Plan(ctx context.Context, r spec.Resource, p spec.Policies) (Diff, error)
+    Apply(ctx context.Context, r spec.Resource, p spec.Policies) (Result, error)
+    Destroy(ctx context.Context, r spec.Resource, p spec.Policies) error
 }
 ```
 
-Nessuna implementazione concreta esiste ancora: solo l'interfaccia e i tipi
-di supporto `Diff`/`Result`/`Action`/`Status`.
+`spec.Policies` is passed to every method (RFC 002 §2.5) precisely so a
+provider can enforce constraints such as `Policies.AllowedRegions`, which
+would otherwise remain unenforceable at the provider level.
 
-## Pacchetto `internal/engine`
+### `internal/provider/aws` (RFC 002, 003, 004)
 
-`DefaultEngine` orchestra `Validate`/`Plan`/`Apply` su una `Specification`,
-mantenendo un registry immutabile (copiato in `New`) di `CloudProvider`
-indicizzato per `spec.Provider`.
+First concrete implementation of `CloudProvider`, based on the Pulumi
+Automation API (inline program in Go; no `pulumi` process is shelled out
+manually by our code — the Automation API requires it to be installed on
+the machine, but invokes it itself).
 
-Comportamento rilevante:
+- **Supported ResourceTypes**: `object_storage` → S3 (`S3Properties`:
+  `bucket_name`, `region`, `versioning`/`encryption`/`block_public_access`
+  as `*bool` with a secure default when absent — `encryption` and
+  `block_public_access` default to `true`, `versioning` defaults to
+  `false`) and `cross_account_role` → cross-account IAM role
+  (`CrossAccountRoleProperties`: `enabled` as a kill switch,
+  `trusted_account_id`, `external_id` mandatory against the confused
+  deputy problem, `permissions`/`resource_arns` with no full wildcard,
+  cap of 20 entries). Other `ResourceType`s return
+  `ErrUnsupportedResourceType`.
+- **Mass Assignment at the provider level**: `decodeProperties`
+  re-marshals `Resource.Properties` and re-decodes it with
+  `DisallowUnknownFields`, then validates it with
+  `go-playground/validator` (same two-tier pattern as `internal/spec`);
+  it rejects upfront keys whose names are reminiscent of credentials
+  (`access_key`, `secret`, `password`, `token`, ...) regardless of the
+  schema.
+- **Policy enforcement**: `Validate` applies `Policies.AllowedRegions` to
+  `object_storage` (the resource's region) and enforces fail-closed
+  behavior on `cross_account_role` when `AllowedRegions` is empty (RFC
+  003 §2.3: IAM is global on AWS, so the region constraint translates
+  into an `aws:RequestedRegion` `Condition` on the generated policy).
+- **State**: local filesystem backend (`CLOUDSDD_STATE_DIR`, default
+  `~/.cloudsdd/state`), passphrase-based secrets provider
+  (`CLOUDSDD_PULUMI_PASSPHRASE`, mandatory — `NewProvider` fails
+  explicitly if absent), one Pulumi stack per `Resource.ID`.
+- **Credentials**: defaults to the standard AWS SDK credential chain (RFC
+  002 §2.4). With `Resource.Account` set, the Engine instead resolves a
+  `DeploymentTarget` and uses credentials obtained via STS AssumeRole
+  (`NewTargetProviderFactory`, RFC 004 §4), passed explicitly to the
+  Pulumi AWS provider (never written to disk).
 
-- `Validate` esegue prima `spec.Validate` (dominio), poi delega la
-  validazione per-risorsa al provider risolto.
-- `Plan`/`Apply` richiamano `Validate` come precondizione (fail-fast: nessuna
-  chiamata a un provider avviene su una Specifica non valida).
-- Se `Resource.Provider == "agnostic"`, l'Engine restituisce
-  `ErrAgnosticResolutionNotImplemented`: la policy di risoluzione automatica
-  del provider è una domanda aperta della RFC 001 (§5, punto 2) e non è
-  ancora stata decisa né implementata.
-- Provider non registrati producono `ErrProviderNotFound`, sempre
-  ispezionabile con `errors.Is`.
+## Package `internal/engine`
 
-## Sicurezza
+`DefaultEngine` orchestrates `Validate`/`Plan`/`Apply` on a
+`Specification`, maintaining an immutable registry (copied in `New`) of
+`CloudProvider` indexed by `spec.Provider`.
 
-Misure attive ad oggi (si veda anche `docs/rfc/001-...md` §3):
+Relevant behavior:
 
-| Minaccia OWASP API Top 10 | Mitigazione attuale |
+- `Validate` first runs `spec.Validate` (domain), then delegates
+  per-resource validation to the resolved provider, also passing
+  `s.Policies`.
+- `Plan`/`Apply` call `Validate` as a precondition (fail-fast: no call to
+  a provider happens on an invalid Specification).
+- If `Resource.Provider == "agnostic"` (and `Resource.Account` is empty),
+  the Engine returns `ErrAgnosticResolutionNotImplemented`: the automatic
+  provider resolution policy is an open question from RFC 001 (§5, point
+  2) and has not yet been decided or implemented.
+- Unregistered providers produce `ErrProviderNotFound`.
+- **`DeploymentTarget` (RFC 004)**: when `Resource.Account` is set, the
+  Engine instead resolves a `DeploymentTarget` registered via
+  `engine.WithDeploymentTargets` — never part of the JSON Specification,
+  so as to keep "what to create" separate from "how to authenticate" (RFC
+  004 §2.1). A target with `Enabled == false` produces
+  `ErrDeploymentTargetDisabled` without contacting real infrastructure
+  (kill switch, RFC 004 §2.2); an unknown target produces
+  `ErrDeploymentTargetNotFound`; a provider/target mismatch produces
+  `ErrDeploymentTargetProviderMismatch`. The `CloudProvider` scoped to the
+  target is built by a `TargetProviderFactory` registered via
+  `engine.WithTargetProviderFactory` (implemented by the concrete
+  provider package, e.g. `aws.NewTargetProviderFactory` — the Engine
+  itself stays cloud-agnostic and knows nothing about STS/AssumeRole) and
+  cached for the rest of the Engine's lifetime.
+
+## Security
+
+Measures active as of today (see also RFC 001 §3, 002 §2.4-2.5, 003
+§2.2-2.3, 004 §3):
+
+| OWASP API Top 10 threat | Current mitigation |
 |---|---|
-| Mass Assignment | Decodifica JSON strict (`DisallowUnknownFields`) + validazione a doppio livello |
-| Input ostile / crash del parser | Fuzz test nativo Go su `spec.Parse` |
-| BOLA | Non ancora applicabile: non esiste ancora un livello di storage/state multi-tenant |
-| Unrestricted Resource Consumption | Non ancora applicabile: non esiste ancora un livello HTTP/API |
+| Mass Assignment | Strict JSON decoding (`DisallowUnknownFields`) + two-tier validation, both in `internal/spec` and in every provider (`internal/provider/aws`) |
+| Hostile input / parser crash | Native Go fuzz test on `spec.Parse` |
+| Credentials in the Specification | Denylist of credential-like field names in `decodeProperties`, independent of the schema |
+| Confused deputy (cross-account) | `external_id` mandatory on `cross_account_role` (RFC 003) and on AWS `DeploymentTarget` (RFC 004) |
+| Cross-account privilege escalation | No full wildcard (`*`) permissions on `cross_account_role`; `AdministratorAccess` explicitly discouraged for `DeploymentTarget`s (RFC 004 §3, principles also valid for GCP/Azure once implemented) |
+| Region bypass / uncontrolled cost | `Policies.AllowedRegions` enforced by every provider; `cross_account_role` is fail-closed if `AllowedRegions` is empty |
+| BOLA | Not yet applicable: no multi-tenant storage/state layer exists yet (note: the stack-per-resource design in RFC 002 §2.3 has no tenant namespacing, open question) |
+| Unrestricted Resource Consumption | Not yet applicable at the HTTP/API level (it does not exist yet); at the provider level, a cap of 20 entries on IAM lists (RFC 003) |
 
-Scan eseguiti prima di questo commit: `gosec ./...` (0 issue), `govulncheck
-./...` (0 vulnerabilità raggiungibili dal codice; una dipendenza transitiva,
-`golang.org/x/text`, è stata aggiornata proattivamente alla versione con
-fix).
+Scans run before this commit: `gosec ./...` (0 issues; 2 false positives
+suppressed with `#nosec` and inline justification — an env var name
+flagged as G101, a path from an env var flagged as G703 path-traversal
+despite being operator-controlled, not Specification input),
+`govulncheck ./...` (0 vulnerabilities reachable from the code;
+`go.opentelemetry.io/otel` and `github.com/klauspost/compress` proactively
+upgraded to the versions with fixes; one unreachable vulnerability with no
+available fix remains in `golang.org/x/crypto/openpgp`, a transitive
+dependency not invoked by our code).
 
 ## Testing
 
-- Test table-driven per `internal/spec` (parsing e validazione) e
-  `internal/engine` (orchestrazione, incluso un `mockProvider` di test).
-  Copertura: `internal/spec` 90.9%, `internal/engine` 90.7%.
-- Fuzz test nativo Go per `spec.Parse`.
-- Nessun test di integrazione (`testcontainers-go`) ancora presente: non
-  esistono ancora componenti con dipendenze esterne (database, provider
-  reali) da testare in questo modo.
+- Table-driven tests for `internal/spec` (90.9%), `internal/engine`
+  (93.2%, including a test `mockProvider` and `DeploymentTarget`
+  resolution), and `internal/provider/aws` (61.4%).
+- Native Go fuzz test for `spec.Parse`.
+- `internal/provider/aws` coverage is lower than the others because
+  `Plan`/`Apply`/`Destroy`/`upsertStack`/`NewTargetProviderFactory`
+  require, respectively, the `pulumi` CLI to be installed and AWS
+  credentials/network access for STS: not runnable in a sandboxed
+  environment without these external dependencies. The pure logic
+  (Properties decoding/validation, IAM policy document construction,
+  ResourceType dispatch, Diff/Result mapping) is instead covered with
+  table-driven tests, including tests that exercise Pulumi resource
+  declaration via `pulumi.WithMocks` (no need for Docker or the pulumi
+  CLI for these).
+- Integration tests (`testcontainers-go` + LocalStack) present behind the
+  `integration` build tag
+  (`go test -tags=integration ./internal/provider/aws/... -run TestIntegration`):
+  Plan → Apply → verify via SDK → Destroy cycle for `object_storage`.
+  Require Docker and the `pulumi` CLI; not run by the default suite nor
+  verified in environments lacking these dependencies.
 
-## Fuori scope / prossimi passi
+## Out of scope / next steps
 
-Vedi RFC 001 §4 e §5. In sintesi, non ancora implementati: provider
-concreti, algoritmo di planning/diffing reale (oggi `Plan`/`Apply` sono
-puri pass-through verso il provider), persistenza dello stato, API layer
-HTTP, autenticazione/autorizzazione multi-tenant, traduzione NL → Specifica.
+See RFC 001 §4-5, RFC 002 §6, RFC 003 §5-6, RFC 004 §5-6. In summary, not
+yet implemented: GCP/Azure providers, other AWS `ResourceType`s
+(`relational_database`, `compute_instance`, `container_service`),
+resolution of `provider: "agnostic"`, references/dependencies between
+resources in the same Specification, cost estimation and enforcement of
+`max_cost_monthly`, multi-tenant isolation of state (real BOLA), HTTP API
+layer, NL → Specification translation.

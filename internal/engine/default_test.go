@@ -9,7 +9,7 @@ import (
 	"cloudsdd/internal/spec"
 )
 
-// mockProvider è un CloudProvider di test interamente controllabile dal chiamante.
+// mockProvider is a CloudProvider fully controllable by the test caller.
 type mockProvider struct {
 	name        string
 	validateErr error
@@ -21,19 +21,21 @@ type mockProvider struct {
 
 func (m *mockProvider) Name() string { return m.name }
 
-func (m *mockProvider) Validate(ctx context.Context, r spec.Resource) error {
+func (m *mockProvider) Validate(ctx context.Context, r spec.Resource, p spec.Policies) error {
 	return m.validateErr
 }
 
-func (m *mockProvider) Plan(ctx context.Context, r spec.Resource) (provider.Diff, error) {
+func (m *mockProvider) Plan(ctx context.Context, r spec.Resource, p spec.Policies) (provider.Diff, error) {
 	return m.plan, m.planErr
 }
 
-func (m *mockProvider) Apply(ctx context.Context, r spec.Resource) (provider.Result, error) {
+func (m *mockProvider) Apply(ctx context.Context, r spec.Resource, p spec.Policies) (provider.Result, error) {
 	return m.apply, m.applyErr
 }
 
-func (m *mockProvider) Destroy(ctx context.Context, r spec.Resource) error { return nil }
+func (m *mockProvider) Destroy(ctx context.Context, r spec.Resource, p spec.Policies) error {
+	return nil
+}
 
 var _ provider.CloudProvider = (*mockProvider)(nil)
 
@@ -57,7 +59,7 @@ func TestDefaultEngine_Validate(t *testing.T) {
 		name      string
 		providers map[spec.Provider]provider.CloudProvider
 		spec      spec.Specification
-		wantErr   error // se non nil, verificato con errors.Is
+		wantErr   error // if non-nil, checked with errors.Is
 		wantAnErr bool
 	}{
 		{
@@ -159,6 +161,98 @@ func TestDefaultEngine_Apply_ProviderError(t *testing.T) {
 	if _, err := e.Apply(context.Background(), specWithProvider(spec.ProviderAWS)); err == nil {
 		t.Fatal("Apply() expected error, got nil")
 	}
+}
+
+func specWithAccount(account string) spec.Specification {
+	s := specWithProvider(spec.ProviderAWS)
+	s.Resources[0].Account = account
+	return s
+}
+
+func TestDefaultEngine_ResolveTargetProvider(t *testing.T) {
+	targetProvider := &mockProvider{name: "aws-target"}
+	factoryCalls := 0
+	factory := func(ctx context.Context, target DeploymentTarget) (provider.CloudProvider, error) {
+		factoryCalls++
+		return targetProvider, nil
+	}
+
+	tests := []struct {
+		name    string
+		targets map[string]DeploymentTarget
+		opts    []Option
+		account string
+		wantErr error
+	}{
+		{
+			name:    "account references unknown target",
+			targets: map[string]DeploymentTarget{},
+			account: "prod",
+			wantErr: ErrDeploymentTargetNotFound,
+		},
+		{
+			name: "disabled target rejected without contacting factory",
+			targets: map[string]DeploymentTarget{
+				"prod": {Name: "prod", Provider: spec.ProviderAWS, Enabled: false},
+			},
+			account: "prod",
+			wantErr: ErrDeploymentTargetDisabled,
+		},
+		{
+			name: "provider mismatch rejected",
+			targets: map[string]DeploymentTarget{
+				"prod": {Name: "prod", Provider: spec.ProviderGCP, Enabled: true},
+			},
+			account: "prod",
+			wantErr: ErrDeploymentTargetProviderMismatch,
+		},
+		{
+			name: "enabled target without registered factory",
+			targets: map[string]DeploymentTarget{
+				"prod": {Name: "prod", Provider: spec.ProviderAWS, Enabled: true},
+			},
+			account: "prod",
+			wantErr: ErrNoTargetProviderFactory,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := New(map[spec.Provider]provider.CloudProvider{}, WithDeploymentTargets(tt.targets))
+			err := e.Validate(context.Background(), specWithAccount(tt.account))
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want errors.Is %v", err, tt.wantErr)
+			}
+		})
+	}
+
+	t.Run("enabled target with factory is used and cached", func(t *testing.T) {
+		e := New(
+			map[spec.Provider]provider.CloudProvider{},
+			WithDeploymentTargets(map[string]DeploymentTarget{
+				"prod": {Name: "prod", Provider: spec.ProviderAWS, Enabled: true},
+			}),
+			WithTargetProviderFactory(spec.ProviderAWS, factory),
+		)
+
+		s := specWithAccount("prod")
+		if err := e.Validate(context.Background(), s); err != nil {
+			t.Fatalf("Validate() unexpected error: %v", err)
+		}
+		if _, err := e.Plan(context.Background(), s); err != nil {
+			t.Fatalf("Plan() unexpected error: %v", err)
+		}
+		if factoryCalls != 1 {
+			t.Fatalf("factory calls = %d, want 1 (target provider should be cached)", factoryCalls)
+		}
+	})
+
+	t.Run("resource without account is unaffected", func(t *testing.T) {
+		e := New(map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: &mockProvider{name: "aws"}})
+		if err := e.Validate(context.Background(), specWithProvider(spec.ProviderAWS)); err != nil {
+			t.Fatalf("Validate() unexpected error: %v", err)
+		}
+	})
 }
 
 func TestNew_RegistryIsolation(t *testing.T) {

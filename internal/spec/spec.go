@@ -1,8 +1,8 @@
-// Package spec definisce la rappresentazione tipizzata della Specifica SDD,
-// la "Single Source of Truth" descritta in docs/rfc/001-core-architecture-and-json-schema.md.
+// Package spec defines the typed representation of the SDD Specification,
+// the "Single Source of Truth" described in docs/rfc/001-core-architecture-and-json-schema.md.
 package spec
 
-// Intent descrive l'operazione richiesta sulla Specifica.
+// Intent describes the operation requested on the Specification.
 type Intent string
 
 const (
@@ -12,7 +12,7 @@ const (
 	IntentPlan    Intent = "plan"
 )
 
-// ResourceType enumera i tipi di risorsa supportati dallo schema v1.0.
+// ResourceType enumerates the resource types supported by the v1.0 schema.
 type ResourceType string
 
 const (
@@ -20,10 +20,14 @@ const (
 	ResourceTypeObjectStorage      ResourceType = "object_storage"
 	ResourceTypeComputeInstance    ResourceType = "compute_instance"
 	ResourceTypeContainerService   ResourceType = "container_service"
+	// ResourceTypeCrossAccountRole represents a cross-account IAM role
+	// (RFC 003): grants an external AWS account the ability to assume a
+	// role with restricted permissions toward specific resources.
+	ResourceTypeCrossAccountRole ResourceType = "cross_account_role"
 )
 
-// Provider identifica il provider cloud target di una risorsa, oppure
-// "agnostic" per delegarne la risoluzione all'Engine.
+// Provider identifies the target cloud provider of a resource, or
+// "agnostic" to delegate its resolution to the Engine.
 type Provider string
 
 const (
@@ -33,7 +37,7 @@ const (
 	ProviderAzure    Provider = "azure"
 )
 
-// Specification è la rappresentazione root della Specifica SDD in ingresso.
+// Specification is the root representation of the incoming SDD Specification.
 type Specification struct {
 	SDDVersion string     `json:"sdd_version" validate:"required,eq=1.0"`
 	Intent     Intent     `json:"intent" validate:"required,oneof=deploy update destroy plan"`
@@ -41,21 +45,29 @@ type Specification struct {
 	Policies   Policies   `json:"policies"`
 }
 
-// Resource rappresenta una singola risorsa richiesta nella Specifica.
+// Resource represents a single resource requested in the Specification.
 //
-// Properties resta intenzionalmente un contenitore di trasporto JSON
-// generico: ogni provider concreto è responsabile di decodificarlo in una
-// struct tipizzata e validata specifica per il proprio ResourceType, per
-// bloccare il Mass Assignment prima che i dati raggiungano la logica di
-// business (vedi RFC 001, sezione "Considerazioni di Sicurezza").
+// Properties intentionally remains a generic JSON transport container:
+// each concrete provider is responsible for decoding it into a typed and
+// validated struct specific to its own ResourceType, so as to block Mass
+// Assignment before the data reaches business logic (see RFC 001, section
+// "Security Considerations").
 type Resource struct {
-	ID         string         `json:"id" validate:"required,resourceid"`
-	Type       ResourceType   `json:"type" validate:"required,oneof=relational_database object_storage compute_instance container_service"`
-	Provider   Provider       `json:"provider" validate:"required,oneof=agnostic aws gcp azure"`
+	ID       string       `json:"id" validate:"required,resourceid"`
+	Type     ResourceType `json:"type" validate:"required,oneof=relational_database object_storage compute_instance container_service cross_account_role"`
+	Provider Provider     `json:"provider" validate:"required,oneof=agnostic aws gcp azure"`
+	// Account references, by name, a DeploymentTarget configured at the
+	// engine level (RFC 004 §2.2), used to apply the resource with
+	// credentials assumed toward an external account/project/subscription
+	// instead of the default credential chain. Optional: if absent,
+	// behavior is unchanged from RFC 002 §2.4. Deliberately never
+	// references a secret: only a symbolic name resolved by the engine,
+	// never an ARN or a credential.
+	Account    string         `json:"account,omitempty" validate:"omitempty,max=64"`
 	Properties map[string]any `json:"properties" validate:"required"`
 }
 
-// Policies esprime i vincoli globali applicati a tutte le risorse della Specifica.
+// Policies expresses the global constraints applied to all resources in the Specification.
 type Policies struct {
 	MaxCostMonthly *float64 `json:"max_cost_monthly,omitempty" validate:"omitempty,gt=0"`
 	AllowedRegions []string `json:"allowed_regions,omitempty"`
