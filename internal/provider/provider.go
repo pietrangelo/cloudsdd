@@ -26,9 +26,13 @@ const (
 // Specification) and the current state detected by the provider for a
 // single resource, before it is applied.
 type Diff struct {
-	ResourceID string         `json:"resource_id"`
-	Action     Action         `json:"action"`
-	Changes    map[string]any `json:"changes,omitempty"`
+	ResourceID string `json:"resource_id"`
+	// Region is the effective region this Diff was computed for, set by
+	// the Engine's multi-region fan-out (RFC 005 §2.4.2, §2.7). Empty for
+	// an unscoped resource.
+	Region  string         `json:"region,omitempty"`
+	Action  Action         `json:"action"`
+	Changes map[string]any `json:"changes,omitempty"`
 }
 
 // Status describes the outcome of applying a resource.
@@ -42,9 +46,13 @@ const (
 
 // Result represents the outcome of applying (or destroying) a single resource.
 type Result struct {
-	ResourceID string         `json:"resource_id"`
-	Status     Status         `json:"status"`
-	Details    map[string]any `json:"details,omitempty"`
+	ResourceID string `json:"resource_id"`
+	// Region is the effective region this Result was produced for, set by
+	// the Engine's multi-region fan-out (RFC 005 §2.4.2, §2.7). Empty for
+	// an unscoped resource.
+	Region  string         `json:"region,omitempty"`
+	Status  Status         `json:"status"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 // CloudProvider is the contract implemented by every concrete cloud

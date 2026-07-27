@@ -52,23 +52,76 @@ components:
             never an ARN or a credential, only a reference resolved by
             the engine. Optional: if absent, the provider's default
             credentials are used (RFC 002 §2.4).
+        scope:
+          $ref: "#/components/schemas/Scope"
         properties:
           type: object
+    Scope:
+      description: >
+        Where a resource is deployed within its Account (RFC 005 §2.2):
+        logical environment, region(s), zones, and whether it is allowed
+        to cross an Account/Environment boundary. Orthogonal to `account`
+        (RFC 004), which carries which credentials to use.
+      type: object
+      additionalProperties: false
+      properties:
+        environment:
+          type: string
+          pattern: "^[a-zA-Z0-9_-]{1,32}$"
+          description: >
+            Free-form logical stage name (e.g. "dev", "staging",
+            "production"). Optional: absent means unscoped.
+        region:
+          type: string
+          description: >
+            Single-region placement. Mutually exclusive with `regions`.
+            Format is provider-specific (validated by the resolved
+            CloudProvider, not at this layer).
+        regions:
+          type: array
+          minItems: 2
+          maxItems: 10
+          items:
+            type: string
+          description: >
+            Multi-region placement: the Engine fans this out into one
+            Plan/Apply/Validate call per entry (RFC 005 §2.4.2). Mutually
+            exclusive with `region`.
+        zones:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            type: string
+          description: >
+            Availability-zone pinning/spread, forwarded to
+            resource-type-specific HA logic. No ResourceType implemented
+            yet consumes it (RFC 005 §2.4.3).
+        sealed:
+          type: boolean
+          default: true
+          description: >
+            When true (the default when absent), forbids the resource
+            from declaring any trust or access relationship toward a
+            different Account/Environment (RFC 005 §2.5, "sealed unless
+            otherwise specified"). A resource type that is inherently
+            cross-boundary (e.g. cross_account_role) must set this
+            explicitly to false.
     S3ObjectStorageProperties:
       description: >
         Properties of a Resource with type=object_storage, provider=aws
         (RFC 002 §2.6). Encryption and block_public_access are secure by
-        default when absent.
+        default when absent. The region is not part of these properties:
+        it is expressed via Resource.scope.region (RFC 005 §2.3), which
+        this ResourceType requires.
       type: object
       additionalProperties: false
-      required: [bucket_name, region]
+      required: [bucket_name]
       properties:
         bucket_name:
           type: string
           minLength: 3
           maxLength: 63
-        region:
-          type: string
         versioning:
           type: boolean
           default: false
@@ -82,7 +135,10 @@ components:
       description: >
         Properties of a Resource with type=cross_account_role,
         provider=aws (RFC 003 §2.2). Requires a non-empty
-        Policies.allowed_regions (fail-closed, RFC 003 §2.3).
+        Policies.allowed_regions (fail-closed, RFC 003 §2.3). This
+        ResourceType is inherently cross-account, so the enclosing
+        Resource also requires scope.sealed=false (RFC 005 §2.5) and
+        rejects scope.region/regions/zones (IAM is global).
       type: object
       additionalProperties: false
       required: [role_name, trusted_account_id, external_id, permissions, resource_arns]

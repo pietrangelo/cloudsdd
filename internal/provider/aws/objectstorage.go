@@ -17,9 +17,13 @@ import (
 // absence activates a secure default (Effective*, below) instead of the
 // zero-value of a plain bool, which for Encryption/BlockPublicAccess
 // would be a silent insecure default.
+// Region is deliberately not part of S3Properties: it moved to the
+// cloud-agnostic spec.Resource.Scope.Region (RFC 005 §2.3), so it can be
+// validated and fanned out for multi-region uniformly by the Engine
+// instead of being duplicated in every provider-specific Properties
+// struct.
 type S3Properties struct {
 	BucketName        string `json:"bucket_name" validate:"required,min=3,max=63,s3bucketname"`
-	Region            string `json:"region" validate:"required,awsregion"`
 	Versioning        *bool  `json:"versioning,omitempty"`
 	Encryption        *bool  `json:"encryption,omitempty"`
 	BlockPublicAccess *bool  `json:"block_public_access,omitempty"`

@@ -16,9 +16,45 @@ import (
 )
 
 func TestStackNameFor(t *testing.T) {
-	if got := stackNameFor("app-data"); got != "app-data" {
-		t.Errorf("stackNameFor(%q) = %q, want %q", "app-data", got, "app-data")
+	tests := []struct {
+		name        string
+		account     string
+		environment string
+		region      string
+		resourceID  string
+		want        string
+	}{
+		{name: "fully unscoped preserves pre-RFC-005 behavior", resourceID: "app-data", want: "app-data"},
+		{name: "account only", account: "prod", resourceID: "app-data", want: "prod::app-data"},
+		{name: "environment only", environment: "staging", resourceID: "app-data", want: "staging::app-data"},
+		{name: "region only", region: "eu-central-1", resourceID: "app-data", want: "eu-central-1::app-data"},
+		{
+			name:    "account and environment isolate a shared resource id",
+			account: "shared-account", environment: "staging", resourceID: "app-data",
+			want: "shared-account::staging::app-data",
+		},
+		{
+			name:    "all segments present",
+			account: "prod", environment: "production", region: "eu-central-1", resourceID: "app-data",
+			want: "prod::production::eu-central-1::app-data",
+		},
 	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stackNameFor(tt.account, tt.environment, tt.region, tt.resourceID); got != tt.want {
+				t.Errorf("stackNameFor(%q, %q, %q, %q) = %q, want %q", tt.account, tt.environment, tt.region, tt.resourceID, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("same resource id, different accounts, never collide", func(t *testing.T) {
+		staging := stackNameFor("staging-account", "", "", "app-db")
+		production := stackNameFor("production-account", "", "", "app-db")
+		if staging == production {
+			t.Fatalf("stackNameFor produced colliding stack names for different accounts: %q", staging)
+		}
+	})
 }
 
 func TestSetRegionConfig_EmptyRegionIsNoop(t *testing.T) {

@@ -90,15 +90,29 @@ var _ provider.CloudProvider = (*AWSProvider)(nil)
 func (p *AWSProvider) Validate(ctx context.Context, r spec.Resource, policies spec.Policies) error {
 	switch r.Type {
 	case spec.ResourceTypeObjectStorage:
-		s3p, err := decodeS3Properties(r.Properties)
-		if err != nil {
+		if _, err := decodeS3Properties(r.Properties); err != nil {
 			return err
 		}
-		return validateRegionAllowed(s3p.Region, policies.AllowedRegions)
+		if len(r.Scope.Zones) > 0 {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrZonesNotSupported)
+		}
+		if r.Scope.Region == "" {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrRegionRequired)
+		}
+		if err := validateAWSRegionFormat(r.Scope.Region); err != nil {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
+		}
+		return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
 
 	case spec.ResourceTypeCrossAccountRole:
 		if _, err := decodeCrossAccountRoleProperties(r.Properties); err != nil {
 			return err
+		}
+		if r.Scope.EffectiveSealed() {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrSealedCrossAccountRole)
+		}
+		if r.Scope.Region != "" || len(r.Scope.Regions) > 0 || len(r.Scope.Zones) > 0 {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrGlobalResourceScoped)
 		}
 		if len(policies.AllowedRegions) == 0 {
 			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrMissingRegionPolicy)
@@ -122,7 +136,7 @@ func (p *AWSProvider) Plan(ctx context.Context, r spec.Resource, policies spec.P
 		return provider.Diff{}, err
 	}
 
-	stack, err := p.upsertStack(ctx, r.ID, program)
+	stack, err := p.upsertStack(ctx, r.Account, r.Scope.Environment, region, r.ID, program)
 	if err != nil {
 		return provider.Diff{}, fmt.Errorf("aws: failed to prepare stack for resource %q: %w", r.ID, err)
 	}
@@ -153,7 +167,7 @@ func (p *AWSProvider) Apply(ctx context.Context, r spec.Resource, policies spec.
 		return provider.Result{}, err
 	}
 
-	stack, err := p.upsertStack(ctx, r.ID, program)
+	stack, err := p.upsertStack(ctx, r.Account, r.Scope.Environment, region, r.ID, program)
 	if err != nil {
 		return provider.Result{}, fmt.Errorf("aws: failed to prepare stack for resource %q: %w", r.ID, err)
 	}
@@ -183,7 +197,7 @@ func (p *AWSProvider) Destroy(ctx context.Context, r spec.Resource, policies spe
 		return err
 	}
 
-	stack, err := p.upsertStack(ctx, r.ID, program)
+	stack, err := p.upsertStack(ctx, r.Account, r.Scope.Environment, region, r.ID, program)
 	if err != nil {
 		return fmt.Errorf("aws: failed to prepare stack for resource %q: %w", r.ID, err)
 	}
@@ -194,7 +208,7 @@ func (p *AWSProvider) Destroy(ctx context.Context, r spec.Resource, policies spe
 	if _, err := stack.Destroy(ctx); err != nil {
 		return fmt.Errorf("aws: destroy failed for resource %q: %w", r.ID, err)
 	}
-	if err := stack.Workspace().RemoveStack(ctx, stackNameFor(r.ID)); err != nil {
+	if err := stack.Workspace().RemoveStack(ctx, stackNameFor(r.Account, r.Scope.Environment, region, r.ID)); err != nil {
 		return fmt.Errorf("aws: failed to remove stack for resource %q: %w", r.ID, err)
 	}
 	return nil
@@ -211,14 +225,15 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		if err != nil {
 			return nil, "", err
 		}
+		region := r.Scope.Region
 		program := func(ctx *pulumi.Context) error {
-			opts, err := p.providerOpts(ctx, s3p.Region)
+			opts, err := p.providerOpts(ctx, region)
 			if err != nil {
 				return err
 			}
 			return declareS3Bucket(ctx, r.ID, *s3p, opts...)
 		}
-		return program, s3p.Region, nil
+		return program, region, nil
 
 	case spec.ResourceTypeCrossAccountRole:
 		carp, err := decodeCrossAccountRoleProperties(r.Properties)

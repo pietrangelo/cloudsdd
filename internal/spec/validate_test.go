@@ -3,7 +3,10 @@
 
 package spec
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func validSpec() Specification {
 	return Specification{
@@ -89,6 +92,50 @@ func TestValidate(t *testing.T) {
 		{
 			name:    "account reference too long",
 			mutate:  func(s *Specification) { s.Resources[0].Account = string(make([]byte, 65)) },
+			wantErr: true,
+		},
+		{
+			name:    "valid scope with environment and region",
+			mutate:  func(s *Specification) { s.Resources[0].Scope = Scope{Environment: "staging", Region: "eu-central-1"} },
+			wantErr: false,
+		},
+		{
+			name:    "scope environment too long",
+			mutate:  func(s *Specification) { s.Resources[0].Scope = Scope{Environment: string(make([]byte, 33))} },
+			wantErr: true,
+		},
+		{
+			name: "scope region and regions mutually exclusive",
+			mutate: func(s *Specification) {
+				s.Resources[0].Scope = Scope{Region: "eu-central-1", Regions: []string{"eu-west-1", "us-east-1"}}
+			},
+			wantErr: true,
+		},
+		{
+			name:    "scope regions with a single entry rejected",
+			mutate:  func(s *Specification) { s.Resources[0].Scope = Scope{Regions: []string{"eu-central-1"}} },
+			wantErr: true,
+		},
+		{
+			name: "scope regions with more than 10 entries rejected",
+			mutate: func(s *Specification) {
+				regions := make([]string, 11)
+				for i := range regions {
+					regions[i] = fmt.Sprintf("region-%d", i)
+				}
+				s.Resources[0].Scope = Scope{Regions: regions}
+			},
+			wantErr: true,
+		},
+		{
+			name: "scope zones with more than 10 entries rejected",
+			mutate: func(s *Specification) {
+				zones := make([]string, 11)
+				for i := range zones {
+					zones[i] = fmt.Sprintf("zone-%d", i)
+				}
+				s.Resources[0].Scope = Scope{Zones: zones}
+			},
 			wantErr: true,
 		},
 		{

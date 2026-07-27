@@ -58,5 +58,6 @@ results, err := e.Apply(ctx, *s)
 ```
 
 See `docs/openapi.yaml` for the `Specification` schema (including the
-`S3ObjectStorageProperties` and `AWSCrossAccountRoleProperties`
+`Scope` component — environment/region/regions/zones/sealed, RFC 005 §2.2
+— and the `S3ObjectStorageProperties` and `AWSCrossAccountRoleProperties`
 components, reusable once the API is defined).

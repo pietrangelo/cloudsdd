@@ -15,6 +15,8 @@ import (
 func FuzzParse(f *testing.F) {
 	seeds := []string{
 		`{"sdd_version": "1.0", "intent": "deploy", "resources": [{"id": "a", "type": "relational_database", "provider": "agnostic", "properties": {}}]}`,
+		`{"sdd_version": "1.0", "intent": "deploy", "resources": [{"id": "a", "type": "object_storage", "provider": "aws", "properties": {}, "scope": {"environment": "staging", "region": "eu-central-1", "sealed": false}}]}`,
+		`{"sdd_version": "1.0", "intent": "deploy", "resources": [{"id": "a", "type": "object_storage", "provider": "aws", "properties": {}, "scope": {"regions": ["eu-central-1", "us-east-1"], "zones": ["eu-central-1a"]}}]}`,
 		`{}`,
 		`null`,
 		`[]`,

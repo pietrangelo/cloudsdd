@@ -6,6 +6,7 @@ package aws
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	pulumiaws "github.com/pulumi/pulumi-aws/sdk/v6/go/aws"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
@@ -17,24 +18,44 @@ import (
 	"cloudsdd/internal/provider"
 )
 
-// stackNameFor maps a Resource.ID onto the Pulumi stack that represents
-// it: one stack per resource (RFC 002 §2.3), to isolate Plan/Destroy per
-// individual resource.
-func stackNameFor(resourceID string) string { return resourceID }
+// stackScopeSeparator joins the components of a composite stack name
+// (RFC 005 §2.6). Not valid in the resourceid or scopename charsets, nor
+// in an AWS region string, so it can never be produced by concatenating
+// adjacent segments ambiguously.
+const stackScopeSeparator = "::"
+
+// stackNameFor maps a resource's (account, environment, region, resourceID)
+// scope onto the Pulumi stack that represents it (RFC 005 §2.6): state
+// isolation across Account/Environment/Region, closing a gap where two
+// resources sharing a Resource.ID but scoped to different accounts or
+// environments would otherwise collide in the same local Pulumi stack.
+// Empty segments are omitted, so an unscoped resource (no account, no
+// environment, no region — the case before this RFC) still produces the
+// bare resourceID, unchanged.
+func stackNameFor(account, environment, region, resourceID string) string {
+	parts := make([]string, 0, 4)
+	for _, p := range []string{account, environment, region} {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	parts = append(parts, resourceID)
+	return strings.Join(parts, stackScopeSeparator)
+}
 
 // upsertStack creates (or selects, if it already exists) the Pulumi stack
-// for resourceID, with a local filesystem state backend and a
+// for the given scope, with a local filesystem state backend and a
 // passphrase-based secrets provider (RFC 002 §2.3). The passphrase is
 // passed only as a Pulumi workspace environment variable, never written
 // to disk or logged.
-func (p *AWSProvider) upsertStack(ctx context.Context, resourceID string, program pulumi.RunFunc) (auto.Stack, error) {
+func (p *AWSProvider) upsertStack(ctx context.Context, account, environment, region, resourceID string, program pulumi.RunFunc) (auto.Stack, error) {
 	proj := workspace.Project{
 		Name:    tokens.PackageName(pulumiProjectName),
 		Runtime: workspace.NewProjectRuntimeInfo("go", nil),
 		Backend: &workspace.ProjectBackend{URL: "file://" + p.stateDir},
 	}
 
-	return auto.UpsertStackInlineSource(ctx, stackNameFor(resourceID), pulumiProjectName, program,
+	return auto.UpsertStackInlineSource(ctx, stackNameFor(account, environment, region, resourceID), pulumiProjectName, program,
 		auto.Project(proj),
 		auto.SecretsProvider("passphrase"),
 		auto.EnvVars(map[string]string{"PULUMI_CONFIG_PASSPHRASE": p.passphrase}),

@@ -52,12 +52,14 @@ func TestAWSProvider_Validate(t *testing.T) {
 		ID:         "app-data",
 		Type:       spec.ResourceTypeObjectStorage,
 		Provider:   spec.ProviderAWS,
-		Properties: map[string]any{"bucket_name": "app-data", "region": "eu-central-1"},
+		Scope:      spec.Scope{Region: "eu-central-1"},
+		Properties: map[string]any{"bucket_name": "app-data"},
 	}
 	validRole := spec.Resource{
 		ID:         "partner-access",
 		Type:       spec.ResourceTypeCrossAccountRole,
 		Provider:   spec.ProviderAWS,
+		Scope:      spec.Scope{Sealed: boolPtr(false)},
 		Properties: validCrossAccountRoleProps(),
 	}
 
@@ -90,6 +92,42 @@ func TestAWSProvider_Validate(t *testing.T) {
 			resource: validRole,
 			policies: spec.Policies{AllowedRegions: []string{"eu-central-1"}},
 			wantAny:  false,
+		},
+		{
+			name: "cross_account_role without sealed=false is rejected (sealed by default)",
+			resource: spec.Resource{
+				ID: "partner-access", Type: spec.ResourceTypeCrossAccountRole, Provider: spec.ProviderAWS,
+				Properties: validCrossAccountRoleProps(),
+			},
+			policies: spec.Policies{AllowedRegions: []string{"eu-central-1"}},
+			wantErr:  ErrSealedCrossAccountRole,
+		},
+		{
+			name: "cross_account_role with a region set is rejected (IAM is global)",
+			resource: spec.Resource{
+				ID: "partner-access", Type: spec.ResourceTypeCrossAccountRole, Provider: spec.ProviderAWS,
+				Scope:      spec.Scope{Sealed: boolPtr(false), Region: "eu-central-1"},
+				Properties: validCrossAccountRoleProps(),
+			},
+			policies: spec.Policies{AllowedRegions: []string{"eu-central-1"}},
+			wantErr:  ErrGlobalResourceScoped,
+		},
+		{
+			name: "object_storage without scope.region is rejected",
+			resource: spec.Resource{
+				ID: "app-data", Type: spec.ResourceTypeObjectStorage, Provider: spec.ProviderAWS,
+				Properties: map[string]any{"bucket_name": "app-data"},
+			},
+			wantErr: ErrRegionRequired,
+		},
+		{
+			name: "object_storage with zones is rejected (not zone-aware)",
+			resource: spec.Resource{
+				ID: "app-data", Type: spec.ResourceTypeObjectStorage, Provider: spec.ProviderAWS,
+				Scope:      spec.Scope{Region: "eu-central-1", Zones: []string{"eu-central-1a"}},
+				Properties: map[string]any{"bucket_name": "app-data"},
+			},
+			wantErr: ErrZonesNotSupported,
 		},
 		{
 			name: "unsupported resource type",
@@ -138,7 +176,8 @@ func TestAWSProvider_resourceProgram(t *testing.T) {
 			ID:         "app-data",
 			Type:       spec.ResourceTypeObjectStorage,
 			Provider:   spec.ProviderAWS,
-			Properties: map[string]any{"bucket_name": "app-data", "region": "eu-central-1"},
+			Scope:      spec.Scope{Region: "eu-central-1"},
+			Properties: map[string]any{"bucket_name": "app-data"},
 		}, spec.Policies{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)

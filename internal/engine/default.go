@@ -122,6 +122,10 @@ func (e *DefaultEngine) resolveTargetProvider(ctx context.Context, r spec.Resour
 	return p, nil
 }
 
+// Validate checks the Specification and, for each resource, delegates to
+// the resolved provider once per effective region (RFC 005 §2.4.2): an
+// unscoped resource or one with a single Scope.Region still validates
+// exactly once, preserving pre-RFC-005 behavior.
 func (e *DefaultEngine) Validate(ctx context.Context, s spec.Specification) error {
 	if err := spec.Validate(&s); err != nil {
 		return err
@@ -131,8 +135,10 @@ func (e *DefaultEngine) Validate(ctx context.Context, s spec.Specification) erro
 		if err != nil {
 			return err
 		}
-		if err := p.Validate(ctx, r, s.Policies); err != nil {
-			return fmt.Errorf("engine: resource %q: %w", r.ID, err)
+		for _, region := range effectiveRegions(r.Scope) {
+			if err := p.Validate(ctx, scopedResource(r, region), s.Policies); err != nil {
+				return fmt.Errorf("engine: resource %q: %w", r.ID, err)
+			}
 		}
 	}
 	return nil
@@ -149,11 +155,14 @@ func (e *DefaultEngine) Plan(ctx context.Context, s spec.Specification) ([]provi
 		if err != nil {
 			return nil, err
 		}
-		d, err := p.Plan(ctx, r, s.Policies)
-		if err != nil {
-			return nil, fmt.Errorf("engine: plan failed for resource %q: %w", r.ID, err)
+		for _, region := range effectiveRegions(r.Scope) {
+			d, err := p.Plan(ctx, scopedResource(r, region), s.Policies)
+			if err != nil {
+				return nil, fmt.Errorf("engine: plan failed for resource %q: %w", r.ID, err)
+			}
+			d.Region = region
+			diffs = append(diffs, d)
 		}
-		diffs = append(diffs, d)
 	}
 	return diffs, nil
 }
@@ -169,11 +178,14 @@ func (e *DefaultEngine) Apply(ctx context.Context, s spec.Specification) ([]prov
 		if err != nil {
 			return results, err
 		}
-		res, err := p.Apply(ctx, r, s.Policies)
-		if err != nil {
-			return results, fmt.Errorf("engine: apply failed for resource %q: %w", r.ID, err)
+		for _, region := range effectiveRegions(r.Scope) {
+			res, err := p.Apply(ctx, scopedResource(r, region), s.Policies)
+			if err != nil {
+				return results, fmt.Errorf("engine: apply failed for resource %q: %w", r.ID, err)
+			}
+			res.Region = region
+			results = append(results, res)
 		}
-		results = append(results, res)
 	}
 	return results, nil
 }

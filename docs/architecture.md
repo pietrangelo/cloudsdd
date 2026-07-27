@@ -48,7 +48,7 @@ cloudsdd/
 ├── pkg/                     # Empty: no public type exposed yet
 ├── LICENSE                  # GNU AGPLv3 (or later), full text
 └── docs/
-    ├── rfc/001-004...        # Foundation RFC + AWS provider + cross-account + multi-account (approved)
+    ├── rfc/001-005...        # Foundation + AWS provider + cross-account + multi-account + account/env/region scoping (approved)
     ├── architecture.md        # This document
     ├── api.md                 # HTTP API status (not yet implemented) + programmatic usage
     ├── dependency-licenses.md # Third-party license audit vs. AGPLv3
@@ -58,7 +58,7 @@ cloudsdd/
 ## Package `internal/spec`
 
 Represents and validates the SDD Specification (`Specification`,
-`Resource`, `Policies`).
+`Resource`, `Scope`, `Policies`).
 
 - **`Parse(io.Reader) (*Specification, error)`**: strict JSON decoding
   (`json.Decoder.DisallowUnknownFields`) that rejects leftover JSON data
@@ -74,6 +74,16 @@ Represents and validates the SDD Specification (`Specification`,
   enums, `max_cost_monthly` positive if present. `Resource.Account` (RFC
   004 §2.2) is optional: it references, by name, a `DeploymentTarget`
   resolved by the `Engine`, never an ARN or a credential.
+- **`Resource.Scope` (RFC 005 §2.2)**: cloud-agnostic "where" for a
+  resource, orthogonal to `Account` ("which credentials"):
+  `Environment` (free-form label, custom `scopename` tag, max 32 chars),
+  `Region`/`Regions` (mutually exclusive — `excluded_with` — `Regions`
+  requires 2-10 entries; a single desired region belongs in `Region`),
+  `Zones` (max 10, forwarded but not yet consumed by any `ResourceType`),
+  and `Sealed` (`*bool`, `EffectiveSealed()` defaults to `true`: "sealed
+  unless otherwise specified"). Region/zone *format* is intentionally not
+  validated here — it is provider-specific (AWS/GCP/Azure region strings
+  differ in shape) and checked by each `CloudProvider` instead.
 - **`ParseAndValidate`**: combines the two steps.
 - `Resource.Properties` remains `map[string]any`: a generic JSON transport
   container. Typed and validated decoding of properties specific to each
@@ -112,10 +122,11 @@ manually by our code — the Automation API requires it to be installed on
 the machine, but invokes it itself).
 
 - **Supported ResourceTypes**: `object_storage` → S3 (`S3Properties`:
-  `bucket_name`, `region`, `versioning`/`encryption`/`block_public_access`
-  as `*bool` with a secure default when absent — `encryption` and
+  `bucket_name`, `versioning`/`encryption`/`block_public_access` as
+  `*bool` with a secure default when absent — `encryption` and
   `block_public_access` default to `true`, `versioning` defaults to
-  `false`) and `cross_account_role` → cross-account IAM role
+  `false`; `region` moved out of `S3Properties` into `Resource.Scope.Region`,
+  RFC 005 §2.3) and `cross_account_role` → cross-account IAM role
   (`CrossAccountRoleProperties`: `enabled` as a kill switch,
   `trusted_account_id`, `external_id` mandatory against the confused
   deputy problem, `permissions`/`resource_arns` with no full wildcard,
@@ -129,14 +140,29 @@ the machine, but invokes it itself).
   (`access_key`, `secret`, `password`, `token`, ...) regardless of the
   schema.
 - **Policy enforcement**: `Validate` applies `Policies.AllowedRegions` to
-  `object_storage` (the resource's region) and enforces fail-closed
-  behavior on `cross_account_role` when `AllowedRegions` is empty (RFC
-  003 §2.3: IAM is global on AWS, so the region constraint translates
-  into an `aws:RequestedRegion` `Condition` on the generated policy).
+  `object_storage` (`Resource.Scope.Region`, format-checked against
+  `validateAWSRegionFormat`) and enforces fail-closed behavior on
+  `cross_account_role` when `AllowedRegions` is empty (RFC 003 §2.3: IAM
+  is global on AWS, so the region constraint translates into an
+  `aws:RequestedRegion` `Condition` on the generated policy).
+- **Scope enforcement (RFC 005 §2.5)**: `object_storage` requires
+  `Scope.Region` (`ErrRegionRequired` if absent) and rejects `Scope.Zones`
+  (`ErrZonesNotSupported`: no zone-aware HA logic exists yet).
+  `cross_account_role` is global — it rejects any `Scope.Region`/`Regions`/`Zones`
+  (`ErrGlobalResourceScoped`) — and, because it is inherently cross-account
+  by design, requires `Scope.Sealed` to be explicitly `false`
+  (`ErrSealedCrossAccountRole` otherwise): "sealed unless otherwise
+  specified" made concrete and enforced, not just a naming convention.
 - **State**: local filesystem backend (`CLOUDSDD_STATE_DIR`, default
   `~/.cloudsdd/state`), passphrase-based secrets provider
   (`CLOUDSDD_PULUMI_PASSPHRASE`, mandatory — `NewProvider` fails
-  explicitly if absent), one Pulumi stack per `Resource.ID`.
+  explicitly if absent), one Pulumi stack per `(Account, Environment,
+  Region, Resource.ID)` scope (`stackNameFor`, RFC 005 §2.6 — segments
+  joined by `::`, empty ones omitted, so an unscoped resource still gets
+  the bare `Resource.ID`, unchanged from before this RFC). This closes a
+  state-isolation gap: before RFC 005, the stack name was `Resource.ID`
+  alone, so the same ID applied to two different `DeploymentTarget`
+  accounts silently shared one local Pulumi stack.
 - **Credentials**: defaults to the standard AWS SDK credential chain (RFC
   002 §2.4). With `Resource.Account` set, the Engine instead resolves a
   `DeploymentTarget` and uses credentials obtained via STS AssumeRole
@@ -156,6 +182,18 @@ Relevant behavior:
   `s.Policies`.
 - `Plan`/`Apply` call `Validate` as a precondition (fail-fast: no call to
   a provider happens on an invalid Specification).
+- **Multi-region fan-out (RFC 005 §2.4.2)**: for each resource, the Engine
+  calls `effectiveRegions(r.Scope)` — `Scope.Regions` when set,
+  `[Scope.Region]` for a single region, or `[""]` for an unscoped
+  resource — and invokes the resolved provider's `Validate`/`Plan`/`Apply`
+  once per entry, via `scopedResource(r, region)` (a copy of `r` with
+  `Scope.Region` set to that single value and `Scope.Regions` cleared, so
+  no `CloudProvider` implementation ever has to handle the plural form).
+  `provider.Diff`/`provider.Result` each get a `Region` field, set by the
+  Engine after the call. An unscoped resource, or one with a single
+  `Scope.Region`, still produces exactly one `Diff`/`Result`, unchanged
+  from before this RFC. This keeps multi-region logic cloud-agnostic and
+  written once, rather than duplicated in every provider package.
 - If `Resource.Provider == "agnostic"` (and `Resource.Account` is empty),
   the Engine returns `ErrAgnosticResolutionNotImplemented`: the automatic
   provider resolution policy is an open question from RFC 001 (§5, point
@@ -179,34 +217,34 @@ Relevant behavior:
 ## Security
 
 Measures active as of today (see also RFC 001 §3, 002 §2.4-2.5, 003
-§2.2-2.3, 004 §3):
+§2.2-2.3, 004 §3, 005 §3):
 
 | OWASP API Top 10 threat | Current mitigation |
 |---|---|
 | Mass Assignment | Strict JSON decoding (`DisallowUnknownFields`) + two-tier validation, both in `internal/spec` and in every provider (`internal/provider/aws`) |
-| Hostile input / parser crash | Native Go fuzz test on `spec.Parse` |
+| Hostile input / parser crash | Native Go fuzz test on `spec.Parse`, extended (RFC 005) with seeds carrying `scope` |
 | Credentials in the Specification | Denylist of credential-like field names in `decodeProperties`, independent of the schema |
 | Confused deputy (cross-account) | `external_id` mandatory on `cross_account_role` (RFC 003) and on AWS `DeploymentTarget` (RFC 004) |
 | Cross-account privilege escalation | No full wildcard (`*`) permissions on `cross_account_role`; `AdministratorAccess` explicitly discouraged for `DeploymentTarget`s (RFC 004 §3, principles also valid for GCP/Azure once implemented) |
-| Region bypass / uncontrolled cost | `Policies.AllowedRegions` enforced by every provider; `cross_account_role` is fail-closed if `AllowedRegions` is empty |
-| BOLA | Not yet applicable: no multi-tenant storage/state layer exists yet (note: the stack-per-resource design in RFC 002 §2.3 has no tenant namespacing, open question) |
-| Unrestricted Resource Consumption | Not yet applicable at the HTTP/API level (it does not exist yet); at the provider level, a cap of 20 entries on IAM lists (RFC 003) |
+| Region bypass / uncontrolled cost | `Policies.AllowedRegions` enforced by every provider, per effective region when a resource is multi-region (RFC 005 §2.4.2); `cross_account_role` is fail-closed if `AllowedRegions` is empty |
+| Sealed environments by default (RFC 005 §2.5) | `Scope.Sealed` defaults to `true`; `cross_account_role`, the only ResourceType inherently cross-account, is rejected unless `Scope.Sealed: false` is explicit (`ErrSealedCrossAccountRole`) |
+| Cross-account/cross-environment state collision | Pulumi stack identity is now `(Account, Environment, Region, Resource.ID)`, not `Resource.ID` alone (RFC 005 §2.6): closes a gap where the same `Resource.ID` applied to two accounts/environments could silently share one local stack |
+| BOLA | Not yet applicable: no multi-tenant storage/state layer exists yet (note: the stack-per-scope design in RFC 002 §2.3 / RFC 005 §2.6 has no tenant namespacing, open question) |
+| Unrestricted Resource Consumption | Not yet applicable at the HTTP/API level (it does not exist yet); at the provider level, a cap of 20 entries on IAM lists (RFC 003), `Scope.Regions`/`Zones` capped at 10 entries (RFC 005 §3) |
 
-Scans run before this commit: `gosec ./...` (0 issues; 2 false positives
-suppressed with `#nosec` and inline justification — an env var name
-flagged as G101, a path from an env var flagged as G703 path-traversal
-despite being operator-controlled, not Specification input),
-`govulncheck ./...` (0 vulnerabilities reachable from the code;
-`go.opentelemetry.io/otel` and `github.com/klauspost/compress` proactively
-upgraded to the versions with fixes; one unreachable vulnerability with no
-available fix remains in `golang.org/x/crypto/openpgp`, a transitive
-dependency not invoked by our code).
+Scans run before this commit (RFC 005): `gosec ./...` (0 issues; 2 false
+positives suppressed with `#nosec` and inline justification — an env var
+name flagged as G101, a path from an env var flagged as G703
+path-traversal despite being operator-controlled, not Specification
+input), `govulncheck ./...` (0 vulnerabilities reachable from the code;
+one unreachable vulnerability with no available fix remains in a
+transitive dependency not invoked by our code).
 
 ## Testing
 
-- Table-driven tests for `internal/spec` (90.9%), `internal/engine`
-  (93.2%, including a test `mockProvider` and `DeploymentTarget`
-  resolution), and `internal/provider/aws` (61.4%).
+- Table-driven tests for `internal/spec` (89.7%), `internal/engine`
+  (94.3%, including a test `mockProvider`, `DeploymentTarget` resolution,
+  and multi-region fan-out), and `internal/provider/aws` (63.1%).
 - Native Go fuzz test for `spec.Parse`.
 - `internal/provider/aws` coverage is lower than the others because
   `Plan`/`Apply`/`Destroy`/`upsertStack`/`NewTargetProviderFactory`
@@ -227,10 +265,16 @@ dependency not invoked by our code).
 
 ## Out of scope / next steps
 
-See RFC 001 §4-5, RFC 002 §6, RFC 003 §5-6, RFC 004 §5-6. In summary, not
-yet implemented: GCP/Azure providers, other AWS `ResourceType`s
-(`relational_database`, `compute_instance`, `container_service`),
-resolution of `provider: "agnostic"`, references/dependencies between
-resources in the same Specification, cost estimation and enforcement of
-`max_cost_monthly`, multi-tenant isolation of state (real BOLA), HTTP API
-layer, NL → Specification translation.
+See RFC 001 §4-5, RFC 002 §6, RFC 003 §5-6, RFC 004 §5-6, RFC 005 §5-6. In
+summary, not yet implemented: GCP/Azure providers, other AWS
+`ResourceType`s (`relational_database`, `compute_instance`,
+`container_service`), resolution of `provider: "agnostic"`,
+references/dependencies between resources in the same Specification, cost
+estimation and enforcement of `max_cost_monthly`, multi-tenant isolation
+of state (real BOLA), HTTP API layer, NL → Specification translation,
+network-layer sealing (VPC/security-group isolation per Environment, RFC
+005 §5 — no networked `ResourceType` exists yet), zone-aware HA placement
+logic for any concrete `ResourceType`, and a `DeploymentTarget` keyed by
+`(Account, Environment)` pairs (today `Environment` is a CloudSDD-enforced
+logical boundary within shared credentials, not a new credential-scoping
+mechanism).

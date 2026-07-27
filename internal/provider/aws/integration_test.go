@@ -108,9 +108,9 @@ func TestIntegration_ObjectStorage_PlanApplyDestroy(t *testing.T) {
 		ID:       "integration-test-bucket",
 		Type:     spec.ResourceTypeObjectStorage,
 		Provider: spec.ProviderAWS,
+		Scope:    spec.Scope{Region: region},
 		Properties: map[string]any{
 			"bucket_name": "cloudsdd-integration-test",
-			"region":      region,
 		},
 	}
 	policies := spec.Policies{AllowedRegions: []string{region}}

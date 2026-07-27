@@ -14,6 +14,11 @@ import (
 // (docs/rfc/001-core-architecture-and-json-schema.md, $defs.resource.id).
 var resourceIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,63}$`)
 
+// scopeNamePattern constrains Scope.Environment (RFC 005 §2.2): same
+// charset as resourceIDPattern, shorter max length appropriate for a
+// label rather than an identifier.
+var scopeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,32}$`)
+
 var validate = newValidator()
 
 func newValidator() *validator.Validate {
@@ -23,11 +28,18 @@ func newValidator() *validator.Validate {
 		// compile time: a bug in the code, not a runtime condition.
 		panic(fmt.Sprintf("spec: failed to register the resourceid validator: %v", err))
 	}
+	if err := v.RegisterValidation("scopename", validateScopeName); err != nil {
+		panic(fmt.Sprintf("spec: failed to register the scopename validator: %v", err))
+	}
 	return v
 }
 
 func validateResourceID(fl validator.FieldLevel) bool {
 	return resourceIDPattern.MatchString(fl.Field().String())
+}
+
+func validateScopeName(fl validator.FieldLevel) bool {
+	return scopeNamePattern.MatchString(fl.Field().String())
 }
 
 // Validate applies domain rules to the already-decoded Specification

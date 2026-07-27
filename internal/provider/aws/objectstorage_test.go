@@ -18,47 +18,42 @@ func TestDecodeS3Properties(t *testing.T) {
 	}{
 		{
 			name:    "valid minimal properties",
-			props:   map[string]any{"bucket_name": "app-data", "region": "eu-central-1"},
+			props:   map[string]any{"bucket_name": "app-data"},
 			wantErr: false,
 		},
 		{
 			name:    "valid with explicit flags",
-			props:   map[string]any{"bucket_name": "app-data", "region": "eu-central-1", "versioning": true, "encryption": false, "block_public_access": false},
+			props:   map[string]any{"bucket_name": "app-data", "versioning": true, "encryption": false, "block_public_access": false},
 			wantErr: false,
 		},
 		{
 			name:    "missing bucket_name",
-			props:   map[string]any{"region": "eu-central-1"},
-			wantErr: true,
-		},
-		{
-			name:    "missing region",
-			props:   map[string]any{"bucket_name": "app-data"},
+			props:   map[string]any{},
 			wantErr: true,
 		},
 		{
 			name:    "bucket_name too short",
-			props:   map[string]any{"bucket_name": "ab", "region": "eu-central-1"},
+			props:   map[string]any{"bucket_name": "ab"},
 			wantErr: true,
 		},
 		{
 			name:    "bucket_name uppercase rejected",
-			props:   map[string]any{"bucket_name": "App-Data", "region": "eu-central-1"},
+			props:   map[string]any{"bucket_name": "App-Data"},
 			wantErr: true,
 		},
 		{
 			name:    "bucket_name with dot rejected",
-			props:   map[string]any{"bucket_name": "app.data", "region": "eu-central-1"},
+			props:   map[string]any{"bucket_name": "app.data"},
 			wantErr: true,
 		},
 		{
-			name:    "malformed region rejected",
-			props:   map[string]any{"bucket_name": "app-data", "region": "not-a-region"},
+			name:    "region rejected as an unknown field (moved to scope.region)",
+			props:   map[string]any{"bucket_name": "app-data", "region": "eu-central-1"},
 			wantErr: true,
 		},
 		{
 			name:    "unknown field rejected",
-			props:   map[string]any{"bucket_name": "app-data", "region": "eu-central-1", "acl": "public-read"},
+			props:   map[string]any{"bucket_name": "app-data", "acl": "public-read"},
 			wantErr: true,
 		},
 	}
@@ -73,7 +68,7 @@ func TestDecodeS3Properties(t *testing.T) {
 	}
 
 	t.Run("secure defaults when flags absent", func(t *testing.T) {
-		p, err := decodeS3Properties(map[string]any{"bucket_name": "app-data", "region": "eu-central-1"})
+		p, err := decodeS3Properties(map[string]any{"bucket_name": "app-data"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -90,8 +85,8 @@ func TestDecodeS3Properties(t *testing.T) {
 
 	t.Run("explicit false overrides secure defaults", func(t *testing.T) {
 		p, err := decodeS3Properties(map[string]any{
-			"bucket_name": "app-data", "region": "eu-central-1",
-			"encryption": false, "block_public_access": false,
+			"bucket_name": "app-data",
+			"encryption":  false, "block_public_access": false,
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -126,16 +121,16 @@ func TestDeclareS3Bucket(t *testing.T) {
 	}{
 		{
 			name: "all secure defaults",
-			p:    S3Properties{BucketName: "app-data", Region: "eu-central-1"},
+			p:    S3Properties{BucketName: "app-data"},
 		},
 		{
 			name: "versioning enabled",
-			p: S3Properties{BucketName: "app-data", Region: "eu-central-1",
+			p: S3Properties{BucketName: "app-data",
 				Versioning: boolPtr(true)},
 		},
 		{
 			name: "encryption and public access block disabled explicitly",
-			p: S3Properties{BucketName: "app-data", Region: "eu-central-1",
+			p: S3Properties{BucketName: "app-data",
 				Encryption: boolPtr(false), BlockPublicAccess: boolPtr(false)},
 		},
 	}

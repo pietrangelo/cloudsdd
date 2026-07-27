@@ -24,3 +24,27 @@ var ErrRegionNotAllowed = errors.New("aws: region not in allowed_regions")
 // environment variable is not set (RFC 002 §2.3): the provider refuses to
 // start with a weak default.
 var ErrMissingPassphrase = errors.New("aws: CLOUDSDD_PULUMI_PASSPHRASE must be set")
+
+// ErrRegionRequired indicates that a region-scoped ResourceType (e.g.
+// object_storage) was requested without Scope.Region (RFC 005 §2.2): the
+// field moved out of the provider-specific Properties (RFC 002 §2.6) into
+// the cloud-agnostic Scope, but object_storage still requires one.
+var ErrRegionRequired = errors.New("aws: resource requires a non-empty scope.region")
+
+// ErrZonesNotSupported indicates that Scope.Zones was set on a
+// ResourceType that does not yet consume it (RFC 005 §2.4.3): every
+// ResourceType implemented today falls in this case.
+var ErrZonesNotSupported = errors.New("aws: resource type does not support scope.zones")
+
+// ErrGlobalResourceScoped indicates that Scope.Region/Regions/Zones was
+// set on a ResourceType that is global by nature (e.g. cross_account_role,
+// IAM is global, RFC 003 §2.3): a global resource does not "live" in a
+// region, so this RFC 005 rule replaces the previous implicit behavior.
+var ErrGlobalResourceScoped = errors.New("aws: resource type is global and does not support region/zone scoping")
+
+// ErrSealedCrossAccountRole indicates that a cross_account_role resource
+// (inherently cross-account by design, RFC 003) was declared without
+// explicitly setting scope.sealed to false (RFC 005 §2.5, "sealed unless
+// otherwise specified"): the default Sealed == true forbids any resource
+// from crossing an Account/Environment boundary implicitly.
+var ErrSealedCrossAccountRole = errors.New("aws: cross_account_role requires scope.sealed=false (it is inherently cross-account)")

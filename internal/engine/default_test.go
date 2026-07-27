@@ -20,11 +20,14 @@ type mockProvider struct {
 	planErr     error
 	apply       provider.Result
 	applyErr    error
+
+	validateCalls int
 }
 
 func (m *mockProvider) Name() string { return m.name }
 
 func (m *mockProvider) Validate(ctx context.Context, r spec.Resource, p spec.Policies) error {
+	m.validateCalls++
 	return m.validateErr
 }
 
@@ -127,6 +130,77 @@ func TestDefaultEngine_Plan(t *testing.T) {
 	}
 	if len(diffs) != 1 || diffs[0].ResourceID != wantDiff.ResourceID || diffs[0].Action != wantDiff.Action {
 		t.Fatalf("Plan() = %+v, want [%+v]", diffs, wantDiff)
+	}
+}
+
+func specWithScope(scope spec.Scope) spec.Specification {
+	s := specWithProvider(spec.ProviderAWS)
+	s.Resources[0].Scope = scope
+	return s
+}
+
+func TestDefaultEngine_Plan_MultiRegion(t *testing.T) {
+	wantDiff := provider.Diff{ResourceID: "app-db", Action: provider.ActionCreate}
+	e := New(map[spec.Provider]provider.CloudProvider{
+		spec.ProviderAWS: &mockProvider{name: "aws", plan: wantDiff},
+	})
+
+	s := specWithScope(spec.Scope{Regions: []string{"eu-central-1", "us-east-1"}})
+	diffs, err := e.Plan(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Plan() unexpected error: %v", err)
+	}
+	if len(diffs) != 2 {
+		t.Fatalf("Plan() returned %d diffs, want 2", len(diffs))
+	}
+	gotRegions := map[string]bool{diffs[0].Region: true, diffs[1].Region: true}
+	if !gotRegions["eu-central-1"] || !gotRegions["us-east-1"] {
+		t.Errorf("Plan() regions = [%q, %q], want eu-central-1 and us-east-1", diffs[0].Region, diffs[1].Region)
+	}
+}
+
+func TestDefaultEngine_Apply_MultiRegion(t *testing.T) {
+	wantResult := provider.Result{ResourceID: "app-db", Status: provider.StatusApplied}
+	e := New(map[spec.Provider]provider.CloudProvider{
+		spec.ProviderAWS: &mockProvider{name: "aws", apply: wantResult},
+	})
+
+	s := specWithScope(spec.Scope{Regions: []string{"eu-central-1", "us-east-1"}})
+	results, err := e.Apply(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Apply() unexpected error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("Apply() returned %d results, want 2", len(results))
+	}
+	gotRegions := map[string]bool{results[0].Region: true, results[1].Region: true}
+	if !gotRegions["eu-central-1"] || !gotRegions["us-east-1"] {
+		t.Errorf("Apply() regions = [%q, %q], want eu-central-1 and us-east-1", results[0].Region, results[1].Region)
+	}
+}
+
+func TestDefaultEngine_Validate_MultiRegionFanOut(t *testing.T) {
+	mp := &mockProvider{name: "aws"}
+	e := New(map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mp})
+
+	s := specWithScope(spec.Scope{Regions: []string{"eu-central-1", "us-east-1"}})
+	if err := e.Validate(context.Background(), s); err != nil {
+		t.Fatalf("Validate() unexpected error: %v", err)
+	}
+	if mp.validateCalls != 2 {
+		t.Fatalf("Validate() called the provider %d times, want 2 (once per region)", mp.validateCalls)
+	}
+}
+
+func TestDefaultEngine_Validate_UnscopedCallsOnce(t *testing.T) {
+	mp := &mockProvider{name: "aws"}
+	e := New(map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mp})
+
+	if err := e.Validate(context.Background(), specWithProvider(spec.ProviderAWS)); err != nil {
+		t.Fatalf("Validate() unexpected error: %v", err)
+	}
+	if mp.validateCalls != 1 {
+		t.Fatalf("Validate() called the provider %d times, want 1 (unscoped resource)", mp.validateCalls)
 	}
 }
 

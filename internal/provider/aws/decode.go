@@ -38,6 +38,17 @@ func newValidator() *validator.Validate {
 	return v
 }
 
+// validateAWSRegionFormat checks that region matches the AWS region
+// format (e.g. "eu-central-1"). Used directly (not via a struct tag)
+// because Region now lives on spec.Scope (RFC 005 §2.2), a cloud-agnostic
+// struct that cannot carry an AWS-specific validator tag.
+func validateAWSRegionFormat(region string) error {
+	if !awsRegionPattern.MatchString(region) {
+		return fmt.Errorf("aws: %q is not a valid AWS region", region)
+	}
+	return nil
+}
+
 func mustRegister(v *validator.Validate, tag string, fn validator.Func) {
 	if err := v.RegisterValidation(tag, fn); err != nil {
 		// This error can only happen for a duplicate/invalid tag name at
