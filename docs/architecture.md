@@ -24,6 +24,17 @@ The "JSON Specification → Engine → Provider" part is implemented for AWS
 (RFC 002, 003, 004). Natural-language translation → Specification and the
 HTTP API layer remain out of scope and do not yet have a dedicated RFC.
 
+## License
+
+CloudSDD is licensed under the **GNU Affero General Public License v3.0
+(or later)** — see [`LICENSE`](../LICENSE). Every `.go` source file carries
+an `SPDX-License-Identifier: AGPL-3.0-or-later` header. All 157 external Go
+modules currently pulled in (production build + the `integration`-tagged
+test-only Docker/testcontainers-go path) were audited with `go-licenses`
+and found to use AGPLv3-compatible licenses (Apache-2.0, MIT, BSD-2/3-Clause,
+ISC, MPL-2.0) — see [`docs/dependency-licenses.md`](dependency-licenses.md)
+for the full breakdown and the process for vetting new dependencies.
+
 ## Module structure
 
 ```
@@ -35,10 +46,12 @@ cloudsdd/
 │   │   └── aws/                # Concrete AWS implementation (RFC 002/003/004)
 │   └── engine/                # Engine interface, DefaultEngine, DeploymentTarget (RFC 004)
 ├── pkg/                     # Empty: no public type exposed yet
+├── LICENSE                  # GNU AGPLv3 (or later), full text
 └── docs/
     ├── rfc/001-004...        # Foundation RFC + AWS provider + cross-account + multi-account (approved)
     ├── architecture.md        # This document
     ├── api.md                 # HTTP API status (not yet implemented) + programmatic usage
+    ├── dependency-licenses.md # Third-party license audit vs. AGPLv3
     └── openapi.yaml            # OpenAPI schema (Specification + AWS properties, no paths)
 ```
 

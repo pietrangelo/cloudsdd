@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Pietrangelo Masala
+
 // Package aws implements provider.CloudProvider for AWS (RFC 002), via the
 // Pulumi Automation API, as a concrete "backend" for the SDD Specification.
 package aws

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Pietrangelo Masala
+
 // Package provider defines the cloud-agnostic contract that every concrete
 // backend (AWS, GCP, Azure, ...) must implement, as per
 // docs/rfc/001-core-architecture-and-json-schema.md §2.3.

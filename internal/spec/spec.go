@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Pietrangelo Masala
+
 // Package spec defines the typed representation of the SDD Specification,
 // the "Single Source of Truth" described in docs/rfc/001-core-architecture-and-json-schema.md.
 package spec

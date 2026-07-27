@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Pietrangelo Masala
+
 // Package engine orchestrates applying an SDD Specification onto the
 // registered CloudProviders, as per
 // docs/rfc/001-core-architecture-and-json-schema.md §2.3.
