@@ -137,8 +137,22 @@ func (e *DefaultEngine) resolveTargetProvider(ctx context.Context, r spec.Resour
 // unscoped resource or one with a single Scope.Region still validates
 // exactly once, preserving pre-RFC-005 behavior.
 func (e *DefaultEngine) Validate(ctx context.Context, s spec.Specification) error {
+	_, err := e.validated(ctx, s)
+	return err
+}
+
+// validated runs every check Validate runs and returns the Specification
+// the checks were run against: the same one, except that any resource
+// declaring Provider "agnostic" has been bound to a concrete provider.
+//
+// Plan, Apply and Destroy must operate on *that* Specification, not on
+// their own copy. Resolve takes a Specification by value, so a caller that
+// validated and then walked its own resources would still be holding
+// "agnostic" and would fail on a provider lookup that can never succeed —
+// the registry is keyed by concrete providers only.
+func (e *DefaultEngine) validated(ctx context.Context, s spec.Specification) (spec.Specification, error) {
 	if err := spec.Validate(&s); err != nil {
-		return err
+		return spec.Specification{}, err
 	}
 
 	// Bind any agnostic resource before delegating, so no CloudProvider
@@ -147,12 +161,12 @@ func (e *DefaultEngine) Validate(ctx context.Context, s spec.Specification) erro
 	// directly behave the same, and is a no-op once nothing is agnostic.
 	s, _, err := e.Resolve(ctx, s)
 	if err != nil {
-		return err
+		return spec.Specification{}, err
 	}
 	for _, r := range s.Resources {
 		p, err := e.resolveProvider(ctx, r)
 		if err != nil {
-			return err
+			return spec.Specification{}, err
 		}
 		// The power schedule is compiled here, centrally, for the same
 		// reason AllowedRegions is (RFC 011 §2.3): a check that lives
@@ -160,7 +174,7 @@ func (e *DefaultEngine) Validate(ctx context.Context, s spec.Specification) erro
 		// Providers keep their own, for the case where one is driven
 		// directly rather than through the Engine.
 		if err := validateSchedule(r, s.Policies); err != nil {
-			return err
+			return spec.Specification{}, err
 		}
 		for _, region := range effectiveRegions(r.Scope) {
 			// Policies.AllowedRegions is enforced here, centrally, as
@@ -171,15 +185,15 @@ func (e *DefaultEngine) Validate(ctx context.Context, s spec.Specification) erro
 			// new provider cannot silently omit the check.
 			if region != "" {
 				if err := provider.ValidateRegionAllowed(region, s.Policies.AllowedRegions); err != nil {
-					return fmt.Errorf("engine: resource %q: %w", r.ID, err)
+					return spec.Specification{}, fmt.Errorf("engine: resource %q: %w", r.ID, err)
 				}
 			}
 			if err := p.Validate(ctx, scopedResource(r, region), s.Policies); err != nil {
-				return fmt.Errorf("engine: resource %q: %w", r.ID, err)
+				return spec.Specification{}, fmt.Errorf("engine: resource %q: %w", r.ID, err)
 			}
 		}
 	}
-	return nil
+	return s, nil
 }
 
 // checkIntent enforces that the Specification's declared Intent permits
@@ -195,7 +209,8 @@ func checkIntent(s spec.Specification, allowed ...spec.Intent) error {
 }
 
 func (e *DefaultEngine) Plan(ctx context.Context, s spec.Specification) ([]provider.Diff, error) {
-	if err := e.Validate(ctx, s); err != nil {
+	s, err := e.validated(ctx, s)
+	if err != nil {
 		return nil, err
 	}
 
@@ -225,7 +240,8 @@ func (e *DefaultEngine) Apply(ctx context.Context, s spec.Specification) ([]prov
 	if err := checkIntent(s, spec.IntentDeploy, spec.IntentUpdate); err != nil {
 		return nil, err
 	}
-	if err := e.Validate(ctx, s); err != nil {
+	s, err := e.validated(ctx, s)
+	if err != nil {
 		return nil, err
 	}
 
@@ -254,7 +270,8 @@ func (e *DefaultEngine) Destroy(ctx context.Context, s spec.Specification) ([]pr
 	if err := checkIntent(s, spec.IntentDestroy); err != nil {
 		return nil, err
 	}
-	if err := e.Validate(ctx, s); err != nil {
+	s, err := e.validated(ctx, s)
+	if err != nil {
 		return nil, err
 	}
 

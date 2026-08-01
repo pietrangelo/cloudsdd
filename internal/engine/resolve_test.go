@@ -24,6 +24,11 @@ type pickyProvider struct {
 	// rejectAll makes the provider refuse everything, standing in for a
 	// resource type it does not implement.
 	rejectAll bool
+
+	// operated records the operations that reached this provider, so a
+	// test can assert which cloud an agnostic resource was actually sent
+	// to rather than only that the call did not fail.
+	operated []string
 }
 
 func (p *pickyProvider) Name() string { return p.name }
@@ -39,14 +44,17 @@ func (p *pickyProvider) Validate(ctx context.Context, r spec.Resource, _ spec.Po
 }
 
 func (p *pickyProvider) Plan(ctx context.Context, r spec.Resource, _ spec.Policies) (provider.Diff, error) {
+	p.operated = append(p.operated, "plan")
 	return provider.Diff{ResourceID: r.ID, Action: provider.ActionCreate}, nil
 }
 
 func (p *pickyProvider) Apply(ctx context.Context, r spec.Resource, _ spec.Policies) (provider.Result, error) {
+	p.operated = append(p.operated, "apply")
 	return provider.Result{ResourceID: r.ID, Status: provider.StatusApplied}, nil
 }
 
 func (p *pickyProvider) Destroy(ctx context.Context, r spec.Resource, _ spec.Policies) error {
+	p.operated = append(p.operated, "destroy")
 	return nil
 }
 
@@ -347,5 +355,83 @@ func TestValidateResolvesBeforeDelegating(t *testing.T) {
 
 	if err := e.Validate(context.Background(), agnosticSpec("westeurope", nil)); err != nil {
 		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+// TestOperationsResolveAgnostic guards a defect that Validate alone could
+// not surface: Validate resolves a *copy* of the Specification, so an
+// operation that validated and then walked its own resources still held
+// "agnostic" and failed on a registry lookup that can never succeed. The
+// CLI resolves explicitly before planning and so never saw it; an Engine
+// driven directly failed on every operation.
+func TestOperationsResolveAgnostic(t *testing.T) {
+	tests := []struct {
+		name   string
+		intent spec.Intent
+		run    func(*DefaultEngine, spec.Specification) error
+		want   string
+	}{
+		{
+			name:   "plan",
+			intent: spec.IntentDeploy,
+			run: func(e *DefaultEngine, s spec.Specification) error {
+				diffs, err := e.Plan(context.Background(), s)
+				if err == nil && len(diffs) != 1 {
+					return fmt.Errorf("got %d diffs, want 1", len(diffs))
+				}
+				return err
+			},
+			want: "plan",
+		},
+		{
+			name:   "apply",
+			intent: spec.IntentDeploy,
+			run: func(e *DefaultEngine, s spec.Specification) error {
+				results, err := e.Apply(context.Background(), s)
+				if err == nil && len(results) != 1 {
+					return fmt.Errorf("got %d results, want 1", len(results))
+				}
+				return err
+			},
+			want: "apply",
+		},
+		{
+			name:   "destroy",
+			intent: spec.IntentDestroy,
+			run: func(e *DefaultEngine, s spec.Specification) error {
+				results, err := e.Destroy(context.Background(), s)
+				if err == nil && len(results) != 1 {
+					return fmt.Errorf("got %d results, want 1", len(results))
+				}
+				return err
+			},
+			want: "destroy",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := threeClouds()
+			e := New(registry)
+
+			s := agnosticSpec("europe-west1", func(s *spec.Specification) {
+				s.Intent = tt.intent
+			})
+			if err := tt.run(e, s); err != nil {
+				t.Fatalf("%s error = %v", tt.name, err)
+			}
+
+			// The region is GCP's, so GCP is the only candidate: the
+			// operation must have reached it and nothing else.
+			gcp := registry[spec.ProviderGCP].(*pickyProvider)
+			if len(gcp.operated) != 1 || gcp.operated[0] != tt.want {
+				t.Errorf("gcp received %v, want [%s]", gcp.operated, tt.want)
+			}
+			for _, name := range []spec.Provider{spec.ProviderAWS, spec.ProviderAzure} {
+				if got := registry[name].(*pickyProvider).operated; len(got) != 0 {
+					t.Errorf("%s received %v, want no operation", name, got)
+				}
+			}
+		})
 	}
 }
