@@ -116,6 +116,48 @@ components:
             otherwise specified"). A resource type that is inherently
             cross-boundary (e.g. cross_account_role) must set this
             explicitly to false.
+    RelationalDatabaseProperties:
+      description: >
+        Properties of a Resource with type=relational_database, on any
+        provider. Every provider applies the same secure defaults:
+        encryption at rest, 7-day automated backups, deletion protection,
+        and no public endpoint (RFC 007, 008, 015). Two properties are
+        narrower than the rest and say so on the field itself, rather
+        than being documented as universal and rejected by one provider —
+        which is the defect RFC 015 was written to close.
+      type: object
+      additionalProperties: false
+      required: [engine, version]
+      properties:
+        engine:
+          type: string
+          enum: [postgres, mysql, mariadb]
+          description: >
+            `mariadb` is AWS-only; GCP and Azure accept postgres and
+            mysql.
+        version:
+          type: string
+          description: Engine version, e.g. "15" or "8.0".
+        high_availability:
+          type: boolean
+          default: false
+          description: >
+            Multi-AZ on AWS, REGIONAL on GCP, zone-redundant on Azure,
+            with geo-redundant backups where the provider offers them.
+        deletion_protection:
+          type: boolean
+          default: true
+          description: >
+            On Azure this is enforced by a CanNotDelete management lock
+            plus Pulumi's protect flag, since Flexible Server has no
+            server-side equivalent; creating the lock requires
+            Microsoft.Authorization/locks/write (RFC 015 §2.1).
+        skip_final_snapshot:
+          type: boolean
+          default: false
+          description: >
+            AWS only. GCP and Azure have no equivalent, so the property
+            is rejected there rather than silently ignored.
     ComputeInstanceProperties:
       description: >
         Properties of a Resource with type=compute_instance, on any

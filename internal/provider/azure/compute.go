@@ -21,6 +21,15 @@ import (
 // extension, which authenticates against Entra ID (RFC 013 §2.4).
 const adminUsername = "cloudsdd"
 
+// Address space for a compute instance's virtual network. Named rather
+// than inlined so that RFC 015 §2.2's requirement — that the database
+// VNet not overlap this one — is checkable by a test instead of by
+// somebody remembering.
+const (
+	computeVNetAddressSpace   = "10.0.0.0/16"
+	computeSubnetAddressSpace = "10.0.1.0/24"
+)
+
 // vmSize maps a cloud-agnostic size onto an Azure VM size.
 func vmSize(size compute.Size) (string, error) {
 	switch size {
@@ -213,7 +222,7 @@ func declareComputeNetwork(
 	vnet, err := network.NewVirtualNetwork(ctx, id+"-vnet", &network.VirtualNetworkArgs{
 		ResourceGroupName: rg.Name,
 		Location:          rg.Location,
-		AddressSpaces:     pulumi.StringArray{pulumi.String("10.0.0.0/16")},
+		AddressSpaces:     pulumi.StringArray{pulumi.String(computeVNetAddressSpace)},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("azure: failed to declare the network for %q: %w", id, err)
@@ -222,7 +231,7 @@ func declareComputeNetwork(
 	subnet, err := network.NewSubnet(ctx, id+"-subnet", &network.SubnetArgs{
 		ResourceGroupName:  rg.Name,
 		VirtualNetworkName: vnet.Name,
-		AddressPrefixes:    pulumi.StringArray{pulumi.String("10.0.1.0/24")},
+		AddressPrefixes:    pulumi.StringArray{pulumi.String(computeSubnetAddressSpace)},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("azure: failed to declare the subnet for %q: %w", id, err)

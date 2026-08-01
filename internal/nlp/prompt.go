@@ -65,7 +65,7 @@ Properties by resource type:
                         GCP and Azure: "postgres", "mysql".)
     version            (string, required, e.g. "15" or "8.0")
     high_availability  (bool, optional, default false)
-    deletion_protection(bool, optional, default true; AWS and GCP)
+    deletion_protection(bool, optional, default true; all providers)
     skip_final_snapshot(bool, optional, default false; AWS only)
 
 - compute_instance (all providers):

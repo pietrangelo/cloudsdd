@@ -70,6 +70,33 @@ func declareScheduledDatabase(t *testing.T, engine string, sch *schedule.Schedul
 	})
 }
 
+// TestScheduledDatabaseKeepsCanNotDeleteLock covers RFC 015 §2.1's
+// composition with RFC 012. Deletion protection and a power schedule have
+// to coexist, and the lock level is what decides whether they do: Azure's
+// stronger ReadOnly lock forbids modification, which would leave the
+// runbook unable to stop or start the server it is scheduled against. The
+// only symptom of that would be an unchanged bill, so it is worth a test
+// rather than a comment.
+func TestScheduledDatabaseKeepsCanNotDeleteLock(t *testing.T) {
+	freezeClock(t)
+
+	recorded := declareScheduledDatabase(t, "postgres", &schedule.Schedule{
+		Enabled:  boolPtr(true),
+		Timezone: "Europe/Rome",
+		Start:    "08:00",
+		Stop:     "19:00",
+	})
+
+	if !hasResource(recorded, automationScheduleToken) {
+		t.Fatal("no automation schedule was declared for a scheduled database")
+	}
+
+	lock := findResource(t, recorded, "azure:management/lock:Lock")
+	if got := lock.Inputs["lockLevel"].StringValue(); got != lockLevelCanNotDelete {
+		t.Errorf("lockLevel = %q, want %q — ReadOnly would break the runbook", got, lockLevelCanNotDelete)
+	}
+}
+
 func resourcesOfType(recorded []recordedResource, typeToken string) []recordedResource {
 	var out []recordedResource
 	for _, r := range recorded {

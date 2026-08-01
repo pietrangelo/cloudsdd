@@ -286,27 +286,165 @@ func TestDeclareRelationalDatabaseHonoursHighAvailability(t *testing.T) {
 	}
 }
 
-// TestDeclarePostgresIsNotPubliclyReachable covers RFC 011 §1.1E: the
-// source claimed "Flexible server is private by default without firewall
-// rules", but Azure's default is public network access enabled.
-func TestDeclarePostgresIsNotPubliclyReachable(t *testing.T) {
-	props := relationalDatabaseProperties{Engine: "postgres", Version: "15"}
-
-	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", props)
-		return err
-	})
-	server := findResource(t, recorded, "azure:postgresql/flexibleServer:FlexibleServer")
-
-	enabled, ok := server.Inputs["publicNetworkAccessEnabled"]
-	if !ok {
-		t.Fatal("publicNetworkAccessEnabled was not set; the server defaults to publicly reachable")
+// TestDeclareDatabaseIsNotPubliclyReachable is the regression test for
+// the gap RFC 015 §1 records: MySQL Flexible Server exposes no
+// PublicNetworkAccessEnabled at all, so it shipped with a public endpoint
+// while docs/cli.md claimed the resource was not publicly reachable.
+//
+// Both engines are in one table because RFC 015 §2.2's whole point is
+// that they no longer differ: a test that checked them separately would
+// let them drift apart again without failing.
+func TestDeclareDatabaseIsNotPubliclyReachable(t *testing.T) {
+	tests := []struct {
+		name       string
+		engine     string
+		version    string
+		typeToken  string
+		delegation string
+		dnsSuffix  string
+	}{
+		{
+			name:       "postgres",
+			engine:     "postgres",
+			version:    "15",
+			typeToken:  "azure:postgresql/flexibleServer:FlexibleServer",
+			delegation: "Microsoft.DBforPostgreSQL/flexibleServers",
+			dnsSuffix:  "postgres.database.azure.com",
+		},
+		{
+			name:       "mysql",
+			engine:     "mysql",
+			version:    "8.0.21",
+			typeToken:  "azure:mysql/flexibleServer:FlexibleServer",
+			delegation: "Microsoft.DBforMySQL/flexibleServers",
+			dnsSuffix:  "mysql.database.azure.com",
+		},
 	}
-	if enabled.BoolValue() {
-		t.Error("publicNetworkAccessEnabled = true, want false")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			props := relationalDatabaseProperties{Engine: tt.engine, Version: tt.version}
+
+			recorded := runProgram(t, func(ctx *pulumi.Context) error {
+				_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+				return err
+			})
+
+			// The server is in a VNet, which is what removes the public
+			// endpoint rather than leaving it merely unfirewalled.
+			server := findResource(t, recorded, tt.typeToken)
+			if _, ok := server.Inputs["delegatedSubnetId"]; !ok {
+				t.Error("delegatedSubnetId was not set; the server keeps a public endpoint")
+			}
+			if _, ok := server.Inputs["privateDnsZoneId"]; !ok {
+				t.Error("privateDnsZoneId was not set; the server's hostname will not resolve privately")
+			}
+			if got := server.Inputs["backupRetentionDays"].NumberValue(); got != backupRetentionDays {
+				t.Errorf("backupRetentionDays = %v, want %d", got, backupRetentionDays)
+			}
+
+			// The subnet must be delegated to this engine's service, or
+			// Azure refuses to place the server in it.
+			subnet := findResource(t, recorded, "azure:network/subnet:Subnet")
+			delegations := subnet.Inputs["delegations"].ArrayValue()
+			if len(delegations) != 1 {
+				t.Fatalf("got %d subnet delegations, want 1", len(delegations))
+			}
+			svc := delegations[0].ObjectValue()["serviceDelegation"].ObjectValue()
+			if got := svc["name"].StringValue(); got != tt.delegation {
+				t.Errorf("service delegation = %q, want %q", got, tt.delegation)
+			}
+			actions := svc["actions"].ArrayValue()
+			if len(actions) != 1 || actions[0].StringValue() != subnetJoinAction {
+				t.Errorf("delegation actions = %v, want only %q", actions, subnetJoinAction)
+			}
+
+			// Azure validates the DNS zone suffix and rejects anything
+			// that is not the engine's own domain.
+			zone := findResource(t, recorded, "azure:privatedns/zone:Zone")
+			if got := zone.Inputs["name"].StringValue(); got != "app-db."+tt.dnsSuffix {
+				t.Errorf("private DNS zone = %q, want %q", got, "app-db."+tt.dnsSuffix)
+			}
+			// A zone with no link resolves for nobody.
+			link := findResource(t, recorded, "azure:privatedns/zoneVirtualNetworkLink:ZoneVirtualNetworkLink")
+			if link.Inputs["registrationEnabled"].BoolValue() {
+				t.Error("registrationEnabled = true; databases should not auto-register records")
+			}
+		})
 	}
-	if got := server.Inputs["backupRetentionDays"].NumberValue(); got != backupRetentionDays {
-		t.Errorf("backupRetentionDays = %v, want %d", got, backupRetentionDays)
+}
+
+// TestDeclareDatabaseDeletionProtection covers RFC 015 §2.1. The property
+// existed on AWS and GCP and was documented as universal, while Azure had
+// no field at all — so the documented escape hatch, deletion_protection:
+// false, was rejected as an unknown property on the one provider where it
+// could not be relaxed.
+func TestDeclareDatabaseDeletionProtection(t *testing.T) {
+	const lockToken = "azure:management/lock:Lock"
+
+	tests := []struct {
+		name     string
+		props    relationalDatabaseProperties
+		wantLock bool
+	}{
+		{
+			name:     "on by default",
+			props:    relationalDatabaseProperties{Engine: "postgres", Version: "15"},
+			wantLock: true,
+		},
+		{
+			name: "explicitly on",
+			props: relationalDatabaseProperties{
+				Engine: "mysql", Version: "8.0.21", DeletionProtection: boolPtr(true),
+			},
+			wantLock: true,
+		},
+		{
+			// Asserting the absence matters: a lock left behind at false
+			// would make the documented escape hatch a lie.
+			name: "explicitly off declares no lock",
+			props: relationalDatabaseProperties{
+				Engine: "postgres", Version: "15", DeletionProtection: boolPtr(false),
+			},
+			wantLock: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorded := runProgram(t, func(ctx *pulumi.Context) error {
+				_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", tt.props)
+				return err
+			})
+
+			if got := hasResource(recorded, lockToken); got != tt.wantLock {
+				t.Fatalf("management lock declared = %v, want %v", got, tt.wantLock)
+			}
+			if !tt.wantLock {
+				return
+			}
+
+			lock := findResource(t, recorded, lockToken)
+			// CanNotDelete, never ReadOnly: ReadOnly is the stronger lock
+			// and would break RFC 012's start/stop runbook, whose only
+			// symptom would be an unchanged bill.
+			if got := lock.Inputs["lockLevel"].StringValue(); got != lockLevelCanNotDelete {
+				t.Errorf("lockLevel = %q, want %q", got, lockLevelCanNotDelete)
+			}
+			if _, ok := lock.Inputs["scope"]; !ok {
+				t.Error("lock has no scope; it must name the server it protects")
+			}
+		})
+	}
+}
+
+// TestDatabaseNetworkDoesNotOverlapCompute pins the constant RFC 015 §2.2
+// chose deliberately. The two VNets are separate today and could overlap
+// indefinitely without breaking, but overlapping ranges cannot be peered,
+// and peering is exactly what the deferred network model needs.
+func TestDatabaseNetworkDoesNotOverlapCompute(t *testing.T) {
+	if databaseVNetAddressSpace == computeVNetAddressSpace {
+		t.Errorf("database and compute VNets share the address space %q", databaseVNetAddressSpace)
 	}
 }
 

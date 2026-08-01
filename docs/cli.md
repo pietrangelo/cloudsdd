@@ -119,6 +119,50 @@ both are on by default. You only spell out a security property to *relax* it.
 cloudsdd deploy --yes "a postgres 15 database in eu-central-1"
 ```
 
+## Databases
+
+`relational_database` is encrypted at rest with 7-day backups, protected
+against deletion, and has no public endpoint, on all three clouds
+(RFC 015).
+
+| Property | Values |
+|---|---|
+| `engine` | `postgres`, `mysql` — plus `mariadb` on AWS |
+| `version` | engine version, e.g. `15` or `8.0` |
+| `high_availability` | default `false`; multi-AZ / zone-redundant, with geo-redundant backups |
+| `deletion_protection` | default `true` |
+| `skip_final_snapshot` | default `false`, AWS only |
+
+**"No public endpoint" is not the same as reachable.** Each cloud gets
+there differently, and only one of the three leaves you a network to
+connect from:
+
+| Provider | Mechanism | What can reach it |
+|---|---|---|
+| AWS | `publicly_accessible: false` | Anything in the account's default VPC |
+| Azure | VNet integration: delegated subnet + private DNS zone | Anything in the database's own VNet, which today contains only the database |
+| GCP | Private IP only (`ipv4_enabled: false`) | Nothing yet — a private IP needs a VPC with private services access, which CloudSDD does not model |
+
+Deciding what shares a network is a feature CloudSDD does not have; it
+needs its own RFC (RFC 005 §5, RFC 015 §1.1). Until then, treat these
+databases as provisioned-and-private rather than connected, and know that
+Azure at least gives you a VNet to peer or attach to.
+
+Two Azure notes:
+
+- Deletion protection is enforced twice, because neither half is
+  sufficient alone. A `CanNotDelete` **management lock** stops deletion
+  through the portal or `az`, which never consult CloudSDD's state; and
+  Pulumi's **protect** flag stops `cloudsdd destroy`, which would
+  otherwise remove the lock first and the server second. Setting
+  `deletion_protection: false` and applying clears both — the same
+  two-step teardown AWS already requires.
+- Creating that lock needs `Microsoft.Authorization/locks/write`, held by
+  **Owner** and **User Access Administrator** but **not by Contributor**.
+  On a Contributor-only identity the deploy fails with an explicit error
+  rather than provisioning a database you were told is protected and is
+  not. Deploy with `deletion_protection: false` if that is what you want.
+
 ### Destroying
 
 ```sh
@@ -149,7 +193,7 @@ so explicitly.
 | `object_storage` | Bucket destroy refused when non-empty (GCP) | `force_destroy: true` |
 | `relational_database` | Deletion protection on | `deletion_protection: false` |
 | `relational_database` | Final snapshot taken on destroy (AWS) | `skip_final_snapshot: true` |
-| `relational_database` | Not publicly reachable | — |
+| `relational_database` | No public endpoint | — |
 | `relational_database` | Encrypted at rest, 7-day backups | — |
 | `compute_instance` | No public address | `public_ip: true` (opens no port) |
 | `compute_instance` | No inbound firewall rule at all | — |
@@ -390,5 +434,7 @@ it in the ledger, so a retry does not re-create resources that already exist.
 | `unknown or malformed property` | The translator produced a property the provider does not support. Since RFC 011 these are rejected instead of silently dropped, so the message names what would have been ignored. |
 | `property key … looks like a credential` | A credential was placed in the Specification. Credentials come from the local environment only. |
 | `encryption cannot be disabled on …` | GCP and Azure encrypt at rest unconditionally; the request is refused rather than quietly ignored. |
+| `failed to declare the deletion lock … requires Microsoft.Authorization/locks/write` | The Azure identity is Contributor, which cannot create management locks. Use Owner or User Access Administrator, or deploy with `deletion_protection: false`. |
+| `resource … is protected` on destroy | Deletion protection is on. Set `deletion_protection: false`, apply, then destroy. |
 | `ledger is locked by another process` | Another `cloudsdd` run holds the ledger. Wait, or remove `~/.cloudsdd/ledger.lock` if no run is active. |
 | Operation cancelled with no prompt shown | Non-interactive invocation without `--yes`. |

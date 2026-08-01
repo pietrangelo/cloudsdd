@@ -313,6 +313,60 @@ func TestRelationalDatabaseHonoursEngineAndHA(t *testing.T) {
 	}
 }
 
+// TestRelationalDatabaseDeletionProtection covers the decoding half of
+// RFC 015 §2.1. The row that matters most is "explicitly false": before
+// this RFC the property was not declared on Azure, so strict decoding
+// rejected it as unknown — the documented way to relax the default was
+// an error on the one provider that did not implement the default.
+func TestRelationalDatabaseDeletionProtection(t *testing.T) {
+	tests := []struct {
+		name    string
+		props   map[string]any
+		want    bool
+		wantErr bool
+	}{
+		{
+			name:  "absent defaults to protected",
+			props: map[string]any{"engine": "postgres", "version": "15"},
+			want:  true,
+		},
+		{
+			name:  "explicitly true",
+			props: map[string]any{"engine": "postgres", "version": "15", "deletion_protection": true},
+			want:  true,
+		},
+		{
+			name:  "explicitly false is accepted, not rejected as unknown",
+			props: map[string]any{"engine": "postgres", "version": "15", "deletion_protection": false},
+			want:  false,
+		},
+		{
+			name:    "non-boolean rejected",
+			props:   map[string]any{"engine": "postgres", "version": "15", "deletion_protection": "yes"},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := decodeRelationalDatabaseProperties(tt.props)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("decodeRelationalDatabaseProperties() error = nil, want an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decodeRelationalDatabaseProperties() error: %v", err)
+			}
+			if got := p.EffectiveDeletionProtection(); got != tt.want {
+				t.Errorf("EffectiveDeletionProtection() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStackNameFor(t *testing.T) {
 	tests := []struct {
 		name                              string

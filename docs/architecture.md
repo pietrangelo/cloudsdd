@@ -328,10 +328,42 @@ environment running through a shutdown the user believed they had
 scheduled, and the failure would surface as an invoice rather than an
 error.
 
-### `internal/provider/azure` (RFC 008, 012, 013)
+### `internal/provider/azure` (RFC 008, 012, 013, 015)
 
 Blob storage and Flexible Server databases, in a resource group per
 resource since Azure has no ambient container and no default network.
+
+**Databases are VNet-integrated on both engines** (RFC 015 §2.2): a
+virtual network, a subnet delegated to the engine's own service, a
+private DNS zone and its link, then a server carrying `DelegatedSubnetId`
+and `PrivateDnsZoneId`. Only the delegation name and the DNS suffix
+differ between PostgreSQL and MySQL, so they come from a two-entry table
+rather than a branch in each declare function — the point of the change
+being that the two engines stop producing different resource graphs. The
+address space is `10.1.0.0/16` against compute's `10.0.0.0/16`, because
+overlapping ranges cannot be peered and peering is what the deferred
+network model needs.
+
+This replaced two unsatisfying postures. MySQL exposes no
+`PublicNetworkAccessEnabled` at all, so it had a public endpoint that only
+the absence of a firewall rule kept closed; PostgreSQL had that flag set
+false, which is genuinely private but leaves no path to the server at all.
+
+**`deletion_protection` is enforced twice** (RFC 015 §2.1), because
+Flexible Server has no server-side equivalent of the flag AWS and GCP
+pass straight to the API. A `CanNotDelete` management lock stops deletion
+through any tool that never reads CloudSDD's state; `pulumi.Protect`
+stops CloudSDD itself, which would otherwise delete the lock first — it
+is a resource in the same stack — and the server second. Neither half
+covers the other's case. The level is `CanNotDelete` and not the stronger
+`ReadOnly` because RFC 012's runbook has to keep stopping and starting
+the server, and a schedule broken that way reports itself as an unchanged
+bill.
+
+Creating the lock requires `Microsoft.Authorization/locks/write`, which
+Contributor does not grant. The deploy fails with that named in the error
+rather than provisioning a database documented as protected and isn't —
+the same choice RFC 013 made for `encryption_at_host`.
 
 Power scheduling uses an Automation Account with a system-assigned
 identity, a runbook, and `automation.Schedule` resources (whose
@@ -347,10 +379,6 @@ computes the first occurrence against a clock (a `timeNow` seam, frozen in
 tests) and declares the resource with
 `pulumi.IgnoreChanges([]string{"startTime"})` — otherwise every apply
 would recompute the anchor and show a spurious diff.
-
-Two gaps are open and tracked under "Out of scope" below rather than
-papered over: no `deletion_protection` on `relational_database`, and no
-network isolation for MySQL Flexible Server.
 
 ### Compute instances across the three providers (RFC 013)
 
@@ -476,6 +504,9 @@ Measures active as of today (see also RFC 001 §3, 002 §2.4-2.5, 003
 | Confused deputy (cross-account) | `external_id` mandatory on `cross_account_role` (RFC 003) and on AWS `DeploymentTarget` (RFC 004) |
 | Cross-account privilege escalation | No full wildcard (`*`) permissions on `cross_account_role`; `AdministratorAccess` explicitly discouraged for `DeploymentTarget`s (RFC 004 §3, principles also valid for GCP/Azure once implemented) |
 | Region bypass / uncontrolled cost | `Policies.AllowedRegions` enforced by every provider, per effective region when a resource is multi-region (RFC 005 §2.4.2); `cross_account_role` is fail-closed if `AllowedRegions` is empty |
+| Publicly reachable database endpoint (RFC 015 §1) | Azure MySQL had a public endpoint held closed only by the absence of a firewall rule — one portal click from open — while `cli.md` claimed it was not publicly reachable. VNet integration removes the endpoint instead of leaving it unfirewalled, on both engines |
+| Deletion protection that protects against everything except us | The Azure management lock is a resource in CloudSDD's own stack, so a destroy would delete it first. `pulumi.Protect` covers that path; the lock covers the portal. Shipping either alone would be protection with a hole exactly where the mistranslated-prompt risk lives (RFC 015 §2.1) |
+| Protection that silently disables a cost control | The lock is `CanNotDelete`, never `ReadOnly`: `ReadOnly` forbids modification and would leave RFC 012's runbook unable to stop the server, reporting itself only as an unchanged bill |
 | Sealed environments by default (RFC 005 §2.5) | `Scope.Sealed` defaults to `true`; `cross_account_role`, the only ResourceType inherently cross-account, is rejected unless `Scope.Sealed: false` is explicit (`ErrSealedCrossAccountRole`) |
 | Cross-account/cross-environment state collision | Pulumi stack identity is now `(Account, Environment, Region, Resource.ID)`, not `Resource.ID` alone (RFC 005 §2.6): closes a gap where the same `Resource.ID` applied to two accounts/environments could silently share one local stack |
 | BOLA | Not yet applicable: no multi-tenant storage/state layer exists yet (note: the stack-per-scope design in RFC 002 §2.3 / RFC 005 §2.6 has no tenant namespacing, open question) |
@@ -551,13 +582,15 @@ Not yet implemented:
 
 - `container_service`, the one `ResourceType` in the schema no provider
   implements.
-- **Azure `relational_database` parity.** Azure has no
-  `deletion_protection` property, so the secure default the other two
-  providers apply has no Azure equivalent; and Azure MySQL Flexible Server
-  gets no network isolation, because `pulumi-azure` v5 exposes it only
-  through `DelegatedSubnetId` and RFC 008 modelled no VNet. RFC 013 has
-  since built a VNet/subnet/NSG for `compute_instance`, so the primitive
-  now exists. Both gaps need an RFC: they change the Azure resource graph.
+- **A network model.** "Private by default" is implemented on all three
+  clouds as *no configured path*, and only AWS produces a database
+  something can actually connect to: it sits in the account's default VPC,
+  whereas Azure's is alone in a VNet of its own and GCP's has a private IP
+  with no VPC offering private services access. Deciding what shares a
+  network — which is also what `Environment` should mean at the network
+  layer (RFC 005 §5) — is the largest open gap in the system and needs its
+  own RFC. RFC 015 §1.1 scoped it out deliberately rather than solving a
+  third of it inside a database change.
 - References/dependencies between resources in the same Specification —
   which is also why `Destroy` walks the resource list in reverse rather
   than in dependency order.
