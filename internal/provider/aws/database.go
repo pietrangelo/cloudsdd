@@ -58,14 +58,17 @@ func decodeRelationalDatabaseProperties(props map[string]any) (*relationalDataba
 	return &p, nil
 }
 
-func declareRelationalDatabase(ctx *pulumi.Context, id string, p relationalDatabaseProperties, opts ...pulumi.ResourceOption) error {
+// declareRelationalDatabase registers the RDS instance and returns it, so
+// that resources referring to it — the power schedules of RFC 012 §4.1 —
+// can be declared against its ARN and identifier.
+func declareRelationalDatabase(ctx *pulumi.Context, id string, p relationalDatabaseProperties, opts ...pulumi.ResourceOption) (*rds.Instance, error) {
 	// 1. Generate a secure random password for the master user.
 	pwd, err := random.NewRandomPassword(ctx, id+"-pwd", &random.RandomPasswordArgs{
 		Length:  pulumi.Int(32),
 		Special: pulumi.Bool(false),
 	}, opts...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// 2. Provision the RDS instance.
@@ -98,6 +101,5 @@ func declareRelationalDatabase(ctx *pulumi.Context, id string, p relationalDatab
 		args.FinalSnapshotIdentifier = pulumi.String(id + "-final-snapshot")
 	}
 
-	_, err = rds.NewInstance(ctx, id, args, opts...)
-	return err
+	return rds.NewInstance(ctx, id, args, opts...)
 }

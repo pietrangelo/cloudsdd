@@ -88,6 +88,13 @@ var _ provider.CloudProvider = (*AWSProvider)(nil)
 // ResourceType and applies the Policies constraints, without making any
 // call to AWS/Pulumi.
 func (p *AWSProvider) Validate(ctx context.Context, r spec.Resource, policies spec.Policies) error {
+	// Defense in depth against the Engine's own schedule validation
+	// (RFC 012 §2.3): a provider driven directly, outside the Engine,
+	// must still refuse a schedule it cannot honor.
+	if _, err := resourceSchedule(r, policies); err != nil {
+		return err
+	}
+
 	switch r.Type {
 	case spec.ResourceTypeRelationalDatabase:
 		if _, err := decodeRelationalDatabaseProperties(r.Properties); err != nil {
@@ -237,13 +244,23 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		if err != nil {
 			return nil, "", err
 		}
+		rules, err := resourceSchedule(r, policies)
+		if err != nil {
+			return nil, "", err
+		}
 		region := r.Scope.Region
 		program := func(ctx *pulumi.Context) error {
 			opts, err := p.providerOpts(ctx, region)
 			if err != nil {
 				return err
 			}
-			return declareRelationalDatabase(ctx, r.ID, *dbp, opts...)
+			instance, err := declareRelationalDatabase(ctx, r.ID, *dbp, opts...)
+			if err != nil {
+				return err
+			}
+			// The power schedule lives in the same program, and so in
+			// the same stack, as the instance it governs (RFC 012 §4.1).
+			return declareDatabaseSchedule(ctx, r.ID, instance, rules, opts...)
 		}
 		return program, region, nil
 

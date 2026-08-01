@@ -135,6 +135,14 @@ func (e *DefaultEngine) Validate(ctx context.Context, s spec.Specification) erro
 		if err != nil {
 			return err
 		}
+		// The power schedule is compiled here, centrally, for the same
+		// reason AllowedRegions is (RFC 011 §2.3): a check that lives
+		// only inside providers is a check the next provider forgets.
+		// Providers keep their own, for the case where one is driven
+		// directly rather than through the Engine.
+		if err := validateSchedule(r, s.Policies); err != nil {
+			return err
+		}
 		for _, region := range effectiveRegions(r.Scope) {
 			// Policies.AllowedRegions is enforced here, centrally, as
 			// well as inside each provider (RFC 011 §2.3). It was

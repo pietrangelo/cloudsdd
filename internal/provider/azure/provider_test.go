@@ -208,7 +208,7 @@ func TestResourceProgramPropagatesDecodeErrors(t *testing.T) {
 
 	program, _, err := p.resourceProgram(bucketResource(func(r *spec.Resource) {
 		r.Properties = map[string]any{}
-	}))
+	}), spec.Policies{})
 	if err == nil {
 		t.Fatal("resourceProgram() error = nil, want a decode error")
 	}

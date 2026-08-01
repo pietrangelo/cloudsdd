@@ -27,6 +27,9 @@ operation.`,
 }
 
 func init() {
+	// The scheduling flags are deliberately absent here: destroy removes
+	// a resource's schedules along with it, so there is nothing to
+	// configure (RFC 012 §5).
 	destroyCmd.Flags().BoolVarP(&assumeYes, "yes", "y", false, "skip the interactive confirmation prompt")
 	rootCmd.AddCommand(destroyCmd)
 }

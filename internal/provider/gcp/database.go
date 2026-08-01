@@ -68,13 +68,16 @@ func cloudSQLDatabaseVersion(engine, version string) (string, error) {
 	}
 }
 
-func declareRelationalDatabase(ctx *pulumi.Context, id, region string, p relationalDatabaseProperties) error {
+// declareRelationalDatabase registers the Cloud SQL instance and
+// returns it, so the power schedules of RFC 012 §4.2 can be declared
+// against its project and name.
+func declareRelationalDatabase(ctx *pulumi.Context, id, region string, p relationalDatabaseProperties) (*sql.DatabaseInstance, error) {
 	pwd, err := random.NewRandomPassword(ctx, id+"-pwd", &random.RandomPasswordArgs{
 		Length:  pulumi.Int(32),
 		Special: pulumi.Bool(false),
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	availabilityType := "ZONAL"
@@ -84,7 +87,7 @@ func declareRelationalDatabase(ctx *pulumi.Context, id, region string, p relatio
 
 	databaseVersion, err := cloudSQLDatabaseVersion(p.Engine, p.Version)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	instance, err := sql.NewDatabaseInstance(ctx, id, &sql.DatabaseInstanceArgs{
@@ -104,7 +107,7 @@ func declareRelationalDatabase(ctx *pulumi.Context, id, region string, p relatio
 		DeletionProtection: pulumi.Bool(p.EffectiveDeletionProtection()),
 	})
 	if err != nil {
-		return fmt.Errorf("gcp: failed to declare database instance %q: %w", id, err)
+		return nil, fmt.Errorf("gcp: failed to declare database instance %q: %w", id, err)
 	}
 
 	if _, err := sql.NewUser(ctx, id+"-user", &sql.UserArgs{
@@ -112,7 +115,7 @@ func declareRelationalDatabase(ctx *pulumi.Context, id, region string, p relatio
 		Name:     pulumi.String("masteruser"),
 		Password: pwd.Result,
 	}); err != nil {
-		return fmt.Errorf("gcp: failed to declare database user for %q: %w", id, err)
+		return nil, fmt.Errorf("gcp: failed to declare database user for %q: %w", id, err)
 	}
-	return nil
+	return instance, nil
 }

@@ -35,6 +35,14 @@ Automation API shells out to it even for an inline Go program.
 | Flag | Applies to | Meaning |
 |---|---|---|
 | `-y`, `--yes` | `deploy`, `destroy` | Skip the interactive confirmation. Required for non-interactive use — without a TTY and without this flag the run is declined rather than guessed at. |
+| `--schedule-start` | `deploy` | Power-on time for scheduled resources, `HH:MM`. |
+| `--schedule-stop` | `deploy` | Power-off time for scheduled resources, `HH:MM`. |
+| `--schedule-timezone` | `deploy` | IANA zone the schedule runs in, e.g. `Europe/Rome`. |
+| `--schedule-days` | `deploy` | Comma-separated days the resources are up, e.g. `mon,tue,wed,thu,fri`. Defaults to Monday–Friday. |
+| `--no-schedule` | `deploy` | Drop any power schedule the translation proposed. |
+
+The scheduling flags are absent from `destroy` on purpose: destroying a resource
+removes its schedules along with it, so there is nothing to configure.
 
 ## Environment
 
@@ -154,6 +162,88 @@ so explicitly.
 `max_cost_monthly` was removed in RFC 011 §2.9: it was validated but never
 enforced, so it read as a guarantee and provided none. Real cost enforcement
 needs a pricing model and is deferred to its own RFC.
+
+## Power scheduling
+
+Ask for it in the prompt, and the environment is powered off outside working
+hours (RFC 012). Nothing is scheduled unless you ask.
+
+```
+$ cloudsdd deploy "a dev postgres database in eu-central-1, shut it down outside working hours"
+
+This deployment includes a power schedule: app-db will be shut down outside working hours.
+  Start time (HH:MM): 08:00
+  Stop time (HH:MM): 19:00
+  Timezone [Europe/Rome]:
+  Days [mon,tue,wed,thu,fri]:
+
+...
+Power schedule:
+- app-db: Mon-Fri 08:00 -> 19:00 (Europe/Rome), weekend off
+```
+
+**The times are asked for, never inferred.** The translator is instructed to
+emit the *intent* to schedule and nothing else; a start time it guessed wrong
+would be an inconvenience, a stop time it guessed wrong is an outage. In
+non-interactive use (`--yes`, or no TTY) an unresolved schedule is a hard error
+naming the flags that would resolve it.
+
+The schedule is provisioned as cloud-native resources in the target account —
+EventBridge Scheduler on AWS, Cloud Scheduler on GCP, Automation on Azure — so
+it keeps working with no `cloudsdd` process running anywhere.
+
+### Schema
+
+Declared once in `policies`, inherited by every schedulable resource:
+
+```json
+"policies": {
+  "schedule": {
+    "enabled": true,
+    "timezone": "Europe/Rome",
+    "start": "08:00",
+    "stop": "19:00",
+    "days": ["mon", "tue", "wed", "thu", "fri"],
+    "exceptions": [
+      { "from": "2026-09-12", "to": "2026-09-14", "mode": "always_on",  "reason": "release weekend" },
+      { "from": "2026-12-24", "to": "2027-01-06", "mode": "always_off", "reason": "company shutdown" }
+    ]
+  }
+}
+```
+
+- `days` absent means Monday–Friday, which leaves the weekend off: no start
+  fires on Saturday or Sunday, and Friday's stop leaves the environment down.
+- A resource can override the policy or opt out of it entirely with
+  `"schedule": {"enabled": false}` — the reviewable way to keep production up.
+- `start` later than `stop` is an overnight window and is accepted.
+- The timezone must be an IANA zone name. A fixed offset is rejected: it is an
+  hour wrong for half the year.
+- Exception windows may not overlap. Ambiguity is an error rather than a
+  precedence rule you would have to guess at.
+
+### What can be scheduled
+
+Only `relational_database` has a power state today. An **explicit** schedule on
+an object store or an IAM role is an error; one **inherited** from `policies` is
+skipped and reported in the plan, so a Specification can hold both a bucket and
+a database.
+
+### Provider differences
+
+| Provider | Mechanism | Exception windows |
+|---|---|---|
+| AWS | EventBridge Scheduler, universal RDS targets | Supported |
+| Azure | Automation account, runbook and schedules | Supported |
+| GCP | Cloud Scheduler against the Cloud SQL Admin API | **Rejected** — a Cloud Scheduler job has no validity period |
+
+The GCP refusal is deliberate. Silently dropping a window would leave an
+environment running through a shutdown you believed you had scheduled, and the
+failure would reach you as an invoice rather than an error.
+
+One detail worth knowing: an `always_off` window issues a **daily** stop, not a
+single one, because AWS automatically restarts an RDS instance that has been
+stopped for more than seven days.
 
 ## The ledger
 

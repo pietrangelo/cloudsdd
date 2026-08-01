@@ -9,6 +9,14 @@ import (
 	"io"
 	"os"
 
+	// The IANA timezone database is embedded rather than read from the
+	// host. A power schedule resolves zone names such as "Europe/Rome"
+	// (RFC 012 §2.2), and a stripped container or a Windows machine has
+	// no zoneinfo to read — where the failure would be a schedule that
+	// refuses to compile, or worse, one that compiles against the wrong
+	// DST rules.
+	_ "time/tzdata"
+
 	"github.com/spf13/cobra"
 )
 

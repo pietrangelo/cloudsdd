@@ -66,6 +66,12 @@ var _ provider.CloudProvider = (*GCPProvider)(nil)
 // GCP. The Engine now enforces the policy centrally (RFC 011 §2.3); the
 // call here is defense in depth for a provider driven directly.
 func (p *GCPProvider) Validate(ctx context.Context, r spec.Resource, policies spec.Policies) error {
+	// Defense in depth against the Engine's schedule validation (RFC 012
+	// §2.3), plus the GCP-specific refusal of exception windows.
+	if _, err := resourceSchedule(r, policies); err != nil {
+		return err
+	}
+
 	switch r.Type {
 	case spec.ResourceTypeObjectStorage:
 		if _, err := decodeObjectStorageProperties(r.Properties); err != nil {
@@ -123,7 +129,7 @@ func (p *GCPProvider) upsertStack(ctx context.Context, account, env, region, res
 // resourceProgram builds the inline Pulumi program for r. Decode errors
 // are propagated rather than discarded: the Azure twin dropped them and
 // then dereferenced a nil pointer inside the closure (RFC 011 §1.1B1).
-func (p *GCPProvider) resourceProgram(r spec.Resource) (pulumi.RunFunc, string, error) {
+func (p *GCPProvider) resourceProgram(r spec.Resource, policies spec.Policies) (pulumi.RunFunc, string, error) {
 	region := r.Scope.Region
 
 	switch r.Type {
@@ -141,8 +147,18 @@ func (p *GCPProvider) resourceProgram(r spec.Resource) (pulumi.RunFunc, string, 
 		if err != nil {
 			return nil, "", err
 		}
+		rules, err := resourceSchedule(r, policies)
+		if err != nil {
+			return nil, "", err
+		}
 		return func(ctx *pulumi.Context) error {
-			return declareRelationalDatabase(ctx, r.ID, region, *props)
+			instance, err := declareRelationalDatabase(ctx, r.ID, region, *props)
+			if err != nil {
+				return err
+			}
+			// The power schedule shares the instance's stack, so the
+			// existing Destroy path removes both (RFC 012 §4.2).
+			return declareDatabaseSchedule(ctx, r.ID, region, instance, rules)
 		}, region, nil
 
 	default:
@@ -154,7 +170,7 @@ func (p *GCPProvider) Plan(ctx context.Context, r spec.Resource, policies spec.P
 	if err := p.Validate(ctx, r, policies); err != nil {
 		return provider.Diff{}, err
 	}
-	program, region, err := p.resourceProgram(r)
+	program, region, err := p.resourceProgram(r, policies)
 	if err != nil {
 		return provider.Diff{}, err
 	}
@@ -179,7 +195,7 @@ func (p *GCPProvider) Apply(ctx context.Context, r spec.Resource, policies spec.
 	if err := p.Validate(ctx, r, policies); err != nil {
 		return provider.Result{}, err
 	}
-	program, region, err := p.resourceProgram(r)
+	program, region, err := p.resourceProgram(r, policies)
 	if err != nil {
 		return provider.Result{}, err
 	}
@@ -206,7 +222,7 @@ func (p *GCPProvider) Destroy(ctx context.Context, r spec.Resource, policies spe
 	if err := p.Validate(ctx, r, policies); err != nil {
 		return err
 	}
-	program, region, err := p.resourceProgram(r)
+	program, region, err := p.resourceProgram(r, policies)
 	if err != nil {
 		return err
 	}

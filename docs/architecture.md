@@ -50,6 +50,7 @@ cloudsdd/
 │   └── cloudsdd/            # CLI entry point (cobra root, deploy, destroy commands)
 ├── internal/
 │   ├── nlp/                 # LLM translation interface from Natural Language to Specification
+│   ├── schedule/            # Power-schedule model and compiler (RFC 012)
 │   ├── spec/                # Specification types, strict parsing, domain validation
 │   ├── provider/             # CloudProvider interface, Diff/Result types
 │   │   └── aws/                # Concrete AWS implementation (RFC 002/003/004)
@@ -57,7 +58,7 @@ cloudsdd/
 ├── pkg/                     # Empty: no public type exposed yet
 ├── LICENSE                  # GNU AGPLv3 (or later), full text
 └── docs/
-    ├── rfc/001-006...        # Foundation + AWS + scoping + CLI (approved)
+    ├── rfc/001-012...        # Foundation + AWS + scoping + CLI + scheduling (approved)
     ├── architecture.md        # This document
     ├── cli.md                 # CLI commands and usage guide
     ├── dependency-licenses.md # Third-party license audit vs. AGPLv3
@@ -103,6 +104,40 @@ The parser is covered by a native Go fuzz test (`FuzzParse`), run against
 malformed input, nested JSON, unknown fields, and empty input: the
 invariant being verified is the absence of panics, not the acceptance of
 the input.
+
+## Package `internal/schedule`
+
+Models *when* a resource is powered on, and compiles that model into a
+provider-agnostic rule set (RFC 012).
+
+`Compile(*Schedule) ([]Rule, error)` is a pure function: no clock is read,
+no environment consulted, no I/O performed. Every decision about time in
+CloudSDD is made here, which makes the whole temporal behaviour of the
+system table-testable without a cloud account, and leaves each provider
+with a mechanical translation of an already-validated rule set into its
+native scheduling primitive.
+
+A `Rule` stays structured — action, weekdays, hour, minute, timezone, and
+an optional `[ValidFrom, ValidTo)` validity interval — rather than
+carrying a cron string, because the dialects differ: AWS uses a six-field
+`cron()` expression with a mandatory year, GCP and Azure use five-field
+unix cron, and Azure does not use cron at all. Rendering belongs to the
+provider; deciding when things happen belongs here.
+
+Two compilation decisions are worth recording:
+
+- **Exception windows segment the weekly rhythm** rather than competing
+  with it. A window suspends the base rules for its duration via the
+  validity interval, so there is never a stop rule live inside an
+  `always_on` window.
+- **`always_off` emits a *daily* stop**, not a single one. AWS
+  automatically restarts an RDS instance that has been stopped for more
+  than seven days, so a one-shot stop at the start of a two-week company
+  shutdown would leave it running, and billing, for the second week.
+
+The compiler is covered by a native fuzz target (`FuzzCompile`) over the
+time, date, and mode strings, on the same reasoning as `spec`'s
+`FuzzParse`.
 
 ## Package `internal/provider`
 
@@ -177,6 +212,22 @@ the machine, but invokes it itself).
   `DeploymentTarget` and uses credentials obtained via STS AssumeRole
   (`NewTargetProviderFactory`, RFC 004 §4), passed explicitly to the
   Pulumi AWS provider (never written to disk).
+- **Power scheduling (RFC 012 §4.1)**: EventBridge Scheduler with
+  *universal targets* — `arn:aws:scheduler:::aws-sdk:rds:{start,stop}DBInstance`
+  — so a schedule is pure configuration. The obvious alternative, a Lambda
+  calling the RDS API, would mean shipping, versioning and patching a code
+  artifact for something that changes no logic. The schedules are declared
+  inside the same Pulumi program as the instance, so they share its stack
+  identity and the existing `Destroy` path removes them.
+
+  The execution role carries exactly two actions on exactly one instance
+  ARN. Its trust policy names `scheduler.amazonaws.com` with
+  `aws:SourceAccount` and an `ArnLike` `aws:SourceArn` prefix condition —
+  mandatory, not optional hardening, since a service principal will
+  otherwise assume the role on behalf of whoever asks. Both the account
+  and the region are parsed out of the instance ARN rather than read
+  through an `aws:getCallerIdentity` invoke: the schedules necessarily
+  live where the instance does, and the program stays invoke-free.
 
 ## Package `internal/engine`
 
@@ -191,6 +242,16 @@ Relevant behavior:
   `s.Policies`.
 - `Plan`/`Apply` call `Validate` as a precondition (fail-fast: no call to
   a provider happens on an invalid Specification).
+- **Power schedules (RFC 012 §2.3)**: `Validate` resolves each resource's
+  effective schedule (`spec.EffectiveSchedule`: the resource's own if it
+  declares one, otherwise `Policies.Schedule`) and compiles it *before*
+  delegating to any provider. This follows the enforcement lift RFC 011
+  §2.3 applied to `AllowedRegions` — a check that lives only inside
+  providers is a check the next provider forgets. Providers keep their own
+  as defense in depth. A resource type with no power state rejects an
+  *explicit* schedule (`ErrResourceNotSchedulable`) but merely skips an
+  *inherited* one, which is what lets a Specification hold both an object
+  store and a database.
 - **Multi-region fan-out (RFC 005 §2.4.2)**: for each resource, the Engine
   calls `effectiveRegions(r.Scope)` — `Scope.Regions` when set,
   `[Scope.Region]` for a single region, or `[""]` for an unscoped
@@ -223,6 +284,38 @@ Relevant behavior:
   itself stays cloud-agnostic and knows nothing about STS/AssumeRole) and
   cached for the rest of the Engine's lifetime.
 
+### Scheduling on GCP and Azure (RFC 012 §4.2, §4.3)
+
+`internal/provider/gcp` uses a Cloud Scheduler job calling the Cloud SQL
+Admin API (`settings.activationPolicy`: `ALWAYS`/`NEVER`) with an OAuth
+token minted for a dedicated service account, bound to a custom role
+carrying `cloudsql.instances.get` and `cloudsql.instances.update`. Cloud
+SQL has no resource-level IAM, so the binding is necessarily
+project-wide — which is precisely why it must not be
+`roles/cloudsql.admin`.
+
+A Cloud Scheduler job has no start or expiry date, so **exception windows
+cannot be expressed on GCP** and are rejected with
+`ErrScheduleExceptionsUnsupported`. Dropping them silently would leave an
+environment running through a shutdown the user believed they had
+scheduled, and the failure would surface as an invoice rather than an
+error.
+
+`internal/provider/azure` uses an Automation Account with a
+system-assigned identity, a runbook, and `automation.Schedule` resources
+(whose `StartTime`/`ExpiryTime` do support exception windows). It is the
+only provider needing a deployed code artifact, so the runbook is a fixed
+constant in the repository: the action and the target arrive as runbook
+*parameters*, never as interpolated script text. The identity is bound to
+a custom role scoped to the single server, with read/start/stop and
+nothing else.
+
+Azure schedules are anchored rather than purely recurrent, so the
+provider computes the first occurrence against a clock (a `timeNow` seam,
+frozen in tests) and declares the resource with
+`pulumi.IgnoreChanges([]string{"startTime"})` — otherwise every apply
+would recompute the anchor and show a spurious diff.
+
 ## Security
 
 Measures active as of today (see also RFC 001 §3, 002 §2.4-2.5, 003
@@ -239,7 +332,11 @@ Measures active as of today (see also RFC 001 §3, 002 §2.4-2.5, 003
 | Sealed environments by default (RFC 005 §2.5) | `Scope.Sealed` defaults to `true`; `cross_account_role`, the only ResourceType inherently cross-account, is rejected unless `Scope.Sealed: false` is explicit (`ErrSealedCrossAccountRole`) |
 | Cross-account/cross-environment state collision | Pulumi stack identity is now `(Account, Environment, Region, Resource.ID)`, not `Resource.ID` alone (RFC 005 §2.6): closes a gap where the same `Resource.ID` applied to two accounts/environments could silently share one local stack |
 | BOLA | Not yet applicable: no multi-tenant storage/state layer exists yet (note: the stack-per-scope design in RFC 002 §2.3 / RFC 005 §2.6 has no tenant namespacing, open question) |
-| Unrestricted Resource Consumption | Not yet applicable at the HTTP/API level (it does not exist yet); at the provider level, a cap of 20 entries on IAM lists (RFC 003), `Scope.Regions`/`Zones` capped at 10 entries (RFC 005 §3) |
+| Scheduling privilege escalation (RFC 012 §7) | The identity a power schedule acts through is scoped to one resource and two or three actions on every provider: AWS start/stop on one instance ARN, GCP a two-permission custom role, Azure a role scoped to the single server. A scheduling feature that provisioned a broadly-privileged role would be a worse trade than the money it saves |
+| Confused deputy (AWS scheduler service principal) | `aws:SourceAccount` and `ArnLike` `aws:SourceArn` conditions on the execution role's trust policy (RFC 012 §4.1) |
+| Terminal escape injection via prompt text | `schedule.Describe` strips control characters from `Window.Reason`, which originates in a natural language prompt, travels through the ledger, and is printed to the operator's terminal before the confirmation gate |
+| Silent schedule degradation | A rule a provider cannot express is a `Validate` error, never a dropped rule (RFC 012 §1.3). The failure mode of a silently broken schedule is a bill rather than an alert, so it must surface while somebody is watching |
+| Unrestricted Resource Consumption | Not yet applicable at the HTTP/API level (it does not exist yet); at the provider level, a cap of 20 entries on IAM lists (RFC 003), `Scope.Regions`/`Zones` capped at 10 entries (RFC 005 §3), `schedule.exceptions` capped at 12 windows, which bounds the number of scheduling resources one Specification can provision (RFC 012 §2.2) |
 
 Scans run before this commit (RFC 005): `gosec ./...` (0 issues; 2 false
 positives suppressed with `#nosec` and inline justification — an env var

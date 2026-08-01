@@ -42,3 +42,12 @@ var ErrNoTargetProviderFactory = errors.New("engine: no target provider factory 
 // destroy command had to overwrite Intent after translation to compensate
 // — which silently masked a translator that misread the user's request.
 var ErrIntentMismatch = errors.New("engine: specification intent does not permit this operation")
+
+// ErrResourceNotSchedulable indicates that a resource declared its own
+// power schedule but its ResourceType has no power state (RFC 012 §3).
+//
+// Only an *explicit* Resource.Schedule is an error. A schedule inherited
+// from Policies is skipped instead, because otherwise no Specification
+// could contain both an object store and a database — which is most of
+// them.
+var ErrResourceNotSchedulable = errors.New("engine: resource type does not support a power schedule")

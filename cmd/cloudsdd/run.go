@@ -48,6 +48,12 @@ func runIntent(cmd *cobra.Command, args []string, intent spec.Intent) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
+	// One reader for the whole run. Two bufio.Readers over the same
+	// stream would let the first swallow input meant for the second: the
+	// schedule prompt would buffer the confirmation answer, and the
+	// confirmation would then read EOF and cancel the operation.
+	in := bufio.NewReader(cmd.InOrStdin())
+
 	prompt := strings.Join(args, " ")
 
 	fmt.Fprintf(out, "Translating prompt to SDD Specification...\n")
@@ -92,6 +98,13 @@ func runIntent(cmd *cobra.Command, args []string, intent spec.Intent) error {
 			intent, sddSpec.Intent)
 	}
 
+	// Settle the power schedule before rendering the Specification, so
+	// the times the user is about to approve are the ones that will be
+	// provisioned rather than blanks filled in later (RFC 012 §5).
+	if err := resolveSchedules(cmd, in, &sddSpec, intent); err != nil {
+		return err
+	}
+
 	specJSON, err := json.MarshalIndent(sddSpec, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to render specification: %w", err)
@@ -116,8 +129,9 @@ func runIntent(cmd *cobra.Command, args []string, intent spec.Intent) error {
 	for _, d := range diffs {
 		fmt.Fprintf(out, "Resource: %s (region: %s) -> action: %s\n", d.ResourceID, displayRegion(d.Region), d.Action)
 	}
+	printSchedules(out, sddSpec)
 
-	ok, err := confirm(cmd, intent)
+	ok, err := confirm(cmd, in, intent)
 	if err != nil {
 		return err
 	}
@@ -182,6 +196,29 @@ func printResults(out io.Writer, results []provider.Result) {
 	}
 }
 
+// printSchedules renders the effective power schedule of every affected
+// resource, in prose, before the confirmation gate.
+//
+// A six-field cron expression does not let anyone tell at a glance that
+// an environment is about to start powering down at 19:00, and the whole
+// purpose of the gate is that somebody can (RFC 012 §5).
+func printSchedules(out io.Writer, s spec.Specification) {
+	statuses := engine.ScheduleStatuses(s)
+	if len(statuses) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "\nPower schedule:")
+	for _, st := range statuses {
+		fmt.Fprintf(out, "- %s: %s\n", st.ResourceID, indentContinuation(st.Summary))
+	}
+}
+
+// indentContinuation keeps a multi-line schedule summary aligned under
+// its resource ID.
+func indentContinuation(summary string) string {
+	return strings.ReplaceAll(summary, "\n", "\n  ")
+}
+
 func displayRegion(region string) string {
 	if region == "" {
 		return "global"
@@ -224,7 +261,7 @@ func buildEngine(s spec.Specification) (engine.Engine, error) {
 // than one whitespace-separated token, so "yes" is understood rather than
 // silently treated as a decline, and defaults to "no" on EOF or any other
 // input.
-func confirm(cmd *cobra.Command, intent spec.Intent) (bool, error) {
+func confirm(cmd *cobra.Command, in *bufio.Reader, intent spec.Intent) (bool, error) {
 	if assumeYes {
 		return true, nil
 	}
@@ -235,7 +272,7 @@ func confirm(cmd *cobra.Command, intent spec.Intent) (bool, error) {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "\nDo you want to %s? (y/N): ", verb)
 
-	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+	line, err := in.ReadString('\n')
 	if err != nil && line == "" {
 		// EOF with nothing typed: a non-interactive invocation without
 		// --yes. Decline rather than guess.

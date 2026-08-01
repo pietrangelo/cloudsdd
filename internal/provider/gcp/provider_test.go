@@ -277,7 +277,7 @@ func TestResourceProgramUsesScopeRegion(t *testing.T) {
 		t.Run(region, func(t *testing.T) {
 			r := bucketResource(func(r *spec.Resource) { r.Scope.Region = region })
 
-			_, gotRegion, err := p.resourceProgram(r)
+			_, gotRegion, err := p.resourceProgram(r, spec.Policies{})
 			if err != nil {
 				t.Fatalf("resourceProgram() error: %v", err)
 			}
@@ -295,7 +295,7 @@ func TestResourceProgramPropagatesDecodeErrors(t *testing.T) {
 
 	r := bucketResource(func(r *spec.Resource) { r.Properties = map[string]any{} })
 
-	program, _, err := p.resourceProgram(r)
+	program, _, err := p.resourceProgram(r, spec.Policies{})
 	if err == nil {
 		t.Fatal("resourceProgram() error = nil, want a decode error")
 	}

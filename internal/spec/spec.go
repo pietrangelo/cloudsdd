@@ -5,6 +5,8 @@
 // the "Single Source of Truth" described in docs/rfc/001-core-architecture-and-json-schema.md.
 package spec
 
+import "cloudsdd/internal/schedule"
+
 // Intent describes the operation requested on the Specification.
 type Intent string
 
@@ -28,6 +30,23 @@ const (
 	// role with restricted permissions toward specific resources.
 	ResourceTypeCrossAccountRole ResourceType = "cross_account_role"
 )
+
+// SupportsSchedule reports whether the ResourceType has a power state that
+// can be scheduled (RFC 012 §3).
+//
+// This is a property of the type, not of the cloud: an object store cannot
+// be switched off on any provider, and an IAM role costs nothing to leave
+// in place. compute_instance and container_service are declared by the
+// schema but implemented by no provider yet; they are listed here so that
+// the day a provider implements one, scheduling is not silently rejected.
+func (t ResourceType) SupportsSchedule() bool {
+	switch t {
+	case ResourceTypeRelationalDatabase, ResourceTypeComputeInstance, ResourceTypeContainerService:
+		return true
+	default:
+		return false
+	}
+}
 
 // Provider identifies the target cloud provider of a resource, or
 // "agnostic" to delegate its resolution to the Engine.
@@ -71,7 +90,15 @@ type Resource struct {
 	// Region/Regions, Zones, and the Sealed cross-boundary toggle (RFC 005
 	// §2.2). Orthogonal to Account (RFC 004), which carries "which
 	// credentials".
-	Scope      Scope          `json:"scope,omitempty"`
+	Scope Scope `json:"scope,omitempty"`
+
+	// Schedule overrides the Specification-wide Policies.Schedule for this
+	// resource (RFC 012 §2.1), carrying the "when" alongside Scope's
+	// "where". Absent means inherit; present replaces the inherited
+	// schedule wholesale, including {"enabled": false} to opt a production
+	// resource out of a policy that would otherwise power it down.
+	Schedule *schedule.Schedule `json:"schedule,omitempty"`
+
 	Properties map[string]any `json:"properties" validate:"required"`
 }
 
@@ -133,4 +160,25 @@ func boolOrDefault(p *bool, def bool) bool {
 // to its own RFC.
 type Policies struct {
 	AllowedRegions []string `json:"allowed_regions,omitempty"`
+
+	// Schedule declares, once for the whole Specification, when the
+	// schedulable resources are powered on (RFC 012 §2.1). Resource
+	// types with no power state ignore it; a resource that declares its
+	// own Schedule overrides it.
+	Schedule *schedule.Schedule `json:"schedule,omitempty"`
+}
+
+// EffectiveSchedule returns the Schedule governing r: its own if it
+// declares one, otherwise the Specification-wide default. A nil result
+// means the resource is never powered down.
+//
+// A Resource that declares a Schedule replaces the inherited one entirely
+// rather than merging it field by field. A partial override would let a
+// resource silently inherit a stop time its author never saw, which is
+// precisely the class of surprise RFC 012 §1.2 exists to prevent.
+func EffectiveSchedule(r Resource, p Policies) *schedule.Schedule {
+	if r.Schedule != nil {
+		return r.Schedule
+	}
+	return p.Schedule
 }

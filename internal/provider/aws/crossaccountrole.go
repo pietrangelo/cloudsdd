@@ -67,8 +67,13 @@ type iamStatement struct {
 	Condition map[string]map[string]any `json:"Condition,omitempty"`
 }
 
+// iamPrincipal names who may assume a role. Exactly one field is
+// populated: AWS for an account principal (RFC 003), Service for an
+// AWS service principal such as the EventBridge scheduler (RFC 012
+// §4.1).
 type iamPrincipal struct {
-	AWS string `json:"AWS"`
+	AWS     string `json:"AWS,omitempty"`
+	Service string `json:"Service,omitempty"`
 }
 
 // buildTrustPolicy builds the role's AssumeRolePolicyDocument: it trusts

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -478,7 +479,7 @@ func TestConfirm(t *testing.T) {
 			cmd.SetOut(&bytes.Buffer{})
 			cmd.SetIn(strings.NewReader(tt.stdin))
 
-			got, err := confirm(cmd, spec.IntentDeploy)
+			got, err := confirm(cmd, bufio.NewReader(cmd.InOrStdin()), spec.IntentDeploy)
 			if err != nil {
 				t.Fatalf("confirm() error: %v", err)
 			}

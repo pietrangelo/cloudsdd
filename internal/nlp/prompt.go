@@ -35,11 +35,13 @@ The JSON schema must exactly match this structure:
         "environment": "dev", // optional
         "region": "eu-central-1" // optional (or "regions": ["eu-central-1", ...] for multi-region)
       },
+      "schedule": { }, // optional, see "Power scheduling" below
       "properties": { }
     }
   ],
   "policies": {
-    "allowed_regions": ["eu-central-1"] // optional list of strings
+    "allowed_regions": ["eu-central-1"], // optional list of strings
+    "schedule": { } // optional, see "Power scheduling" below
   }
 }
 
@@ -69,6 +71,37 @@ Properties by resource type:
     trusted_account_id (string)
     external_id        (string)
     permissions        (list of strings)
+
+Power scheduling (only when the user asks for it):
+
+A schedule powers resources off outside working hours. Declare it once in
+"policies.schedule"; add "schedule" to an individual resource only to override
+or to opt it out with {"enabled": false}.
+
+    enabled     (bool, required to activate scheduling)
+    timezone    (string, IANA zone name such as "Europe/Rome"; never an
+                 abbreviation or a UTC offset)
+    start       (string, "HH:MM", when resources power on)
+    stop        (string, "HH:MM", when resources power off)
+    days        (list of "mon","tue","wed","thu","fri","sat","sun";
+                 omit for Monday-to-Friday, which leaves the weekend off)
+    exceptions  (list of date ranges suspending the weekly rhythm:
+                 {"from": "YYYY-MM-DD", "to": "YYYY-MM-DD",
+                  "mode": "always_on" or "always_off", "reason": "..."})
+
+CRITICAL: if the user asks for a schedule without stating the times, emit
+exactly {"enabled": true} and nothing else. NEVER invent "start", "stop",
+"timezone", "days", or a date range. The CLI asks the user for what is
+missing. Inventing a stop time causes an outage.
+
+Only "relational_database" can be scheduled today. Object storage and IAM
+roles have no power state.
+
+Examples:
+- "keep it up during the release weekend, 12 to 14 September" ->
+  an "always_on" exception window for those dates.
+- "everything off over the Christmas shutdown" ->
+  an "always_off" exception window.
 
 Important rules:
 - If the provider is not mentioned, use "aws".

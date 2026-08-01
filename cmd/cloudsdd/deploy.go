@@ -27,5 +27,6 @@ need to ask for them.`,
 
 func init() {
 	deployCmd.Flags().BoolVarP(&assumeYes, "yes", "y", false, "skip the interactive confirmation prompt")
+	registerScheduleFlags(deployCmd)
 	rootCmd.AddCommand(deployCmd)
 }

@@ -56,6 +56,13 @@ components:
             credentials are used (RFC 002 §2.4).
         scope:
           $ref: "#/components/schemas/Scope"
+        schedule:
+          $ref: "#/components/schemas/Schedule"
+          description: >
+            Overrides the Specification-wide `policies.schedule` for this
+            resource (RFC 012 §2.1). Absent means inherit; present
+            replaces the inherited schedule entirely, including
+            `{"enabled": false}` to opt out.
         properties:
           type: object
     Scope:
@@ -183,3 +190,78 @@ components:
           type: array
           items:
             type: string
+        schedule:
+          $ref: "#/components/schemas/Schedule"
+          description: >
+            Declared once for the whole Specification and inherited by
+            every schedulable resource (RFC 012 §2.1). A resource that
+            declares its own `schedule` overrides it wholesale.
+    Schedule:
+      description: >
+        When a resource is powered on (RFC 012). Absent, or with
+        `enabled` false, the resource is never powered down.
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+          default: false
+          description: >
+            Scheduling is opt-in: an environment nobody asked to shut
+            down never shuts down.
+        timezone:
+          type: string
+          description: >
+            IANA zone name, e.g. "Europe/Rome". Fixed offsets are
+            rejected: they drift by an hour across a DST boundary.
+        start:
+          type: string
+          pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+          description: Wall-clock power-on time in `timezone`.
+        stop:
+          type: string
+          pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+          description: >
+            Wall-clock power-off time in `timezone`. A `stop` earlier
+            than `start` describes an overnight window and is valid.
+        days:
+          type: array
+          maxItems: 7
+          uniqueItems: true
+          items:
+            type: string
+            enum: [mon, tue, wed, thu, fri, sat, sun]
+          description: >
+            Weekdays the resource is powered on. Absent means Monday to
+            Friday, which leaves the weekend off by construction.
+        exceptions:
+          type: array
+          maxItems: 12
+          items:
+            $ref: "#/components/schemas/ScheduleWindow"
+          description: >
+            Date ranges over which the weekly rhythm is suspended.
+            Windows may not overlap.
+    ScheduleWindow:
+      type: object
+      additionalProperties: false
+      required: [from, to, mode]
+      properties:
+        from:
+          type: string
+          format: date
+          description: First day of the window, inclusive.
+        to:
+          type: string
+          format: date
+          description: Last day of the window, inclusive.
+        mode:
+          type: string
+          enum: [always_on, always_off]
+        reason:
+          type: string
+          maxLength: 128
+          description: >
+            Free-form documentation carried into the plan output.
+            Originates in a natural language prompt, so it is length
+            capped and sanitized before display.

@@ -65,6 +65,12 @@ var _ provider.CloudProvider = (*AzureProvider)(nil)
 //
 // RFC 011 §1.1D1: this previously never consulted Policies.AllowedRegions.
 func (p *AzureProvider) Validate(ctx context.Context, r spec.Resource, policies spec.Policies) error {
+	// Defense in depth against the Engine's schedule validation
+	// (RFC 012 §2.3).
+	if _, err := resourceSchedule(r, policies); err != nil {
+		return err
+	}
+
 	switch r.Type {
 	case spec.ResourceTypeObjectStorage:
 		if _, err := decodeObjectStorageProperties(r.Properties); err != nil {
@@ -124,7 +130,7 @@ func (p *AzureProvider) upsertStack(ctx context.Context, account, env, region, r
 // closure. Plan and Apply happened to call Validate first; Destroy did
 // not, so `cloudsdd destroy` panicked on any Azure resource whose
 // properties failed to decode.
-func (p *AzureProvider) resourceProgram(r spec.Resource) (pulumi.RunFunc, string, error) {
+func (p *AzureProvider) resourceProgram(r spec.Resource, policies spec.Policies) (pulumi.RunFunc, string, error) {
 	region := r.Scope.Region
 
 	switch r.Type {
@@ -142,8 +148,18 @@ func (p *AzureProvider) resourceProgram(r spec.Resource) (pulumi.RunFunc, string
 		if err != nil {
 			return nil, "", err
 		}
+		rules, err := resourceSchedule(r, policies)
+		if err != nil {
+			return nil, "", err
+		}
 		return func(ctx *pulumi.Context) error {
-			return declareRelationalDatabase(ctx, r.ID, region, *props)
+			server, err := declareRelationalDatabase(ctx, r.ID, region, *props)
+			if err != nil {
+				return err
+			}
+			// The power schedule shares the server's stack, so the
+			// existing Destroy path removes both (RFC 012 §4.3).
+			return declareDatabaseSchedule(ctx, r.ID, server, rules)
 		}, region, nil
 
 	default:
@@ -155,7 +171,7 @@ func (p *AzureProvider) Plan(ctx context.Context, r spec.Resource, policies spec
 	if err := p.Validate(ctx, r, policies); err != nil {
 		return provider.Diff{}, err
 	}
-	program, region, err := p.resourceProgram(r)
+	program, region, err := p.resourceProgram(r, policies)
 	if err != nil {
 		return provider.Diff{}, err
 	}
@@ -180,7 +196,7 @@ func (p *AzureProvider) Apply(ctx context.Context, r spec.Resource, policies spe
 	if err := p.Validate(ctx, r, policies); err != nil {
 		return provider.Result{}, err
 	}
-	program, region, err := p.resourceProgram(r)
+	program, region, err := p.resourceProgram(r, policies)
 	if err != nil {
 		return provider.Result{}, err
 	}
@@ -207,7 +223,7 @@ func (p *AzureProvider) Destroy(ctx context.Context, r spec.Resource, policies s
 	if err := p.Validate(ctx, r, policies); err != nil {
 		return err
 	}
-	program, region, err := p.resourceProgram(r)
+	program, region, err := p.resourceProgram(r, policies)
 	if err != nil {
 		return err
 	}

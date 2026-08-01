@@ -52,9 +52,21 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 	})
 
 	outputs := args.Inputs.Copy()
-	// RandomPassword's consumers read .Result.
-	if args.TypeToken == "random:index/randomPassword:RandomPassword" {
+	// Outputs the real provider computes and that dependent resources
+	// read back, without which the power schedules of RFC 012 §4.2 would
+	// see an unknown project and their inputs could not be asserted on.
+	switch args.TypeToken {
+	case "random:index/randomPassword:RandomPassword":
 		outputs["result"] = resource.NewStringProperty("generated-password")
+	case databaseInstanceToken:
+		outputs["project"] = resource.NewStringProperty(testProjectID)
+		outputs["name"] = resource.NewStringProperty(args.Name)
+	case serviceAccountToken:
+		outputs["email"] = resource.NewStringProperty(
+			args.Inputs["accountId"].StringValue() + "@" + testProjectID + ".iam.gserviceaccount.com")
+	case customRoleToken:
+		outputs["name"] = resource.NewStringProperty(
+			"projects/" + testProjectID + "/roles/" + args.Inputs["roleId"].StringValue())
 	}
 	return args.Name + "-id", outputs, nil
 }
@@ -205,7 +217,8 @@ func TestDeclareRelationalDatabaseHonoursEngine(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorded := runProgram(t, func(ctx *pulumi.Context) error {
-				return declareRelationalDatabase(ctx, "app-db", "us-east1", tt.props)
+				_, err := declareRelationalDatabase(ctx, "app-db", "us-east1", tt.props)
+				return err
 			})
 
 			instance := findResource(t, recorded, "gcp:sql/databaseInstance:DatabaseInstance")
@@ -229,7 +242,8 @@ func TestDeclareRelationalDatabaseSecureDefaults(t *testing.T) {
 	props := relationalDatabaseProperties{Engine: "postgres", Version: "15"}
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		return declareRelationalDatabase(ctx, "app-db", "us-east1", props)
+		_, err := declareRelationalDatabase(ctx, "app-db", "us-east1", props)
+		return err
 	})
 	instance := findResource(t, recorded, "gcp:sql/databaseInstance:DatabaseInstance")
 
@@ -260,7 +274,8 @@ func TestDeclareRelationalDatabaseAllowsExplicitDisposability(t *testing.T) {
 	props := relationalDatabaseProperties{Engine: "postgres", Version: "15", DeletionProtection: &no}
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		return declareRelationalDatabase(ctx, "app-db", "us-east1", props)
+		_, err := declareRelationalDatabase(ctx, "app-db", "us-east1", props)
+		return err
 	})
 	instance := findResource(t, recorded, "gcp:sql/databaseInstance:DatabaseInstance")
 

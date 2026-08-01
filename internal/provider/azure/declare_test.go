@@ -55,6 +55,19 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 	if args.TypeToken == "azure:core/resourceGroup:ResourceGroup" {
 		outputs["name"] = resource.NewStringProperty(args.Name)
 	}
+	// Outputs the real provider computes and that dependent resources
+	// read back (RFC 012 §4.3): the automation account's managed identity
+	// and the names the job schedules refer to.
+	if args.TypeToken == automationAccountToken {
+		outputs["name"] = resource.NewStringProperty(args.Name)
+		outputs["identity"] = resource.NewObjectProperty(resource.PropertyMap{
+			"type":        resource.NewStringProperty("SystemAssigned"),
+			"principalId": resource.NewStringProperty(testPrincipalID),
+		})
+	}
+	if args.TypeToken == runbookToken || args.TypeToken == automationScheduleToken {
+		outputs["name"] = args.Inputs["name"]
+	}
 	return args.Name + "-id", outputs, nil
 }
 
@@ -203,7 +216,8 @@ func TestDeclareRelationalDatabaseSelectsEngine(t *testing.T) {
 			props := relationalDatabaseProperties{Engine: tt.engine, Version: "15"}
 
 			recorded := runProgram(t, func(ctx *pulumi.Context) error {
-				return declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+				_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+				return err
 			})
 
 			if !hasResource(recorded, tt.wantToken) {
@@ -233,7 +247,8 @@ func TestDeclareRelationalDatabaseHonoursHighAvailability(t *testing.T) {
 			t.Run("without HA", func(t *testing.T) {
 				props := relationalDatabaseProperties{Engine: tt.engine, Version: "15"}
 				recorded := runProgram(t, func(ctx *pulumi.Context) error {
-					return declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+					_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+					return err
 				})
 
 				server := findResource(t, recorded, tt.typeToken)
@@ -245,7 +260,8 @@ func TestDeclareRelationalDatabaseHonoursHighAvailability(t *testing.T) {
 			t.Run("with HA", func(t *testing.T) {
 				props := relationalDatabaseProperties{Engine: tt.engine, Version: "15", HighAvailability: true}
 				recorded := runProgram(t, func(ctx *pulumi.Context) error {
-					return declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+					_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+					return err
 				})
 
 				server := findResource(t, recorded, tt.typeToken)
@@ -271,7 +287,8 @@ func TestDeclarePostgresIsNotPubliclyReachable(t *testing.T) {
 	props := relationalDatabaseProperties{Engine: "postgres", Version: "15"}
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		return declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+		_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+		return err
 	})
 	server := findResource(t, recorded, "azure:postgresql/flexibleServer:FlexibleServer")
 

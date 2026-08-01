@@ -49,8 +49,17 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 	})
 
 	outputs := args.Inputs.Copy()
-	if args.TypeToken == "random:index/randomPassword:RandomPassword" {
+	// Outputs the real providers compute and that dependent resources read
+	// back. Without them the power schedules of RFC 012 §4.1 would see an
+	// unknown instance ARN and their policies could not be asserted on.
+	switch args.TypeToken {
+	case "random:index/randomPassword:RandomPassword":
 		outputs["result"] = resource.NewStringProperty("generated-password")
+	case rdsInstanceToken:
+		outputs["arn"] = resource.NewStringProperty(testInstanceARN)
+		outputs["identifier"] = resource.NewStringProperty(args.Name)
+	case iamRoleToken:
+		outputs["arn"] = resource.NewStringProperty("arn:aws:iam::" + testAccountID + ":role/" + args.Name)
 	}
 	return args.Name + "-id", outputs, nil
 }
@@ -107,7 +116,8 @@ func TestDeclareRelationalDatabaseSecureDefaults(t *testing.T) {
 	props := relationalDatabaseProperties{Engine: "postgres", Version: "15"}
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		return declareRelationalDatabase(ctx, "app-db", props)
+		_, err := declareRelationalDatabase(ctx, "app-db", props)
+		return err
 	})
 	instance := findResource(t, recorded, rdsInstanceToken)
 
@@ -151,7 +161,8 @@ func TestDeclareRelationalDatabaseExplicitDisposability(t *testing.T) {
 	}
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		return declareRelationalDatabase(ctx, "app-db", props)
+		_, err := declareRelationalDatabase(ctx, "app-db", props)
+		return err
 	})
 	instance := findResource(t, recorded, rdsInstanceToken)
 
@@ -199,7 +210,8 @@ func TestDeclareRelationalDatabaseHonoursEngineAndHA(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorded := runProgram(t, func(ctx *pulumi.Context) error {
-				return declareRelationalDatabase(ctx, "app-db", tt.props)
+				_, err := declareRelationalDatabase(ctx, "app-db", tt.props)
+				return err
 			})
 			instance := findResource(t, recorded, rdsInstanceToken)
 
@@ -220,7 +232,8 @@ func TestDeclareRelationalDatabaseGeneratesAPassword(t *testing.T) {
 	props := relationalDatabaseProperties{Engine: "postgres", Version: "15"}
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		return declareRelationalDatabase(ctx, "app-db", props)
+		_, err := declareRelationalDatabase(ctx, "app-db", props)
+		return err
 	})
 
 	if !hasResource(recorded, "random:index/randomPassword:RandomPassword") {

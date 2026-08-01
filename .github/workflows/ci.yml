@@ -83,6 +83,12 @@ jobs:
       - name: Fuzz the provider property decoder
         run: go test -run=X -fuzz=FuzzProperties -fuzztime=60s ./internal/provider/decode/
 
+      # The schedule compiler parses times, dates and modes coming from a
+      # natural language prompt, and a rule it emits becomes a cron
+      # expression in a real cloud account (RFC 012 §8).
+      - name: Fuzz the schedule compiler
+        run: go test -run=X -fuzz=FuzzCompile -fuzztime=60s ./internal/schedule/
+
   security:
     name: Security
     runs-on: ubuntu-latest

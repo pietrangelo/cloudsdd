@@ -48,3 +48,14 @@ var ErrGlobalResourceScoped = errors.New("aws: resource type is global and does 
 // otherwise specified"): the default Sealed == true forbids any resource
 // from crossing an Account/Environment boundary implicitly.
 var ErrSealedCrossAccountRole = errors.New("aws: cross_account_role requires scope.sealed=false (it is inherently cross-account)")
+
+// ErrResourceNotSchedulable indicates that a resource explicitly declared
+// a power schedule but its ResourceType has no power state (RFC 012 §3).
+// An S3 bucket cannot be switched off, and an IAM role costs nothing to
+// leave in place.
+var ErrResourceNotSchedulable = errors.New("aws: resource type does not support a power schedule")
+
+// ErrMalformedARN indicates that an ARN the provider needed to read the
+// account or region out of does not have the expected shape (RFC 012
+// §4.1).
+var ErrMalformedARN = errors.New("aws: malformed ARN")

@@ -43,12 +43,12 @@ func decodeRelationalDatabaseProperties(props map[string]any) (*relationalDataba
 // postgresql.NewFlexibleServer regardless of Engine, and decoded
 // HighAvailability without ever reading it — so a request for an HA MySQL
 // instance produced a single-node PostgreSQL one.
-func declareRelationalDatabase(ctx *pulumi.Context, id, location string, p relationalDatabaseProperties) error {
+func declareRelationalDatabase(ctx *pulumi.Context, id, location string, p relationalDatabaseProperties) (databaseServer, error) {
 	rg, err := core.NewResourceGroup(ctx, id+"-rg", &core.ResourceGroupArgs{
 		Location: pulumi.String(location),
 	})
 	if err != nil {
-		return fmt.Errorf("azure: failed to declare resource group for %q: %w", id, err)
+		return databaseServer{}, fmt.Errorf("azure: failed to declare resource group for %q: %w", id, err)
 	}
 
 	pwd, err := random.NewRandomPassword(ctx, id+"-pwd", &random.RandomPasswordArgs{
@@ -56,7 +56,7 @@ func declareRelationalDatabase(ctx *pulumi.Context, id, location string, p relat
 		Special: pulumi.Bool(false),
 	})
 	if err != nil {
-		return err
+		return databaseServer{}, err
 	}
 
 	switch strings.ToLower(p.Engine) {
@@ -68,11 +68,11 @@ func declareRelationalDatabase(ctx *pulumi.Context, id, location string, p relat
 		// Unreachable via decode (the oneof tag rejects it first); kept
 		// so a future engine added to the tag cannot silently fall
 		// through to the wrong server type.
-		return fmt.Errorf("azure: unsupported database engine %q (supported: postgres, mysql)", p.Engine)
+		return databaseServer{}, fmt.Errorf("azure: unsupported database engine %q (supported: postgres, mysql)", p.Engine)
 	}
 }
 
-func declarePostgresFlexibleServer(ctx *pulumi.Context, id string, rg *core.ResourceGroup, pwd *random.RandomPassword, p relationalDatabaseProperties) error {
+func declarePostgresFlexibleServer(ctx *pulumi.Context, id string, rg *core.ResourceGroup, pwd *random.RandomPassword, p relationalDatabaseProperties) (databaseServer, error) {
 	args := &postgresql.FlexibleServerArgs{
 		ResourceGroupName:     rg.Name,
 		Location:              rg.Location,
@@ -97,13 +97,14 @@ func declarePostgresFlexibleServer(ctx *pulumi.Context, id string, rg *core.Reso
 		args.GeoRedundantBackupEnabled = pulumi.Bool(true)
 	}
 
-	if _, err := postgresql.NewFlexibleServer(ctx, id+"-server", args); err != nil {
-		return fmt.Errorf("azure: failed to declare postgresql server %q: %w", id, err)
+	server, err := postgresql.NewFlexibleServer(ctx, id+"-server", args)
+	if err != nil {
+		return databaseServer{}, fmt.Errorf("azure: failed to declare postgresql server %q: %w", id, err)
 	}
-	return nil
+	return databaseServer{engine: "postgres", id: server.ID(), resourceGroup: rg}, nil
 }
 
-func declareMySQLFlexibleServer(ctx *pulumi.Context, id string, rg *core.ResourceGroup, pwd *random.RandomPassword, p relationalDatabaseProperties) error {
+func declareMySQLFlexibleServer(ctx *pulumi.Context, id string, rg *core.ResourceGroup, pwd *random.RandomPassword, p relationalDatabaseProperties) (databaseServer, error) {
 	args := &mysql.FlexibleServerArgs{
 		ResourceGroupName:     rg.Name,
 		Location:              rg.Location,
@@ -130,8 +131,9 @@ func declareMySQLFlexibleServer(ctx *pulumi.Context, id string, rg *core.Resourc
 	// field; network isolation is achieved via DelegatedSubnetId, which
 	// requires a VNet this RFC does not yet model. Tracked as a follow-up
 	// rather than silently claimed.
-	if _, err := mysql.NewFlexibleServer(ctx, id+"-server", args); err != nil {
-		return fmt.Errorf("azure: failed to declare mysql server %q: %w", id, err)
+	server, err := mysql.NewFlexibleServer(ctx, id+"-server", args)
+	if err != nil {
+		return databaseServer{}, fmt.Errorf("azure: failed to declare mysql server %q: %w", id, err)
 	}
-	return nil
+	return databaseServer{engine: "mysql", id: server.ID(), resourceGroup: rg}, nil
 }

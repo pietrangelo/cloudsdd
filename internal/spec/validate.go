@@ -8,6 +8,8 @@ import (
 	"regexp"
 
 	"github.com/go-playground/validator/v10"
+
+	"cloudsdd/internal/schedule"
 )
 
 // resourceIDPattern mirrors the pattern defined in the JSON Schema
@@ -31,7 +33,24 @@ func newValidator() *validator.Validate {
 	if err := v.RegisterValidation("scopename", validateScopeName); err != nil {
 		panic(fmt.Sprintf("spec: failed to register the scopename validator: %v", err))
 	}
+	// The schedule tags (RFC 012 §2.1) delegate to internal/schedule
+	// rather than restating its formats here: the package that compiles a
+	// time is the package that decides what a valid time looks like.
+	for tag, fn := range map[string]func(string) bool{
+		"clocktime":    schedule.ValidClockTime,
+		"ianatz":       schedule.ValidTimezone,
+		"scheduledate": schedule.ValidDate,
+	} {
+		if err := v.RegisterValidation(tag, stringValidator(fn)); err != nil {
+			panic(fmt.Sprintf("spec: failed to register the %s validator: %v", tag, err))
+		}
+	}
 	return v
+}
+
+// stringValidator adapts a plain string predicate to validator.Func.
+func stringValidator(fn func(string) bool) validator.Func {
+	return func(fl validator.FieldLevel) bool { return fn(fl.Field().String()) }
 }
 
 func validateResourceID(fl validator.FieldLevel) bool {
