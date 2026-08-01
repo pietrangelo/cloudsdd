@@ -73,15 +73,7 @@ func (p *AWSProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope
 		return err
 	}
 
-	program := func(pctx *pulumi.Context) error {
-		opts, _, err := p.providerOpts(pctx, s.Region)
-		if err != nil {
-			return err
-		}
-		return declareScopeNetwork(pctx, s, cidr, opts...)
-	}
-
-	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", program)
+	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", p.networkProgram(s, cidr))
 	if err != nil {
 		return fmt.Errorf("aws: failed to prepare the network stack for scope %q: %w", scopeTag(s), err)
 	}
@@ -258,4 +250,47 @@ func addressPolicy(p spec.Policies) network.Policy {
 		return network.Policy{}
 	}
 	return network.Policy{BaseCIDR: p.Network.BaseCIDR, Scopes: p.Network.Scopes}
+}
+
+// networkProgram is the scope network's Pulumi program, shared by
+// EnsureNetwork and DestroyNetwork. A destroy works from state rather
+// than from the program, but a stack cannot be selected without one, and
+// passing the same program keeps the two paths from describing different
+// networks.
+func (p *AWSProvider) networkProgram(s provider.NetworkScope, cidr netip.Prefix) pulumi.RunFunc {
+	return func(pctx *pulumi.Context) error {
+		opts, _, err := p.providerOpts(pctx, s.Region)
+		if err != nil {
+			return err
+		}
+		return declareScopeNetwork(pctx, s, cidr, opts...)
+	}
+}
+
+// DestroyNetwork removes the scope's network stack (RFC 016 §2.6).
+//
+// The Engine establishes that the scope is empty before calling this.
+// Nothing here can check: a scope's contents live in other stacks, and
+// this one knows only about the network.
+func (p *AWSProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, policies spec.Policies) error {
+	if s.Region == "" {
+		return nil
+	}
+
+	cidr, err := network.Derive(networkScope(s), addressPolicy(policies))
+	if err != nil {
+		return err
+	}
+
+	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", p.networkProgram(s, cidr))
+	if err != nil {
+		return fmt.Errorf("aws: failed to select the network stack for scope %q: %w", scopeTag(s), err)
+	}
+	if err := p.setRegionConfig(ctx, stack, s.Region); err != nil {
+		return err
+	}
+	if _, err := stack.Destroy(ctx); err != nil {
+		return fmt.Errorf("aws: failed to destroy the network for scope %q: %w", scopeTag(s), err)
+	}
+	return nil
 }

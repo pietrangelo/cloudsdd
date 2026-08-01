@@ -263,3 +263,39 @@ func TestSubnetBlock(t *testing.T) {
 		})
 	}
 }
+
+// TestDestroyNetworkSkipsRegionlessScopes mirrors EnsureNetwork: a scope
+// with no region never had a network, so tearing one down is a no-op
+// rather than an error about a missing region.
+func TestDestroyNetworkSkipsRegionlessScopes(t *testing.T) {
+	p := &AzureProvider{}
+
+	err := p.DestroyNetwork(context.Background(), provider.NetworkScope{
+		Provider:    spec.Provider("azure"),
+		Environment: "dev",
+	}, spec.Policies{})
+
+	if err != nil {
+		t.Errorf("DestroyNetwork() error = %v, want nil for a scope with no region", err)
+	}
+}
+
+// TestDestroyNetworkRefusesAnUnusableAddressPlan: the scope's range is
+// derived before the stack is touched, so a policy that cannot produce
+// one fails without going near the cloud.
+func TestDestroyNetworkRefusesAnUnusableAddressPlan(t *testing.T) {
+	p := &AzureProvider{}
+
+	err := p.DestroyNetwork(context.Background(), provider.NetworkScope{
+		Provider:    spec.Provider("azure"),
+		Environment: "dev",
+		Region:      "test-region",
+	}, spec.Policies{Network: &spec.NetworkPolicy{BaseCIDR: "8.8.0.0/16"}})
+
+	if err == nil {
+		t.Fatal("DestroyNetwork() error = nil, want the public base_cidr to be refused")
+	}
+	if !strings.Contains(err.Error(), "RFC 1918") {
+		t.Errorf("error = %q, want it to name the address-plan problem", err)
+	}
+}

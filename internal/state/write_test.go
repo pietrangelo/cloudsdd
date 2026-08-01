@@ -371,3 +371,71 @@ func TestRecordDestructionWithNoDestroyedResultsIsNoop(t *testing.T) {
 		t.Errorf("ledger was written for a destroy that destroyed nothing (stat err = %v)", err)
 	}
 }
+
+// TestCountInScope covers the query RFC 016 §2.6 gates network teardown
+// on. Getting it wrong in the "too low" direction destroys a network that
+// still has resources in it, so the cases that matter are the ones where
+// a nearly-matching entry must NOT be counted.
+func TestCountInScope(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(config.HomeEnv, home)
+
+	resources := []spec.Resource{
+		resource("db-a", "", "dev", "eu-central-1"),
+		resource("db-b", "", "dev", "eu-central-1"),
+		resource("db-c", "", "prod", "eu-central-1"),
+		resource("db-d", "", "dev", "eu-west-1"),
+		resource("db-e", "acct", "dev", "eu-central-1"),
+	}
+	var results []provider.Result
+	for _, r := range resources {
+		results = append(results, appliedIn(r.ID, r.Scope.Region))
+	}
+	if err := RecordDeployment(resources, results); err != nil {
+		t.Fatalf("RecordDeployment() error = %v", err)
+	}
+
+	tests := []struct {
+		name                         string
+		account, environment, region string
+		want                         int
+	}{
+		{name: "two in the scope", environment: "dev", region: "eu-central-1", want: 2},
+		// Each of these differs from the first in exactly one dimension,
+		// and each must be counted separately or a shared network gets
+		// destroyed under live resources.
+		{name: "another environment", environment: "prod", region: "eu-central-1", want: 1},
+		{name: "another region", environment: "dev", region: "eu-west-1", want: 1},
+		{name: "another account", account: "acct", environment: "dev", region: "eu-central-1", want: 1},
+		{name: "empty scope", environment: "staging", region: "eu-central-1", want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := CountInScope(tt.account, tt.environment, tt.region)
+			if err != nil {
+				t.Fatalf("CountInScope() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("CountInScope(%q, %q, %q) = %d, want %d",
+					tt.account, tt.environment, tt.region, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCountInScopeReportsAnUnreadableLedger: an error must not read as
+// "the scope is empty", because the caller acts on zero by deleting a
+// network.
+func TestCountInScopeReportsAnUnreadableLedger(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(config.HomeEnv, home)
+
+	if err := os.WriteFile(filepath.Join(home, "ledger.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	if _, err := CountInScope("", "dev", "eu-central-1"); err == nil {
+		t.Fatal("CountInScope() error = nil, want the corrupt ledger to be reported")
+	}
+}

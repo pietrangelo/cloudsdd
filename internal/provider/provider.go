@@ -96,6 +96,15 @@ type CloudProvider interface {
 	// a Specification — a provider deciding for itself would have three
 	// concurrent resource programs racing to create one VPC.
 	EnsureNetwork(ctx context.Context, s NetworkScope, p spec.Policies) error
+
+	// DestroyNetwork removes the shared network of a scope (RFC 016
+	// §2.6). A provider with nothing to share returns nil.
+	//
+	// The caller is responsible for establishing that the scope is empty
+	// first. A network is shared, so destroying one that still holds
+	// resources cuts them off from everything, and this method cannot
+	// tell — it sees a scope, not the scope's contents.
+	DestroyNetwork(ctx context.Context, s NetworkScope, p spec.Policies) error
 }
 
 // NetworkScope identifies the boundary one shared network serves

@@ -39,4 +39,13 @@ type Engine interface {
 
 	// Destroy removes the Specification's resources from real infrastructure.
 	Destroy(ctx context.Context, s spec.Specification) ([]provider.Result, error)
+
+	// ReapNetworks removes the shared network of every scope in s that no
+	// longer holds anything (RFC 016 §2.6), returning the scopes it
+	// emptied.
+	//
+	// Separate from Destroy, and called after it, because the question it
+	// answers — "is this scope empty now?" — is asked of the ledger, and
+	// the ledger records a destruction only once it has happened.
+	ReapNetworks(ctx context.Context, s spec.Specification) ([]provider.NetworkScope, error)
 }

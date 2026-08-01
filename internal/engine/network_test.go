@@ -308,4 +308,143 @@ func (p *orderingProvider) EnsureNetwork(context.Context, provider.NetworkScope,
 	return nil
 }
 
+func (p *orderingProvider) DestroyNetwork(context.Context, provider.NetworkScope, spec.Policies) error {
+	p.record("destroy-network")
+	return nil
+}
+
 var _ provider.CloudProvider = (*orderingProvider)(nil)
+
+// TestReapNetworksOnlyWhenEmpty is the safety property of RFC 016 §2.6.
+// A network is shared, so removing one that still holds resources cuts
+// them off from everything they talk to — and the provider cannot tell,
+// because it sees a scope, not the scope's contents.
+func TestReapNetworksOnlyWhenEmpty(t *testing.T) {
+	tests := []struct {
+		name      string
+		remaining int
+		wantReap  bool
+	}{
+		{name: "empty scope is reaped", remaining: 0, wantReap: true},
+		{name: "one resource left keeps the network", remaining: 1, wantReap: false},
+		{name: "several left keep the network", remaining: 7, wantReap: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mp := &mockProvider{name: "aws"}
+			e := New(
+				map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mp},
+				WithScopeOccupancy(func(context.Context, provider.NetworkScope) (int, error) {
+					return tt.remaining, nil
+				}),
+			)
+
+			reaped, err := e.ReapNetworks(context.Background(), scopedSpec([2]string{"dev", "eu-central-1"}))
+			if err != nil {
+				t.Fatalf("ReapNetworks() error = %v", err)
+			}
+
+			if got := len(mp.destroyedNetworks) > 0; got != tt.wantReap {
+				t.Errorf("network destroyed = %v, want %v with %d resources remaining",
+					got, tt.wantReap, tt.remaining)
+			}
+			if got := len(reaped) > 0; got != tt.wantReap {
+				t.Errorf("reported %d reaped scopes, want any = %v", len(reaped), tt.wantReap)
+			}
+		})
+	}
+}
+
+// TestReapNetworksWithoutOccupancyRemovesNothing pins the default, and it
+// is the one that matters most. An Engine that cannot prove a scope is
+// empty must leave the network standing: the failure mode is then an
+// orphaned network, which costs a little and is fixable, rather than live
+// resources cut off from everything.
+func TestReapNetworksWithoutOccupancyRemovesNothing(t *testing.T) {
+	mp := &mockProvider{name: "aws"}
+	e := New(map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mp})
+
+	reaped, err := e.ReapNetworks(context.Background(), scopedSpec([2]string{"dev", "eu-central-1"}))
+	if err != nil {
+		t.Fatalf("ReapNetworks() error = %v", err)
+	}
+	if len(reaped) != 0 || len(mp.destroyedNetworks) != 0 {
+		t.Errorf("reaped %v with no occupancy check configured; it must remove nothing", reaped)
+	}
+}
+
+// TestReapNetworksStopsOnAnUnknownOccupancy: a ledger that cannot be read
+// is not evidence of an empty scope. Treating an error as zero would turn
+// a corrupt ledger into a deleted network.
+func TestReapNetworksStopsOnAnUnknownOccupancy(t *testing.T) {
+	mp := &mockProvider{name: "aws"}
+	e := New(
+		map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mp},
+		WithScopeOccupancy(func(context.Context, provider.NetworkScope) (int, error) {
+			return 0, errors.New("ledger is locked by another process")
+		}),
+	)
+
+	_, err := e.ReapNetworks(context.Background(), scopedSpec([2]string{"dev", "eu-central-1"}))
+	if err == nil {
+		t.Fatal("ReapNetworks() error = nil, want the unreadable ledger to stop the reap")
+	}
+	if len(mp.destroyedNetworks) != 0 {
+		t.Errorf("destroyed %v despite not knowing whether the scope was empty", mp.destroyedNetworks)
+	}
+	if !strings.Contains(err.Error(), "dev::eu-central-1") {
+		t.Errorf("error = %q, want it to name the scope", err)
+	}
+}
+
+// TestReapNetworksIsPerScope: two environments are two networks, and
+// emptying one must not touch the other.
+func TestReapNetworksIsPerScope(t *testing.T) {
+	mp := &mockProvider{name: "aws"}
+	e := New(
+		map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mp},
+		WithScopeOccupancy(func(_ context.Context, s provider.NetworkScope) (int, error) {
+			if s.Environment == "prod" {
+				return 3, nil
+			}
+			return 0, nil
+		}),
+	)
+
+	s := scopedSpec(
+		[2]string{"dev", "eu-central-1"},
+		[2]string{"prod", "eu-central-1"},
+	)
+
+	reaped, err := e.ReapNetworks(context.Background(), s)
+	if err != nil {
+		t.Fatalf("ReapNetworks() error = %v", err)
+	}
+	if len(reaped) != 1 || reaped[0].Environment != "dev" {
+		t.Fatalf("reaped %v, want only the empty dev scope", reaped)
+	}
+	for _, got := range mp.destroyedNetworks {
+		if got.Environment == "prod" {
+			t.Error("destroyed the prod network, which still holds three resources")
+		}
+	}
+}
+
+// TestReapNetworksReportsTheProviderFailure: a network that could not be
+// removed must be reported, not silently left behind and called success.
+func TestReapNetworksReportsTheProviderFailure(t *testing.T) {
+	mp := &mockProvider{name: "aws", destroyNetworkErr: errors.New("vpc has dependencies")}
+	e := New(
+		map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mp},
+		WithScopeOccupancy(func(context.Context, provider.NetworkScope) (int, error) { return 0, nil }),
+	)
+
+	_, err := e.ReapNetworks(context.Background(), scopedSpec([2]string{"dev", "eu-central-1"}))
+	if err == nil {
+		t.Fatal("ReapNetworks() error = nil, want the provider failure to surface")
+	}
+	if !strings.Contains(err.Error(), "vpc has dependencies") {
+		t.Errorf("error = %q, want it to carry the provider's reason", err)
+	}
+}

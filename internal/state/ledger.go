@@ -366,3 +366,33 @@ func lockFile() (func(), error) {
 		time.Sleep(lockPollPeriod)
 	}
 }
+
+// CountInScope reports how many resources the ledger still records in a
+// (account, environment, region) scope.
+//
+// It exists for RFC 016 §2.6: a scope's network is shared, so it may only
+// be torn down once nothing is left in it. The ledger is already keyed by
+// exactly those three dimensions plus the resource ID, so the question is
+// a filter rather than new bookkeeping.
+//
+// This makes the ledger load-bearing for correctness and not only for
+// translation context, which is a real change in its status. A ledger
+// deleted by hand now means CloudSDD believes every scope is empty; the
+// consequence is an orphaned network rather than a deleted one, because
+// the caller reaps only what it can prove is unoccupied.
+func CountInScope(account, environment, region string) (int, error) {
+	l, err := ReadLedger()
+	if err != nil {
+		return 0, err
+	}
+
+	n := 0
+	for _, r := range l.Resources {
+		if r.Account == account &&
+			r.Scope.Environment == environment &&
+			r.Scope.Region == region {
+			n++
+		}
+	}
+	return n, nil
+}

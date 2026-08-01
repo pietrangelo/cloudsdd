@@ -64,6 +64,11 @@ func (p *pickyProvider) EnsureNetwork(ctx context.Context, s provider.NetworkSco
 	return nil
 }
 
+func (p *pickyProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, _ spec.Policies) error {
+	p.operated = append(p.operated, "destroy-network")
+	return nil
+}
+
 var _ provider.CloudProvider = (*pickyProvider)(nil)
 
 // threeClouds mirrors the real registry: each provider accepts only its

@@ -202,7 +202,8 @@ type CloudProvider interface {
 }
 ```
 
-`EnsureNetwork` (RFC 016 §2.2) exists because a shared network outlives
+`EnsureNetwork` and `DestroyNetwork` (RFC 016 §2.2, §2.6) exist because a
+shared network outlives
 and precedes the resources in it, so it cannot be declared inside any one
 resource's Pulumi program — stack identity is per-resource, and a program
 cannot create something a different stack also needs. The Engine calls it
@@ -211,6 +212,22 @@ which puts the one ordering constraint in the one component that can see
 every resource in a Specification. `NetworkScope` carries the provider and
 the account as well as environment and region, because neither two
 providers nor two accounts ever share a network.
+
+Teardown is the mirror image and needs one more thing: proof that the
+scope is empty. `Engine.ReapNetworks` asks a `ScopeOccupancy` function —
+injected via `WithScopeOccupancy`, the same dependency-injection pattern
+RFC 004 used for `DeploymentTarget`s — and destroys only the networks
+whose scope holds nothing. **Absent that function it removes nothing**,
+which is the safe direction: an Engine that cannot prove a scope is empty
+leaves an orphaned network, which costs a little and is fixable, rather
+than cutting live resources off from everything they talk to. An error
+reading the ledger is likewise not evidence of emptiness and stops the
+reap.
+
+The CLI supplies the function from `internal/state`, and calls
+`ReapNetworks` *after* the destruction has been recorded — the ledger is
+what answers the question, so it has to be current first. That ordering
+also makes the operation idempotent: a rerun finds the networks gone.
 
 `spec.Policies` is passed to every method (RFC 002 §2.5) precisely so a
 provider can enforce constraints such as `Policies.AllowedRegions`, which
@@ -254,10 +271,7 @@ reported. Accounts never share a network (RFC 016 §2.1), so there is
 nothing to collide; a warning that fires on correct behaviour is how real
 warnings come to be ignored.
 
-**Status: implemented on all three providers** (RFC 016 §6 steps 1-5).
-Step 6 — gating network teardown on the ledger — is outstanding, so a
-scope's network currently outlives the resources in it rather than being
-removed with the last one.
+**Status: complete** (RFC 016 §6 steps 1-6) on all three providers.
 
 ### `internal/provider/compute`
 
@@ -605,6 +619,8 @@ Measures active as of today (see also RFC 001 §3, 002 §2.4-2.5, 003
 | Publicly reachable database endpoint (RFC 015 §1) | Azure MySQL had a public endpoint held closed only by the absence of a firewall rule — one portal click from open — while `cli.md` claimed it was not publicly reachable. VNet integration removes the endpoint instead of leaving it unfirewalled, on both engines |
 | Deletion protection that protects against everything except us | The Azure management lock is a resource in CloudSDD's own stack, so a destroy would delete it first. `pulumi.Protect` covers that path; the lock covers the portal. Shipping either alone would be protection with a hole exactly where the mistranslated-prompt risk lives (RFC 015 §2.1) |
 | Protection that silently disables a cost control | The lock is `CanNotDelete`, never `ReadOnly`: `ReadOnly` forbids modification and would leave RFC 012's runbook unable to stop the server, reporting itself only as an unchanged bill |
+| A shared network destroyed under live resources | Teardown is gated on the ledger showing the scope empty (RFC 016 §2.6). No occupancy check configured, or a ledger that cannot be read, means nothing is reaped — an orphaned network costs money and is fixable, the opposite default cuts running resources off from everything |
+| A stale ledger orphaning a network | **Accepted, and new.** The ledger is now load-bearing for a destroy decision, not only for translation context. A ledger deleted by hand leaves networks standing rather than deleting them, which is the direction the failure should fall |
 | Sealed environments by default (RFC 005 §2.5) | `Scope.Sealed` defaults to `true`; `cross_account_role`, the only ResourceType inherently cross-account, is rejected unless `Scope.Sealed: false` is explicit (`ErrSealedCrossAccountRole`) |
 | Cross-account/cross-environment state collision | Pulumi stack identity is now `(Account, Environment, Region, Resource.ID)`, not `Resource.ID` alone (RFC 005 §2.6): closes a gap where the same `Resource.ID` applied to two accounts/environments could silently share one local stack |
 | BOLA | Not yet applicable: no multi-tenant storage/state layer exists yet (note: the stack-per-scope design in RFC 002 §2.3 / RFC 005 §2.6 has no tenant namespacing, open question) |
@@ -685,14 +701,6 @@ artifact it archives.
 
 Not yet implemented:
 
-- **Network teardown (RFC 016 §2.6, step 6).** All three providers now
-  build a scope network, but nothing removes one. A scope's network
-  outlives the resources in it: destroying the last database in an
-  environment leaves its VPC, subnets and DNS zones behind. The ledger
-  already keys entries by `(account, environment, region, id)`, so the
-  Engine can ask whether a scope still holds anything and tear the
-  network stack down only when it does not — which also makes the ledger
-  load-bearing for correctness rather than only for translation context.
 - **`container_service`.** Approved as RFC 017 and blocked on RFC 016
   finishing: it needs egress to pull an image and an ingress that is
   deliberate rather than inherited. It remains the one `ResourceType` in

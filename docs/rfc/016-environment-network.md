@@ -1,6 +1,6 @@
 # RFC 016: The Environment Network
 
-- **Status:** Approved (2026-08-01)
+- **Status:** Approved (2026-08-01), implemented
 - **Author:** Claude (Senior Staff Cloud Platform Engineer, AI-assisted)
 - **Date:** 2026-08-01
 - **Depends on:** [RFC 005](005-account-environment-region-scoping.md),

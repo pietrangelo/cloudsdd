@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -204,7 +205,47 @@ func execute(cmd *cobra.Command, eng engine.Engine, s spec.Specification, intent
 
 	fmt.Fprintf(out, "%s completed successfully:\n", done)
 	printResults(out, results)
+
+	if intent == spec.IntentDestroy {
+		reapNetworks(cmd, eng, s)
+	}
 	return nil
+}
+
+// reapNetworks removes the shared network of any scope this destroy left
+// empty (RFC 016 §2.6).
+//
+// It runs after the ledger has been updated, because the ledger is what
+// answers "is this scope empty now?". A failure here is reported and not
+// returned: the resources the user asked to destroy are gone, so the
+// operation succeeded, and what remains is an empty network that costs a
+// little and can be removed on the next destroy. Failing the command
+// would report a successful teardown as an error.
+func reapNetworks(cmd *cobra.Command, eng engine.Engine, s spec.Specification) {
+	out := cmd.OutOrStdout()
+
+	reaped, err := eng.ReapNetworks(cmd.Context(), s)
+	if err != nil {
+		fmt.Fprintf(out, "Warning: failed to remove an empty environment network: %v\n", err)
+	}
+	for _, scope := range reaped {
+		fmt.Fprintf(out, "- removed the %s network for %s (nothing left in it)\n",
+			scope.Provider, displayScope(scope))
+	}
+}
+
+// displayScope renders a scope for the teardown message.
+func displayScope(s provider.NetworkScope) string {
+	parts := make([]string, 0, 3)
+	for _, p := range []string{s.Account, s.Environment, s.Region} {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	if len(parts) == 0 {
+		return "the default scope"
+	}
+	return strings.Join(parts, "/")
 }
 
 func printResults(out io.Writer, results []provider.Result) {
@@ -317,7 +358,16 @@ func buildEngine(s spec.Specification, cfg *config.Config) (engine.Engine, []str
 		providers[name] = p
 	}
 
-	var opts []engine.Option
+	opts := []engine.Option{
+		// The ledger is what tells the Engine whether a scope still holds
+		// anything, and so whether its shared network may be torn down
+		// (RFC 016 §2.6). Supplied here rather than imported by the
+		// Engine, so an Engine driven directly is not obliged to have a
+		// ledger on disk — and, absent this, reaps nothing.
+		engine.WithScopeOccupancy(func(_ context.Context, sc provider.NetworkScope) (int, error) {
+			return state.CountInScope(sc.Account, sc.Environment, sc.Region)
+		}),
+	}
 	if cfg != nil && cfg.Defaults.Provider != "" {
 		opts = append(opts, engine.WithDefaultProvider(spec.Provider(cfg.Defaults.Provider)))
 	}

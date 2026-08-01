@@ -133,3 +133,63 @@ func scopeLabel(s provider.NetworkScope) string {
 	}
 	return string(s.Provider) + network.ScopeSeparator + label
 }
+
+// ScopeOccupancy reports how many resources are still recorded in a
+// scope. It is how the Engine learns whether a shared network is safe to
+// remove (RFC 016 §2.6).
+//
+// Injected rather than read directly, following the pattern RFC 004 set
+// for DeploymentTargets: the Engine orchestrates, and what it knows about
+// the world arrives through its constructor. It also keeps
+// internal/engine free of internal/state, so an Engine driven directly —
+// by a test, or by something that is not the CLI — is not obliged to have
+// a ledger on disk.
+type ScopeOccupancy func(ctx context.Context, s provider.NetworkScope) (int, error)
+
+// WithScopeOccupancy supplies the occupancy check used before tearing
+// down a scope's network.
+//
+// Absent, ReapNetworks removes nothing. That default is deliberate and it
+// is the safe direction: an Engine that cannot prove a scope is empty
+// leaves the network standing. The failure mode is an orphaned network,
+// which costs money and is fixable; the opposite default would cut live
+// resources off from everything they talk to.
+func WithScopeOccupancy(f ScopeOccupancy) Option {
+	return func(e *DefaultEngine) { e.occupancy = f }
+}
+
+// ReapNetworks removes the shared network of every scope in s that is now
+// empty (RFC 016 §2.6), returning the scopes whose networks were removed.
+//
+// It is called after a destroy has been recorded, not during one: the
+// ledger is the thing being consulted, so it has to have been updated
+// first. That ordering also makes the operation idempotent — a rerun
+// finds the networks already gone and does nothing.
+func (e *DefaultEngine) ReapNetworks(ctx context.Context, s spec.Specification) ([]provider.NetworkScope, error) {
+	if e.occupancy == nil {
+		return nil, nil
+	}
+
+	var reaped []provider.NetworkScope
+	for _, scope := range networkScopes(s) {
+		remaining, err := e.occupancy(ctx, scope)
+		if err != nil {
+			return reaped, fmt.Errorf("engine: failed to check whether scope %q is empty: %w",
+				scopeLabel(scope), err)
+		}
+		if remaining > 0 {
+			continue
+		}
+
+		p, ok := e.providers[scope.Provider]
+		if !ok {
+			return reaped, fmt.Errorf("%w: %q", ErrProviderNotFound, scope.Provider)
+		}
+		if err := p.DestroyNetwork(ctx, scope, s.Policies); err != nil {
+			return reaped, fmt.Errorf("engine: failed to remove the network for scope %q: %w",
+				scopeLabel(scope), err)
+		}
+		reaped = append(reaped, scope)
+	}
+	return reaped, nil
+}

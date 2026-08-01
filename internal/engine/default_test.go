@@ -28,6 +28,12 @@ type mockProvider struct {
 	// anything in it is applied (RFC 016 §2.2).
 	networkScopes []provider.NetworkScope
 	networkErr    error
+
+	// destroyedNetworks records DestroyNetwork calls, so a test can
+	// assert that a shared network is removed only once its scope is
+	// empty (RFC 016 §2.6).
+	destroyedNetworks []provider.NetworkScope
+	destroyNetworkErr error
 }
 
 func (m *mockProvider) Name() string { return m.name }
@@ -48,6 +54,11 @@ func (m *mockProvider) Apply(ctx context.Context, r spec.Resource, p spec.Polici
 func (m *mockProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, p spec.Policies) error {
 	m.networkScopes = append(m.networkScopes, s)
 	return m.networkErr
+}
+
+func (m *mockProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, p spec.Policies) error {
+	m.destroyedNetworks = append(m.destroyedNetworks, s)
+	return m.destroyNetworkErr
 }
 
 func (m *mockProvider) Destroy(ctx context.Context, r spec.Resource, p spec.Policies) error {

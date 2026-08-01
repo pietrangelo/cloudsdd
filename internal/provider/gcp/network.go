@@ -264,3 +264,31 @@ func resourceScope(r spec.Resource) provider.NetworkScope {
 		Region:      r.Scope.Region,
 	}
 }
+
+// DestroyNetwork removes the scope's network stack (RFC 016 §2.6).
+//
+// The Engine establishes that the scope is empty before calling this.
+// Nothing here can check: a scope's contents live in other stacks, and
+// this one knows only about the network.
+func (p *GCPProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, policies spec.Policies) error {
+	if s.Region == "" {
+		return nil
+	}
+
+	cidr, err := network.Derive(networkScope(s), addressPolicy(policies))
+	if err != nil {
+		return err
+	}
+
+	program := func(pctx *pulumi.Context) error {
+		return declareScopeNetwork(pctx, s, cidr)
+	}
+	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", program)
+	if err != nil {
+		return fmt.Errorf("gcp: failed to select the network stack for scope %q: %w", scopeName(s), err)
+	}
+	if _, err := stack.Destroy(ctx); err != nil {
+		return fmt.Errorf("gcp: failed to destroy the network for scope %q: %w", scopeName(s), err)
+	}
+	return nil
+}

@@ -26,6 +26,10 @@ type DefaultEngine struct {
 	// above this package.
 	defaultProvider spec.Provider
 
+	// occupancy answers "does this scope still hold anything?" before a
+	// shared network is torn down (RFC 016 §2.6). Nil means never reap.
+	occupancy ScopeOccupancy
+
 	targetCacheMu sync.Mutex
 	targetCache   map[string]provider.CloudProvider
 }

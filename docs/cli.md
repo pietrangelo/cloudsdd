@@ -145,9 +145,23 @@ connect from:
 
 All three now put a scope's resources on one network, so a VM and a
 database in the same `environment` and region can reach each other, and
-nothing in another environment can reach either. What is still missing is
-teardown: destroying the last resource in an environment leaves its
-network behind.
+nothing in another environment can reach either.
+
+The network is created before the first resource in an environment and
+removed after the last one:
+
+```
+$ cloudsdd destroy "remove the app-db database"
+...
+Destroy completed successfully:
+- app-db (region: eu-central-1): destroyed
+- removed the aws network for dev/eu-central-1 (nothing left in it)
+```
+
+It is removed **only** when the ledger shows the environment empty. If
+the ledger cannot be read, or anything is still recorded there, the
+network stays: an empty network costs a little, and the alternative
+mistake cuts running resources off from everything they talk to.
 Until the remaining steps land, treat these databases as
 provisioned-and-private rather than connected, and know that Azure at
 least gives you a VNet to peer or attach to.
