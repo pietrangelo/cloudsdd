@@ -89,6 +89,14 @@ jobs:
       - name: Fuzz the schedule compiler
         run: go test -run=X -fuzz=FuzzCompile -fuzztime=60s ./internal/schedule/
 
+      # A derived address range becomes a VPC that cannot be renumbered
+      # without rebuilding everything inside it, so the invariants — always
+      # a /20, always inside the base block, always aligned — have to hold
+      # for every scope string, not just the ones a test author imagined
+      # (RFC 016 §5.10).
+      - name: Fuzz the network address derivation
+        run: go test -run=X -fuzz=FuzzDerive -fuzztime=60s ./internal/provider/network/
+
   security:
     name: Security
     runs-on: ubuntu-latest

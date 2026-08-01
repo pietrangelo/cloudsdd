@@ -66,6 +66,7 @@ cloudsdd/
 │   │   ├── azure/            # Azure implementation (RFC 008/012/013)
 │   │   ├── compute/          # Cloud-agnostic compute_instance shape, shared by all three (RFC 013)
 │   │   ├── decode/           # Shared strict property decoder + credential-name denylist (RFC 011)
+│   │   ├── network/          # Address derivation and conflict checking for scope networks (RFC 016)
 │   │   └── pulumiutil/       # Diff/Result mapping from Pulumi operation summaries
 │   └── engine/               # Engine interface, DefaultEngine, agnostic resolution, DeploymentTarget
 ├── pkg/                      # Reserved for public types; empty, with a README explaining why (see pkg/README.md)
@@ -74,7 +75,7 @@ cloudsdd/
 ├── .github/workflows/ci.yml  # Build, vet, gofmt, tidy, test+coverage gate, fuzz smoke, gosec, govulncheck
 ├── LICENSE                   # GNU AGPLv3 (or later), full text
 └── docs/
-    ├── rfc/001-015...         # Foundation + AWS + scoping + CLI + scheduling + compute + resolution + Azure parity
+    ├── rfc/001-017...         # Foundation + AWS + scoping + CLI + scheduling + compute + resolution + networking
     ├── architecture.md        # This document
     ├── cli.md                 # CLI commands and usage guide
     ├── dependency-licenses.md # Third-party license audit vs. AGPLv3
@@ -197,8 +198,19 @@ type CloudProvider interface {
     Plan(ctx context.Context, r spec.Resource, p spec.Policies) (Diff, error)
     Apply(ctx context.Context, r spec.Resource, p spec.Policies) (Result, error)
     Destroy(ctx context.Context, r spec.Resource, p spec.Policies) error
+    EnsureNetwork(ctx context.Context, s NetworkScope, p spec.Policies) error
 }
 ```
+
+`EnsureNetwork` (RFC 016 §2.2) exists because a shared network outlives
+and precedes the resources in it, so it cannot be declared inside any one
+resource's Pulumi program — stack identity is per-resource, and a program
+cannot create something a different stack also needs. The Engine calls it
+once per distinct `NetworkScope` before applying anything in that scope,
+which puts the one ordering constraint in the one component that can see
+every resource in a Specification. `NetworkScope` carries the provider and
+the account as well as environment and region, because neither two
+providers nor two accounts ever share a network.
 
 `spec.Policies` is passed to every method (RFC 002 §2.5) precisely so a
 provider can enforce constraints such as `Policies.AllowedRegions`, which
@@ -213,6 +225,38 @@ re-decodes it with `DisallowUnknownFields` before running
 independently of the schema; each provider constructs its own `Decoder`
 so error prefixes stay provider-specific. `pulumiutil` maps a Pulumi
 operation summary onto `provider.Diff`/`provider.Result`.
+
+### `internal/provider/network` (RFC 016, partial)
+
+Decides the address range of every network CloudSDD creates. Pure — no
+clock, no environment, no I/O, no cloud — for the same reason
+`internal/schedule` is: every decision about *addresses* belongs in one
+testable place, and a rule spread across three providers is three rules
+that will disagree.
+
+`Derive(Scope, Policy)` carves a configurable base block (default
+`10.0.0.0/8`) into `/20` slots and picks one by hashing
+`(account, environment, region)`. The hash is fixed and golden-tested,
+because a deployed range cannot be recomputed without rebuilding the
+network and everything inside it: changing the algorithm has to break a
+test rather than re-address production.
+
+Determinism rather than an allocator is a deliberate trade. CloudSDD's
+state is a local file, so two engineers deploying two environments from
+two machines cannot coordinate through it; the same scope yielding the
+same range everywhere is what lets them not need to. Hashing 4096 slots
+is not collision-proof, so `Check` derives every known scope and refuses
+when two in the *same account* overlap, naming both and the override —
+RFC 014's "report the ambiguity, never guess" applied to addresses.
+
+Two accounts deriving the same range is **not** a conflict and is not
+reported. Accounts never share a network (RFC 016 §2.1), so there is
+nothing to collide; a warning that fires on correct behaviour is how real
+warnings come to be ignored.
+
+**Status: derivation and checking are implemented and wired into the
+Engine. No provider builds a network yet** — `EnsureNetwork` returns nil
+on all three, per RFC 016 §6's staged rollout.
 
 ### `internal/provider/compute`
 
@@ -543,8 +587,9 @@ Table-driven throughout, per CLAUDE.md. Coverage as measured by
 | `internal/provider/pulumiutil` | 100.0% | 100% |
 | `internal/nlp` | 97.0% | 96% |
 | `internal/schedule` | 96.8% | 96% |
-| `internal/engine` | 96.1% | 95% |
+| `internal/engine` | 95.5% | 95% |
 | `internal/provider/decode` | 95.8% | 95% |
+| `internal/provider/network` | 93.7% | 93% |
 | `cmd/cloudsdd` | 93.5% | 93% |
 | `internal/config` | 93.5% | 93% |
 | `internal/state` | 91.3% | 91% |
@@ -568,10 +613,13 @@ artifact it archives.
   schedule rendering, Diff/Result mapping — is covered by table-driven
   tests, including Pulumi resource *declaration* through `pulumi.WithMocks`,
   which needs neither Docker nor the CLI.
-- Native Go fuzz targets, all three run for 60s per CI job: `spec.Parse`
-  (`FuzzParse`), the provider property decoder (`FuzzProperties`), and the
-  schedule compiler (`FuzzCompile`). The invariant is the absence of
-  panics, not the acceptance of the input.
+- Native Go fuzz targets, all four run for 60s per CI job: `spec.Parse`
+  (`FuzzParse`), the provider property decoder (`FuzzProperties`), the
+  schedule compiler (`FuzzCompile`), and the network address derivation
+  (`FuzzDerive`). For the first three the invariant is the absence of
+  panics; `FuzzDerive` asserts something stronger, because a malformed
+  range is not a crash but a VPC the cloud rejects after the user approved
+  the plan: every scope must yield an aligned `/20` inside the base block.
 - Integration tests (`testcontainers-go` + LocalStack) present behind the
   `integration` build tag
   (`go test -tags=integration ./internal/provider/aws/... -run TestIntegration`):
@@ -583,17 +631,20 @@ artifact it archives.
 
 Not yet implemented:
 
-- `container_service`, the one `ResourceType` in the schema no provider
-  implements.
-- **A network model.** "Private by default" is implemented on all three
-  clouds as *no configured path*, and only AWS produces a database
-  something can actually connect to: it sits in the account's default VPC,
-  whereas Azure's is alone in a VNet of its own and GCP's has a private IP
-  with no VPC offering private services access. Deciding what shares a
-  network — which is also what `Environment` should mean at the network
-  layer (RFC 005 §5) — is the largest open gap in the system and needs its
-  own RFC. RFC 015 §1.1 scoped it out deliberately rather than solving a
-  third of it inside a database change.
+- **The network model, partially.** RFC 016 is approved and its first two
+  steps are implemented: `EnsureNetwork` is on the `CloudProvider`
+  interface, the Engine sequences it once per scope before applying
+  anything in that scope, and `internal/provider/network` derives and
+  conflict-checks every scope's address range. **No provider builds a
+  network yet**, so today's reachability is unchanged: "private by
+  default" still means *no configured path* on GCP and Azure, and the
+  account's default VPC on AWS. Steps 3-6 — the AWS, GCP and Azure
+  networks, and teardown gating on the ledger — are what make a CloudSDD
+  database reachable, and they are not done.
+- **`container_service`.** Approved as RFC 017 and blocked on RFC 016
+  finishing: it needs egress to pull an image and an ingress that is
+  deliberate rather than inherited. It remains the one `ResourceType` in
+  the schema that no provider implements.
 - References/dependencies between resources in the same Specification —
   which is also why `Destroy` walks the resource list in reverse rather
   than in dependency order.

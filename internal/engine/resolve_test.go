@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -55,6 +56,11 @@ func (p *pickyProvider) Apply(ctx context.Context, r spec.Resource, _ spec.Polic
 
 func (p *pickyProvider) Destroy(ctx context.Context, r spec.Resource, _ spec.Policies) error {
 	p.operated = append(p.operated, "destroy")
+	return nil
+}
+
+func (p *pickyProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, _ spec.Policies) error {
+	p.operated = append(p.operated, "ensure-network")
 	return nil
 }
 
@@ -369,7 +375,11 @@ func TestOperationsResolveAgnostic(t *testing.T) {
 		name   string
 		intent spec.Intent
 		run    func(*DefaultEngine, spec.Specification) error
-		want   string
+		// want is the full sequence the chosen provider must observe.
+		// Apply is preceded by EnsureNetwork (RFC 016 §2.2); Plan is
+		// not, because Plan makes no changes and creating a VPC to
+		// preview a database would be a change.
+		want []string
 	}{
 		{
 			name:   "plan",
@@ -381,7 +391,7 @@ func TestOperationsResolveAgnostic(t *testing.T) {
 				}
 				return err
 			},
-			want: "plan",
+			want: []string{"plan"},
 		},
 		{
 			name:   "apply",
@@ -393,7 +403,7 @@ func TestOperationsResolveAgnostic(t *testing.T) {
 				}
 				return err
 			},
-			want: "apply",
+			want: []string{"ensure-network", "apply"},
 		},
 		{
 			name:   "destroy",
@@ -405,7 +415,7 @@ func TestOperationsResolveAgnostic(t *testing.T) {
 				}
 				return err
 			},
-			want: "destroy",
+			want: []string{"destroy"},
 		},
 	}
 
@@ -424,8 +434,8 @@ func TestOperationsResolveAgnostic(t *testing.T) {
 			// The region is GCP's, so GCP is the only candidate: the
 			// operation must have reached it and nothing else.
 			gcp := registry[spec.ProviderGCP].(*pickyProvider)
-			if len(gcp.operated) != 1 || gcp.operated[0] != tt.want {
-				t.Errorf("gcp received %v, want [%s]", gcp.operated, tt.want)
+			if !slices.Equal(gcp.operated, tt.want) {
+				t.Errorf("gcp received %v, want %v", gcp.operated, tt.want)
 			}
 			for _, name := range []spec.Provider{spec.ProviderAWS, spec.ProviderAzure} {
 				if got := registry[name].(*pickyProvider).operated; len(got) != 0 {

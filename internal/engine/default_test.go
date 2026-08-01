@@ -22,6 +22,12 @@ type mockProvider struct {
 	applyErr    error
 
 	validateCalls int
+
+	// networkScopes records every EnsureNetwork call, so a test can
+	// assert that a scope's network is provisioned once and before
+	// anything in it is applied (RFC 016 §2.2).
+	networkScopes []provider.NetworkScope
+	networkErr    error
 }
 
 func (m *mockProvider) Name() string { return m.name }
@@ -37,6 +43,11 @@ func (m *mockProvider) Plan(ctx context.Context, r spec.Resource, p spec.Policie
 
 func (m *mockProvider) Apply(ctx context.Context, r spec.Resource, p spec.Policies) (provider.Result, error) {
 	return m.apply, m.applyErr
+}
+
+func (m *mockProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, p spec.Policies) error {
+	m.networkScopes = append(m.networkScopes, s)
+	return m.networkErr
 }
 
 func (m *mockProvider) Destroy(ctx context.Context, r spec.Resource, p spec.Policies) error {

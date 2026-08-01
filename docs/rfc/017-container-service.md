@@ -1,6 +1,6 @@
 # RFC 017: Container Service
 
-- **Status:** Proposed
+- **Status:** Approved (2026-08-01)
 - **Author:** Claude (Senior Staff Cloud Platform Engineer, AI-assisted)
 - **Date:** 2026-08-01
 - **Depends on:** [RFC 012](012-environment-power-scheduling.md),

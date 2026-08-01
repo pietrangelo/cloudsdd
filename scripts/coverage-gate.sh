@@ -34,6 +34,7 @@ FLOORS=(
   "cloudsdd/internal/provider:100"
   "cloudsdd/internal/provider/compute:100"
   "cloudsdd/internal/provider/decode:95"
+  "cloudsdd/internal/provider/network:93"
   "cloudsdd/internal/provider/pulumiutil:100"
   "cloudsdd/internal/schedule:96"
   "cloudsdd/internal/spec:90"

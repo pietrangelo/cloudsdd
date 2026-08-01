@@ -83,4 +83,45 @@ type CloudProvider interface {
 
 	// Destroy removes the resource from real infrastructure.
 	Destroy(ctx context.Context, r spec.Resource, p spec.Policies) error
+
+	// EnsureNetwork idempotently provisions the shared network for a
+	// scope, before any resource in that scope is applied (RFC 016 §2.2).
+	// A provider with nothing to share returns nil.
+	//
+	// It exists because a network outlives and precedes the resources in
+	// it, and so cannot be declared inside any one resource's program:
+	// stack identity is per-resource, so a program cannot create
+	// something a different stack also needs. Ordering belongs to the
+	// Engine, which is the only component that can see every resource in
+	// a Specification — a provider deciding for itself would have three
+	// concurrent resource programs racing to create one VPC.
+	EnsureNetwork(ctx context.Context, s NetworkScope, p spec.Policies) error
+}
+
+// NetworkScope identifies the boundary one shared network serves
+// (RFC 016 §2.1): one per account, per environment, per region.
+//
+// It is not spec.Scope, which carries neither the account — that lives on
+// Resource.Account — nor the provider. Both belong here: an AWS account
+// and an Azure subscription are different things that can never share a
+// network, so the provider is part of the identity rather than a
+// coincidence of who was asked.
+type NetworkScope struct {
+	// Provider owns the network. Two providers never share one.
+	Provider spec.Provider
+
+	// Account is the DeploymentTarget name, empty for the default
+	// credentials. Accounts never share a network — an invariant, not a
+	// default (RFC 016 §2.1) — so this is the coarsest partition here.
+	Account string
+
+	// Environment and Region complete the scope, matching the dimensions
+	// RFC 005 §2.6 already uses for stack identity.
+	Environment string
+	Region      string
+
+	// Sealed is the scope's isolation posture, defaulting to true. A
+	// sealed scope may not be peered to another, and no scope may ever be
+	// peered across an account boundary regardless of this flag.
+	Sealed bool
 }

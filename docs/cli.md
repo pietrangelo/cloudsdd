@@ -143,10 +143,37 @@ connect from:
 | Azure | VNet integration: delegated subnet + private DNS zone | Anything in the database's own VNet, which today contains only the database |
 | GCP | Private IP only (`ipv4_enabled: false`) | Nothing yet — a private IP needs a VPC with private services access, which CloudSDD does not model |
 
-Deciding what shares a network is a feature CloudSDD does not have; it
-needs its own RFC (RFC 005 §5, RFC 015 §1.1). Until then, treat these
-databases as provisioned-and-private rather than connected, and know that
-Azure at least gives you a VNet to peer or attach to.
+This is what RFC 016 exists to fix, and it is **in progress**: the address
+plan and the engine sequencing are implemented, but no provider builds a
+shared network yet, so the table above is still the current behaviour.
+Until the remaining steps land, treat these databases as
+provisioned-and-private rather than connected, and know that Azure at
+least gives you a VNet to peer or attach to.
+
+### Address planning
+
+Once scope networks exist, each `(account, environment, region)` gets its
+own, with a range derived deterministically so that two of them never
+overlap — overlapping ranges are harmless until the day you try to peer
+them, and then the only fix is rebuilding both. Accounts never share a
+network, and two accounts holding the same range is fine rather than a
+conflict, because CloudSDD creates no route between them.
+
+You need to configure nothing. If you have an existing address plan:
+
+```json
+"policies": {
+  "network": {
+    "base_cidr": "172.20.0.0/14",
+    "scopes": { "prod::live::eu-central-1": "172.20.16.0/20" }
+  }
+}
+```
+
+`base_cidr` confines derivation to the block you set aside; `scopes` pins
+an individual scope by hand. If two scopes in one account ever resolve to
+the same range, CloudSDD refuses to deploy and names both plus the pin
+that resolves it, rather than quietly building overlapping networks.
 
 Two Azure notes:
 

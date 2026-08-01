@@ -176,6 +176,36 @@ type Policies struct {
 	// "agnostic" is excluded from the allowed values on purpose — a
 	// preference list that could contain it would be circular.
 	ProviderPreference []Provider `json:"provider_preference,omitempty" validate:"omitempty,max=3,unique,dive,oneof=aws gcp azure"`
+
+	// Network is the operator's address plan for the networks CloudSDD
+	// creates (RFC 016 §2.4.2). Absent means "derive everything from the
+	// default block", which is the case that needs no configuration.
+	Network *NetworkPolicy `json:"network,omitempty"`
+}
+
+// NetworkPolicy confines and, where necessary, overrides the address
+// ranges CloudSDD derives for its networks (RFC 016 §2.4).
+//
+// Both fields are optional. They exist for an operator who already has an
+// address plan — "this account gets 172.20.0.0/14 and nothing else" — not
+// for the ordinary case, where a user who never mentions networking still
+// gets private, non-overlapping networks.
+type NetworkPolicy struct {
+	// BaseCIDR is the block scope networks are carved out of. Must be
+	// RFC 1918 and large enough for at least one scope; validated in
+	// internal/provider/network, where the rest of the address
+	// arithmetic lives.
+	BaseCIDR string `json:"base_cidr,omitempty"`
+
+	// Scopes pins individual scopes, keyed "account::environment::region"
+	// with empty segments omitted. It is the escape hatch when two scopes
+	// derive the same range, and the way to honour a plan that assigns
+	// ranges by hand.
+	//
+	// Capped for the same reason every other policy list is (RFC 005 §3):
+	// an unbounded map in a Specification is an unbounded amount of work
+	// for whatever consumes it.
+	Scopes map[string]string `json:"scopes,omitempty" validate:"omitempty,max=32"`
 }
 
 // EffectiveSchedule returns the Schedule governing r: its own if it

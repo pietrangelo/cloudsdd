@@ -282,6 +282,40 @@ components:
             Declared once for the whole Specification and inherited by
             every schedulable resource (RFC 012 §2.1). A resource that
             declares its own `schedule` overrides it wholesale.
+        network:
+          $ref: "#/components/schemas/NetworkPolicy"
+          description: >
+            The operator's address plan (RFC 016 §2.4.2). Absent means
+            every scope's range is derived from the default block, which
+            is the case that needs no configuration.
+    NetworkPolicy:
+      description: >
+        Confines and, where necessary, overrides the address ranges
+        CloudSDD derives for the networks it creates (RFC 016 §2.4).
+        Both fields are optional and exist for an operator who already
+        has an address plan; a user who never mentions networking still
+        gets private, non-overlapping networks.
+      type: object
+      additionalProperties: false
+      properties:
+        base_cidr:
+          type: string
+          description: >
+            The block scope networks are carved out of. Must be RFC 1918
+            (10/8, 172.16/12, 192.168/16) and no smaller than a /20, so
+            at least one scope fits. Defaults to 10.0.0.0/8.
+        scopes:
+          type: object
+          maxProperties: 32
+          additionalProperties:
+            type: string
+          description: >
+            Pins individual scopes, keyed "account::environment::region"
+            with empty segments omitted. The escape hatch when two scopes
+            derive the same range, and the way to honour a plan that
+            assigns ranges by hand. A pinned range is validated exactly
+            as a derived one is: RFC 1918, inside base_cidr, and not
+            overlapping another scope in the same account.
     Schedule:
       description: >
         When a resource is powered on (RFC 012). Absent, or with

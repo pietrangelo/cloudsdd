@@ -245,6 +245,14 @@ func (e *DefaultEngine) Apply(ctx context.Context, s spec.Specification) ([]prov
 		return nil, err
 	}
 
+	// Every network a resource in this Specification will sit in has to
+	// exist before any of them is applied (RFC 016 §2.2). Doing it here,
+	// once, rather than inside each provider is what keeps three
+	// concurrent resource programs from racing to create one VPC.
+	if err := e.ensureNetworks(ctx, s); err != nil {
+		return nil, err
+	}
+
 	results := make([]provider.Result, 0, len(s.Resources))
 	for _, r := range s.Resources {
 		p, err := e.resolveProvider(ctx, r)

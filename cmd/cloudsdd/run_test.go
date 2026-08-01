@@ -45,6 +45,9 @@ type fakeProvider struct {
 
 	applied   []string
 	destroyed []string
+
+	// networkScopes records EnsureNetwork calls (RFC 016 §2.2).
+	networkScopes []provider.NetworkScope
 }
 
 func (f *fakeProvider) Name() string { return f.name }
@@ -74,6 +77,11 @@ func (f *fakeProvider) Destroy(ctx context.Context, r spec.Resource, p spec.Poli
 		return f.destroyErr
 	}
 	f.destroyed = append(f.destroyed, r.ID)
+	return nil
+}
+
+func (f *fakeProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, p spec.Policies) error {
+	f.networkScopes = append(f.networkScopes, s)
 	return nil
 }
 
