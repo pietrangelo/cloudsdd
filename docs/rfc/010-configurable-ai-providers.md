@@ -1,5 +1,10 @@
 # RFC 010: Configurable AI Providers (OpenAI & Local Models)
 
+- **Status:** Approved (2026-08-01), implemented
+- **Author:** Claude (Senior Staff Cloud Platform Engineer, AI-assisted)
+- **Date:** 2026-08-01
+- **Depends on:** [RFC 006](006-cli-entrypoint.md)
+
 ## 1. Context and Problem Statement
 Currently, `cloudsdd` is hardcoded to use Anthropic's Claude 3.5 Sonnet. While this provides excellent accuracy, many enterprise users have strict data privacy policies that forbid sending infrastructure architectures to third-party APIs. To maximize adoption and flexibility, the CLI must allow users to configure their own AI backend, including completely offline, local models.
 

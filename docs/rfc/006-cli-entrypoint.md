@@ -1,5 +1,11 @@
 # RFC 006: Natural Language CLI Entry Point
 
+- **Status:** Approved (2026-08-01), implemented
+- **Author:** Claude (Senior Staff Cloud Platform Engineer, AI-assisted)
+- **Date:** 2026-08-01
+- **Depends on:** [RFC 001](001-core-architecture-and-json-schema.md),
+  [RFC 005](005-account-environment-region-scoping.md)
+
 ## 1. Context and Problem Statement
 The CloudSDD project currently consists of a robust internal engine and AWS provider logic (`internal/engine`, `internal/provider`, `internal/spec`). However, there is no entry point.
 

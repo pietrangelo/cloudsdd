@@ -1,5 +1,11 @@
 # RFC 007: AWS Relational Database Implementation
 
+- **Status:** Approved (2026-08-01), implemented
+- **Author:** Claude (Senior Staff Cloud Platform Engineer, AI-assisted)
+- **Date:** 2026-08-01
+- **Depends on:** [RFC 002](002-aws-provider.md),
+  [RFC 006](006-cli-entrypoint.md)
+
 ## 1. Context and Problem Statement
 With the Natural Language CLI and engine pipeline fully operational, CloudSDD can now orchestrate cloud deployments. However, the AWS provider currently only implements `object_storage` and `cross_account_role`. We need to support the `relational_database` resource type to allow users to deploy secure, production-ready databases via natural language.
 

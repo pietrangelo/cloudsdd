@@ -68,13 +68,13 @@ cloudsdd/
 │   │   ├── decode/           # Shared strict property decoder + credential-name denylist (RFC 011)
 │   │   └── pulumiutil/       # Diff/Result mapping from Pulumi operation summaries
 │   └── engine/               # Engine interface, DefaultEngine, agnostic resolution, DeploymentTarget
-├── pkg/                      # Empty: no public type exposed yet (untracked — git carries no empty directory)
+├── pkg/                      # Reserved for public types; empty, with a README explaining why (see pkg/README.md)
 ├── scripts/
 │   └── coverage-gate.sh      # Per-package coverage floors enforced by CI (RFC 011 §5.1)
 ├── .github/workflows/ci.yml  # Build, vet, gofmt, tidy, test+coverage gate, fuzz smoke, gosec, govulncheck
 ├── LICENSE                   # GNU AGPLv3 (or later), full text
 └── docs/
-    ├── rfc/001-014...         # Foundation + AWS + scoping + CLI + scheduling + compute + resolution
+    ├── rfc/001-015...         # Foundation + AWS + scoping + CLI + scheduling + compute + resolution + Azure parity
     ├── architecture.md        # This document
     ├── cli.md                 # CLI commands and usage guide
     ├── dependency-licenses.md # Third-party license audit vs. AGPLv3
@@ -546,19 +546,22 @@ Table-driven throughout, per CLAUDE.md. Coverage as measured by
 | `internal/engine` | 96.1% | 95% |
 | `internal/provider/decode` | 95.8% | 95% |
 | `cmd/cloudsdd` | 93.5% | 93% |
+| `internal/config` | 93.5% | 93% |
+| `internal/state` | 91.3% | 91% |
 | `internal/spec` | 90.0% | 90% |
-| `internal/state` | 85.9% | 85% |
-| `internal/config` | 84.8% | 84% |
 | `internal/provider/azure` | 71.2% | 71% |
 | `internal/provider/gcp` | 71.0% | 70% |
 | `internal/provider/aws` | 65.6% | 65% |
 
 The floors live in `scripts/coverage-gate.sh` and are enforced by CI. They
 ratchet upward only, and a package with tests but no floor fails the gate,
-so a new package cannot quietly skip it.
+so a new package cannot quietly skip it. The script computes each
+percentage from the profile it is handed rather than re-running the suite
+package by package, so the numbers CI enforces are the ones in the
+artifact it archives.
 
-- The three provider packages sit below CLAUDE.md's >90% target for one
-  reason: `Plan`/`Apply`/`Destroy`/`upsertStack`/`NewTargetProviderFactory`
+- Every package meets CLAUDE.md's >90% target except the three provider
+  packages, which sit below it for one reason: `Plan`/`Apply`/`Destroy`/`upsertStack`/`NewTargetProviderFactory`
   drive the Pulumi Automation API, which shells out to the `pulumi` binary
   and talks to a real cloud control plane. The pure logic — property
   decoding and validation, IAM policy documents, ResourceType dispatch,

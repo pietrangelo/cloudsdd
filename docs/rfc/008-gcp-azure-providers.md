@@ -1,5 +1,11 @@
 # RFC 008: GCP and Azure Providers Implementation
 
+- **Status:** Approved (2026-08-01), implemented
+- **Author:** Claude (Senior Staff Cloud Platform Engineer, AI-assisted)
+- **Date:** 2026-08-01
+- **Depends on:** [RFC 002](002-aws-provider.md),
+  [RFC 007](007-aws-relational-database.md)
+
 ## 1. Context and Problem Statement
 The CloudSDD engine currently supports parsing cloud-agnostic schemas (like `object_storage` and `relational_database`) but only implements them for the `aws` provider. To fulfill the vision of a truly cloud-agnostic deployment engine, we must implement these resources for Google Cloud Platform (GCP) and Microsoft Azure.
 

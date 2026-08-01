@@ -217,3 +217,50 @@ func TestDefaultModelFor(t *testing.T) {
 		})
 	}
 }
+
+// TestDirDefaultsToHomeDirectory covers the branch taken when
+// CLOUDSDD_HOME is unset, which is the path every real invocation takes
+// and the one the env override exists to avoid in tests.
+func TestDirDefaultsToHomeDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(HomeEnv, "")
+	t.Setenv("HOME", home)
+
+	dir, err := Dir()
+	if err != nil {
+		t.Fatalf("Dir() error: %v", err)
+	}
+
+	want := filepath.Join(home, ".cloudsdd")
+	if dir != want {
+		t.Errorf("Dir() = %q, want %q", dir, want)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("Dir() did not create the directory: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("directory permissions = %o, want 0700", perm)
+	}
+}
+
+// TestDirReportsUncreatableDirectory covers the MkdirAll failure, which is
+// distinct from the unwritable-directory case already tested: there the
+// directory exists and cannot be written, here it cannot be created at
+// all. Both must surface rather than leave LoadConfig reporting a missing
+// config file.
+func TestDirReportsUncreatableDirectory(t *testing.T) {
+	parent := t.TempDir()
+	blocker := filepath.Join(parent, "blocker")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	// A path under a regular file: MkdirAll cannot create it.
+	t.Setenv(HomeEnv, filepath.Join(blocker, "cloudsdd"))
+
+	if _, err := Dir(); err == nil {
+		t.Fatal("Dir() error = nil, want the failed directory creation to be reported")
+	} else if !strings.Contains(err.Error(), "failed to create config dir") {
+		t.Errorf("error = %q, want it to name the creation failure", err)
+	}
+}

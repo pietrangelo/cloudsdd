@@ -4,12 +4,19 @@
 #
 # Enforces a per-package coverage floor (RFC 011 §5.1).
 #
-# CLAUDE.md targets >90%. Three packages are held to a lower floor because
-# their remaining uncovered statements are the Pulumi Automation API
-# surface — upsertStack, Plan, Apply, Destroy — which shells out to the
-# `pulumi` binary and talks to a real cloud control plane. Those paths are
-# covered by the build-tagged integration tests instead
+# CLAUDE.md targets >90%, and every package meets it except the three
+# provider packages. Those are held lower because their remaining
+# uncovered statements are the Pulumi Automation API surface —
+# upsertStack, Plan, Apply, Destroy — which shells out to the `pulumi`
+# binary and talks to a real cloud control plane. Those paths are covered
+# by the build-tagged integration tests instead
 # (go test -tags=integration ./internal/provider/...).
+#
+# What remains uncovered in internal/state is of the same kind, at a
+# smaller scale: I/O failures that can only happen *after* a file handle
+# is open — a failed Chmod, Write, Sync or Close on the ledger's temp
+# file. Reaching them needs a filesystem that fails mid-write, and the
+# seam that would fake one is a worse trade than the four statements.
 #
 # Floors ratchet upward only: raise them when coverage improves, never
 # lower them to make a red build green.
@@ -21,7 +28,7 @@ PROFILE="${1:-coverage.out}"
 # package:minimum
 FLOORS=(
   "cloudsdd/cmd/cloudsdd:93"
-  "cloudsdd/internal/config:84"
+  "cloudsdd/internal/config:93"
   "cloudsdd/internal/engine:95"
   "cloudsdd/internal/nlp:96"
   "cloudsdd/internal/provider:100"
@@ -30,7 +37,7 @@ FLOORS=(
   "cloudsdd/internal/provider/pulumiutil:100"
   "cloudsdd/internal/schedule:96"
   "cloudsdd/internal/spec:90"
-  "cloudsdd/internal/state:85"
+  "cloudsdd/internal/state:91"
   # Pulumi-bound: see the note above.
   "cloudsdd/internal/provider/aws:65"
   "cloudsdd/internal/provider/azure:71"
@@ -42,19 +49,33 @@ if [[ ! -f "$PROFILE" ]]; then
   exit 1
 fi
 
-# Build a "package<TAB>percent" table from the per-function profile.
-COVERAGE=$(go tool cover -func="$PROFILE" \
-  | awk '$1 != "total:" {
-      n = split($1, parts, ":")
-      path = parts[1]
-      sub(/\/[^\/]*$/, "", path)          # strip the file name
-      gsub(/%/, "", $NF)
-      # Weight each function equally is wrong; accumulate statements instead
-      # is not available here, so aggregate with the cover tool per package
-      # below. This branch only collects package names.
-      pkgs[path] = 1
+# Per-package coverage, computed from the profile this script was handed.
+#
+# Earlier versions took the profile only as proof that tests had run and
+# then called `go test -cover` once per package, which ran the entire
+# suite a second time — and, worse, measured something other than the
+# artifact CI archives. The percentages now come from the same file.
+#
+# The profile's format is one line per block:
+#   <file>:<startLine>.<col>,<endLine>.<col> <numStatements> <hitCount>
+# so a package's coverage is its covered statements over its total, which
+# is exactly what `go test -cover` reports. Counting blocks or averaging
+# per-file percentages would both be wrong: blocks differ in size.
+COVERAGE=$(awk '
+  NR == 1 && /^mode:/ { next }
+  {
+    split($1, loc, ":")
+    path = loc[1]
+    sub(/\/[^\/]*$/, "", path)            # strip the file name
+    total[path] += $2
+    if ($3 > 0) covered[path] += $2
+  }
+  END {
+    for (p in total) {
+      pct = total[p] > 0 ? (covered[p] * 100.0 / total[p]) : 0
+      printf "%s %.1f\n", p, pct
     }
-    END { for (p in pkgs) print p }')
+  }' "$PROFILE")
 
 status=0
 
@@ -62,9 +83,7 @@ for entry in "${FLOORS[@]}"; do
   pkg="${entry%:*}"
   floor="${entry##*:}"
 
-  actual=$(go test -cover "$pkg" 2>/dev/null \
-    | grep -oE 'coverage: [0-9.]+%' \
-    | grep -oE '[0-9.]+' || true)
+  actual=$(awk -v pkg="$pkg" '$1 == pkg { print $2 }' <<<"$COVERAGE")
 
   if [[ -z "$actual" ]]; then
     echo "FAIL  $pkg — no coverage reported" >&2
@@ -82,7 +101,7 @@ done
 
 # Any package with tests that is not listed above is unguarded — catch it
 # so new packages cannot skip the gate.
-for pkg in $COVERAGE; do
+for pkg in $(awk '{ print $1 }' <<<"$COVERAGE"); do
   listed=0
   for entry in "${FLOORS[@]}"; do
     [[ "${entry%:*}" == "$pkg" ]] && listed=1 && break

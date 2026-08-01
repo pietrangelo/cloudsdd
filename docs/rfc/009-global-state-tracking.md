@@ -1,5 +1,10 @@
 # RFC 009: Global State Tracking for Context-Aware AI
 
+- **Status:** Approved (2026-08-01), implemented
+- **Author:** Claude (Senior Staff Cloud Platform Engineer, AI-assisted)
+- **Date:** 2026-08-01
+- **Depends on:** [RFC 006](006-cli-entrypoint.md)
+
 ## 1. Context and Problem Statement
 Currently, the `cloudsdd` CLI treats every natural language prompt as an isolated event. The AI translates the prompt into an SDD specification and the engine deploys it. However, if a user later says, *"create a resource in account X and allow it to be reached from the database in account Y"*, the AI has no memory of the database in account Y. 
 
