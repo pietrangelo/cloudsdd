@@ -26,10 +26,15 @@ the resulting Specification via AWS (RFC 002-004, 007), GCP, and Azure
 (RFC 008) providers. Deployed resources are recorded in a local ledger
 (RFC 009) that is fed back to the translator as context. RFC 011 hardened
 the providers added after RFC 006 and added the CI that had been missing.
+RFC 012 added power scheduling, RFC 013 `compute_instance` on all three
+clouds, and RFC 014 the resolution of `provider: "agnostic"` to a concrete
+cloud.
 
-The original HTTP API layer concept was replaced by this CLI-first approach;
-`docs/api.md` and `docs/openapi.yaml` are retained only as a record of that
-earlier direction and describe nothing that exists.
+The original HTTP API layer concept was replaced by this CLI-first approach.
+`docs/api.md` is retained only as a record of that earlier direction and
+describes nothing that exists. `docs/openapi.yaml` is still maintained — it
+is the schema of the current Specification — but declares no paths, because
+nothing serves it.
 
 ## License
 
@@ -47,22 +52,34 @@ for the full breakdown and the process for vetting new dependencies.
 ```
 cloudsdd/
 ├── cmd/
-│   └── cloudsdd/            # CLI entry point (cobra root, deploy, destroy commands)
+│   └── cloudsdd/             # CLI entry point (cobra root, deploy/destroy, run pipeline, schedule prompts)
 ├── internal/
-│   ├── nlp/                 # LLM translation interface from Natural Language to Specification
-│   ├── schedule/            # Power-schedule model and compiler (RFC 012)
-│   ├── spec/                # Specification types, strict parsing, domain validation
-│   ├── provider/             # CloudProvider interface, Diff/Result types
-│   │   └── aws/                # Concrete AWS implementation (RFC 002/003/004)
-│   └── engine/                # Engine interface, DefaultEngine, DeploymentTarget (RFC 004)
-├── pkg/                     # Empty: no public type exposed yet
-├── LICENSE                  # GNU AGPLv3 (or later), full text
+│   ├── config/               # ~/.cloudsdd/config.yaml: AI provider, model, defaults.provider (RFC 010/014)
+│   ├── nlp/                  # LLM translation from Natural Language to Specification
+│   │                         #   (anthropic, openai, ollama backends behind one Translator)
+│   ├── schedule/             # Power-schedule model and compiler (RFC 012)
+│   ├── spec/                 # Specification types, strict parsing, domain validation
+│   ├── state/                # Local ledger of deployed resources, fed back to the translator (RFC 009)
+│   ├── provider/             # CloudProvider interface, Diff/Result types, AllowedRegions helper
+│   │   ├── aws/              # AWS implementation (RFC 002/003/004/007/012/013)
+│   │   ├── gcp/              # GCP implementation (RFC 008/012/013)
+│   │   ├── azure/            # Azure implementation (RFC 008/012/013)
+│   │   ├── compute/          # Cloud-agnostic compute_instance shape, shared by all three (RFC 013)
+│   │   ├── decode/           # Shared strict property decoder + credential-name denylist (RFC 011)
+│   │   └── pulumiutil/       # Diff/Result mapping from Pulumi operation summaries
+│   └── engine/               # Engine interface, DefaultEngine, agnostic resolution, DeploymentTarget
+├── pkg/                      # Empty: no public type exposed yet (untracked — git carries no empty directory)
+├── scripts/
+│   └── coverage-gate.sh      # Per-package coverage floors enforced by CI (RFC 011 §5.1)
+├── .github/workflows/ci.yml  # Build, vet, gofmt, tidy, test+coverage gate, fuzz smoke, gosec, govulncheck
+├── LICENSE                   # GNU AGPLv3 (or later), full text
 └── docs/
-    ├── rfc/001-014...        # Foundation + AWS + scoping + CLI + scheduling + compute (approved)
+    ├── rfc/001-014...         # Foundation + AWS + scoping + CLI + scheduling + compute + resolution
     ├── architecture.md        # This document
     ├── cli.md                 # CLI commands and usage guide
     ├── dependency-licenses.md # Third-party license audit vs. AGPLv3
-    └── openapi.yaml            # OpenAPI schema (Specification + AWS properties, no paths)
+    ├── api.md                 # Superseded HTTP-API direction, retained for history
+    └── openapi.yaml           # OpenAPI schema of the Specification (no paths — nothing serves it)
 ```
 
 ## Package `internal/spec`
@@ -139,24 +156,34 @@ The compiler is covered by a native fuzz target (`FuzzCompile`) over the
 time, date, and mode strings, on the same reasoning as `spec`'s
 `FuzzParse`.
 
-### `internal/provider/compute`
+## Packages `internal/nlp`, `internal/config`, `internal/state`
 
-Holds the cloud-agnostic shape of a `compute_instance` — `size`, `os`,
-`disk_size_gb`, `public_ip` — and the single-zone placement rule (RFC 013
-§2.1, §2.3).
+The three packages that sit around the engine rather than inside it.
 
-The struct is shared rather than redeclared per provider for the reason
-RFC 011 §1.1H recorded: three copies of a schema drift, and a drifted
-schema means a Specification that is valid on one cloud and silently
-different on another. Each provider still decodes it through its own
-`decode.Decoder`, so error prefixes and provider-specific validator tags
-stay where they belong. What is deliberately *not* shared is the mapping
-onto SKUs and images, which is per-provider by nature.
+`internal/nlp` translates a prompt into a Specification behind one
+`Translator` interface, with Anthropic, OpenAI and Ollama backends chosen
+by configuration (RFC 010) so an operator forbidden from sending
+architecture to a third party can run entirely locally. The prompt is
+built in one place, shared by all three backends: three copies of it would
+mean a capability documented to the model on one provider and invisible on
+another (RFC 011 §1.1H1).
 
-`compute_instance` is also the first ResourceType to consume
-`Scope.Zones`, which RFC 005 §2.4.3 introduced with no consumer. A VM
-occupies exactly one zone, so more than one entry is an error rather than
-a silent pick of the first.
+`internal/config` reads `~/.cloudsdd/config.yaml` (`0600`, created on
+first run): the AI provider and model, and `defaults.provider`, the
+machine-wide tie-break for agnostic resolution. A `defaults.provider` that
+does not name a real cloud is an error at load time, not a silent fallback.
+
+`internal/state` maintains the ledger of what has been deployed
+(`~/.cloudsdd/ledger.json`, `0600`), keyed by
+`(account, environment, region, id)` so the same resource ID in `dev` and
+`prod` stays two records (RFC 011 §2.7). Writes go through a temp file and
+a rename, under a cross-process lockfile with a staleness timeout, because
+two `cloudsdd` runs are a normal thing to have. Only resources that
+actually applied are recorded, so a partially-failed run still tracks what
+it created. The ledger is fed back to the translator as context, and is
+treated as **untrusted input** on the way: explicitly delimited, labelled,
+and size-capped, with everything the model returns still gated by strict
+schema validation (RFC 011 §4).
 
 ## Package `internal/provider`
 
@@ -177,7 +204,36 @@ type CloudProvider interface {
 provider can enforce constraints such as `Policies.AllowedRegions`, which
 would otherwise remain unenforceable at the provider level.
 
-### `internal/provider/aws` (RFC 002, 003, 004)
+### `internal/provider/decode` and `internal/provider/pulumiutil`
+
+Two pieces every provider needs identically, extracted so they cannot
+drift (RFC 011 §1.1H). `decode` re-marshals `Resource.Properties` and
+re-decodes it with `DisallowUnknownFields` before running
+`go-playground/validator` over it, and rejects credential-shaped keys
+independently of the schema; each provider constructs its own `Decoder`
+so error prefixes stay provider-specific. `pulumiutil` maps a Pulumi
+operation summary onto `provider.Diff`/`provider.Result`.
+
+### `internal/provider/compute`
+
+Holds the cloud-agnostic shape of a `compute_instance` — `size`, `os`,
+`disk_size_gb`, `public_ip` — and the single-zone placement rule (RFC 013
+§2.1, §2.3).
+
+The struct is shared rather than redeclared per provider for the reason
+RFC 011 §1.1H recorded: three copies of a schema drift, and a drifted
+schema means a Specification that is valid on one cloud and silently
+different on another. Each provider still decodes it through its own
+`decode.Decoder`, so error prefixes and provider-specific validator tags
+stay where they belong. What is deliberately *not* shared is the mapping
+onto SKUs and images, which is per-provider by nature.
+
+`compute_instance` is also the first ResourceType to consume
+`Scope.Zones`, which RFC 005 §2.4.3 introduced with no consumer. A VM
+occupies exactly one zone, so more than one entry is an error rather than
+a silent pick of the first.
+
+### `internal/provider/aws` (RFC 002, 003, 004, 007, 012, 013)
 
 First concrete implementation of `CloudProvider`, based on the Pulumi
 Automation API (inline program in Go; no `pulumi` process is shelled out
@@ -193,8 +249,10 @@ the machine, but invokes it itself).
   (`CrossAccountRoleProperties`: `enabled` as a kill switch,
   `trusted_account_id`, `external_id` mandatory against the confused
   deputy problem, `permissions`/`resource_arns` with no full wildcard,
-  cap of 20 entries). Other `ResourceType`s return
-  `ErrUnsupportedResourceType`.
+  cap of 20 entries), plus `relational_database` → RDS (RFC 007) and
+  `compute_instance` → EC2 (RFC 013), both described below.
+  `container_service` — the one remaining `ResourceType` in the schema —
+  returns `ErrUnsupportedResourceType` on every provider.
 - **Mass Assignment at the provider level**: `decodeProperties`
   re-marshals `Resource.Properties` and re-decodes it with
   `DisallowUnknownFields`, then validates it with
@@ -233,6 +291,7 @@ the machine, but invokes it itself).
   Pulumi AWS provider (never written to disk).
 - **Power scheduling (RFC 012 §4.1)**: EventBridge Scheduler with
   *universal targets* — `arn:aws:scheduler:::aws-sdk:rds:{start,stop}DBInstance`
+  for a database, `…:aws-sdk:ec2:{start,stop}Instances` for a VM (RFC 013)
   — so a schedule is pure configuration. The obvious alternative, a Lambda
   calling the RDS API, would mean shipping, versioning and patching a code
   artifact for something that changes no logic. The schedules are declared
@@ -247,6 +306,78 @@ the machine, but invokes it itself).
   and the region are parsed out of the instance ARN rather than read
   through an `aws:getCallerIdentity` invoke: the schedules necessarily
   live where the instance does, and the program stays invoke-free.
+
+### `internal/provider/gcp` (RFC 008, 012, 013)
+
+Cloud Storage and Cloud SQL, both private by default; encryption at rest
+is unconditional on GCP, so a Specification asking to disable it is
+refused rather than quietly ignored.
+
+Power scheduling uses a Cloud Scheduler job calling the Cloud SQL Admin
+API (`settings.activationPolicy`: `ALWAYS`/`NEVER`) with an OAuth token
+minted for a dedicated service account, bound to a custom role carrying
+`cloudsql.instances.get` and `cloudsql.instances.update`. Cloud SQL has no
+resource-level IAM, so the binding is necessarily project-wide — which is
+precisely why it must not be `roles/cloudsql.admin`.
+
+A Cloud Scheduler job has no start or expiry date, and a Compute Engine
+instance schedule accepts one policy with one validity interval, so
+**exception windows cannot be expressed on GCP** and are rejected with
+`ErrScheduleExceptionsUnsupported`. Dropping them silently would leave an
+environment running through a shutdown the user believed they had
+scheduled, and the failure would surface as an invoice rather than an
+error.
+
+### `internal/provider/azure` (RFC 008, 012, 013)
+
+Blob storage and Flexible Server databases, in a resource group per
+resource since Azure has no ambient container and no default network.
+
+Power scheduling uses an Automation Account with a system-assigned
+identity, a runbook, and `automation.Schedule` resources (whose
+`StartTime`/`ExpiryTime` do support exception windows). It is the only
+provider needing a deployed code artifact, so the runbook is a fixed
+constant in the repository: the action and the target arrive as runbook
+*parameters*, never as interpolated script text. The identity is bound to
+a custom role scoped to the single server, with read/start/stop and
+nothing else.
+
+Azure schedules are anchored rather than purely recurrent, so the provider
+computes the first occurrence against a clock (a `timeNow` seam, frozen in
+tests) and declares the resource with
+`pulumi.IgnoreChanges([]string{"startTime"})` — otherwise every apply
+would recompute the anchor and show a spurious diff.
+
+Two gaps are open and tracked under "Out of scope" below rather than
+papered over: no `deletion_protection` on `relational_database`, and no
+network isolation for MySQL Flexible Server.
+
+### Compute instances across the three providers (RFC 013)
+
+The security posture is the point of this resource type: every other type
+in the schema is a managed service, whereas a VM runs arbitrary code with
+an attached identity.
+
+- **AWS**: IMDSv2 required with a hop limit of 1 — the control that turns
+  an application SSRF from a credential compromise into a failed request —
+  an encrypted root volume, a security group with *no ingress rules at
+  all*, and an instance profile carrying only
+  `AmazonSSMManagedInstanceCore` so an operator can open an audited shell
+  without the workload gaining anything. The AMI lookup filters on owner ID
+  as well as name; filtering on a name pattern alone would let any account
+  publishing a matching public AMI be selected. It is the provider's only
+  Pulumi invoke, unavoidable because AMI IDs are region-specific.
+- **GCP**: Shielded VM (secure boot, vTPM, integrity monitoring), OS Login
+  with project SSH keys blocked, serial console off, and no service account
+  attached at all — the default compute identity would be a standing
+  credential. The explicit deny-ingress rule at priority 0 is load-bearing:
+  the `default` network ships `default-allow-ssh` and GCP firewall rules
+  are allow-only, so nothing weaker actually closes the machine.
+- **Azure**: Trusted Launch, encryption at host, a VNet/subnet/NSG of its
+  own since Azure has no default network, and a generated ed25519 key pair
+  whose private half never leaves the encrypted Pulumi state. The key
+  exists only because the API rejects a Linux VM without one; access goes
+  through the AAD login extension.
 
 ## Package `internal/engine`
 
@@ -304,6 +435,18 @@ Relevant behavior:
   Because the three region formats are mutually exclusive, a resource that
   names a region usually has exactly one candidate — so in the common case
   resolution is determined by the Specification the user already wrote.
+
+  `Resolve` takes a `Specification` by value and returns a bound copy, so
+  the checks and the operation must run against *the same* copy.
+  `Plan`/`Apply`/`Destroy` therefore share an unexported `validated`, which
+  performs every check `Validate` performs and returns the resolved
+  Specification the checks ran against. Calling the exported `Validate` and
+  then iterating one's own resources instead would leave `"agnostic"` in
+  hand and fail on a registry lookup that cannot succeed — the registry is
+  keyed by concrete providers only. The CLI resolves explicitly before
+  planning (it has to: the user approves a Specification naming a real
+  cloud), which is why this path is exercised only by an Engine driven
+  directly, and is regression-tested as such.
 - Unregistered providers produce `ErrProviderNotFound`.
 - **`DeploymentTarget` (RFC 004)**: when `Resource.Account` is set, the
   Engine instead resolves a `DeploymentTarget` registered via
@@ -319,65 +462,6 @@ Relevant behavior:
   provider package, e.g. `aws.NewTargetProviderFactory` — the Engine
   itself stays cloud-agnostic and knows nothing about STS/AssumeRole) and
   cached for the rest of the Engine's lifetime.
-
-### Compute instances (RFC 013)
-
-The security posture is the point of this resource type: every other type
-in the schema is a managed service, whereas a VM runs arbitrary code with
-an attached identity.
-
-- **AWS**: IMDSv2 required with a hop limit of 1 — the control that turns
-  an application SSRF from a credential compromise into a failed request —
-  an encrypted root volume, a security group with *no ingress rules at
-  all*, and an instance profile carrying only
-  `AmazonSSMManagedInstanceCore` so an operator can open an audited shell
-  without the workload gaining anything. The AMI lookup filters on owner ID
-  as well as name; filtering on a name pattern alone would let any account
-  publishing a matching public AMI be selected. It is the provider's only
-  Pulumi invoke, unavoidable because AMI IDs are region-specific.
-- **GCP**: Shielded VM (secure boot, vTPM, integrity monitoring), OS Login
-  with project SSH keys blocked, serial console off, and no service account
-  attached at all — the default compute identity would be a standing
-  credential. The explicit deny-ingress rule at priority 0 is load-bearing:
-  the `default` network ships `default-allow-ssh` and GCP firewall rules
-  are allow-only, so nothing weaker actually closes the machine.
-- **Azure**: Trusted Launch, encryption at host, a VNet/subnet/NSG of its
-  own since Azure has no default network, and a generated ed25519 key pair
-  whose private half never leaves the encrypted Pulumi state. The key
-  exists only because the API rejects a Linux VM without one; access goes
-  through the AAD login extension.
-
-### Scheduling on GCP and Azure (RFC 012 §4.2, §4.3)
-
-`internal/provider/gcp` uses a Cloud Scheduler job calling the Cloud SQL
-Admin API (`settings.activationPolicy`: `ALWAYS`/`NEVER`) with an OAuth
-token minted for a dedicated service account, bound to a custom role
-carrying `cloudsql.instances.get` and `cloudsql.instances.update`. Cloud
-SQL has no resource-level IAM, so the binding is necessarily
-project-wide — which is precisely why it must not be
-`roles/cloudsql.admin`.
-
-A Cloud Scheduler job has no start or expiry date, so **exception windows
-cannot be expressed on GCP** and are rejected with
-`ErrScheduleExceptionsUnsupported`. Dropping them silently would leave an
-environment running through a shutdown the user believed they had
-scheduled, and the failure would surface as an invoice rather than an
-error.
-
-`internal/provider/azure` uses an Automation Account with a
-system-assigned identity, a runbook, and `automation.Schedule` resources
-(whose `StartTime`/`ExpiryTime` do support exception windows). It is the
-only provider needing a deployed code artifact, so the runbook is a fixed
-constant in the repository: the action and the target arrive as runbook
-*parameters*, never as interpolated script text. The identity is bound to
-a custom role scoped to the single server, with read/start/stop and
-nothing else.
-
-Azure schedules are anchored rather than purely recurrent, so the
-provider computes the first occurrence against a clock (a `timeNow` seam,
-frozen in tests) and declares the resource with
-`pulumi.IgnoreChanges([]string{"startTime"})` — otherwise every apply
-would recompute the anchor and show a spurious diff.
 
 ## Security
 
@@ -407,30 +491,53 @@ Measures active as of today (see also RFC 001 §3, 002 §2.4-2.5, 003
 | Silent schedule degradation | A rule a provider cannot express is a `Validate` error, never a dropped rule (RFC 012 §1.3). The failure mode of a silently broken schedule is a bill rather than an alert, so it must surface while somebody is watching |
 | Unrestricted Resource Consumption | Not yet applicable at the HTTP/API level (it does not exist yet); at the provider level, a cap of 20 entries on IAM lists (RFC 003), `Scope.Regions`/`Zones` capped at 10 entries (RFC 005 §3), `schedule.exceptions` capped at 12 windows, which bounds the number of scheduling resources one Specification can provision (RFC 012 §2.2) |
 
-Scans run before this commit (RFC 005): `gosec ./...` (0 issues; 2 false
-positives suppressed with `#nosec` and inline justification — an env var
-name flagged as G101, a path from an env var flagged as G703
-path-traversal despite being operator-controlled, not Specification
-input), `govulncheck ./...` (0 vulnerabilities reachable from the code;
-one unreachable vulnerability with no available fix remains in a
-transitive dependency not invoked by our code).
+Both scanners run in CI on every push and pull request, so the record
+below is the current state of `main` rather than a snapshot taken at one
+commit: `gosec ./...` (0 issues; 2 false positives suppressed with
+`#nosec` and inline justification — an env var name flagged as G101, a
+path from an env var flagged as G703 path-traversal despite being
+operator-controlled, not Specification input), `govulncheck ./...` (0
+vulnerabilities reachable from the code; one unreachable vulnerability
+remains in a required module not invoked by our code).
 
 ## Testing
 
-- Table-driven tests for `internal/spec` (89.7%), `internal/engine`
-  (94.3%, including a test `mockProvider`, `DeploymentTarget` resolution,
-  and multi-region fan-out), and `internal/provider/aws` (63.1%).
-- Native Go fuzz test for `spec.Parse`.
-- `internal/provider/aws` coverage is lower than the others because
-  `Plan`/`Apply`/`Destroy`/`upsertStack`/`NewTargetProviderFactory`
-  require, respectively, the `pulumi` CLI to be installed and AWS
-  credentials/network access for STS: not runnable in a sandboxed
-  environment without these external dependencies. The pure logic
-  (Properties decoding/validation, IAM policy document construction,
-  ResourceType dispatch, Diff/Result mapping) is instead covered with
-  table-driven tests, including tests that exercise Pulumi resource
-  declaration via `pulumi.WithMocks` (no need for Docker or the pulumi
-  CLI for these).
+Table-driven throughout, per CLAUDE.md. Coverage as measured by
+`go test -race -coverprofile` on the default (untagged) suite:
+
+| Package | Coverage | Floor |
+|---|---|---|
+| `internal/provider` | 100.0% | 100% |
+| `internal/provider/compute` | 100.0% | 100% |
+| `internal/provider/pulumiutil` | 100.0% | 100% |
+| `internal/nlp` | 97.0% | 96% |
+| `internal/schedule` | 96.8% | 96% |
+| `internal/engine` | 96.1% | 95% |
+| `internal/provider/decode` | 95.8% | 95% |
+| `cmd/cloudsdd` | 93.5% | 93% |
+| `internal/spec` | 90.0% | 90% |
+| `internal/state` | 85.9% | 85% |
+| `internal/config` | 84.8% | 84% |
+| `internal/provider/azure` | 71.2% | 71% |
+| `internal/provider/gcp` | 71.0% | 70% |
+| `internal/provider/aws` | 65.6% | 65% |
+
+The floors live in `scripts/coverage-gate.sh` and are enforced by CI. They
+ratchet upward only, and a package with tests but no floor fails the gate,
+so a new package cannot quietly skip it.
+
+- The three provider packages sit below CLAUDE.md's >90% target for one
+  reason: `Plan`/`Apply`/`Destroy`/`upsertStack`/`NewTargetProviderFactory`
+  drive the Pulumi Automation API, which shells out to the `pulumi` binary
+  and talks to a real cloud control plane. The pure logic — property
+  decoding and validation, IAM policy documents, ResourceType dispatch,
+  schedule rendering, Diff/Result mapping — is covered by table-driven
+  tests, including Pulumi resource *declaration* through `pulumi.WithMocks`,
+  which needs neither Docker nor the CLI.
+- Native Go fuzz targets, all three run for 60s per CI job: `spec.Parse`
+  (`FuzzParse`), the provider property decoder (`FuzzProperties`), and the
+  schedule compiler (`FuzzCompile`). The invariant is the absence of
+  panics, not the acceptance of the input.
 - Integration tests (`testcontainers-go` + LocalStack) present behind the
   `integration` build tag
   (`go test -tags=integration ./internal/provider/aws/... -run TestIntegration`):
@@ -440,16 +547,30 @@ transitive dependency not invoked by our code).
 
 ## Out of scope / next steps
 
-summary, not yet implemented: other AWS/GCP/Azure
-`ResourceType`s (`compute_instance`,
-`container_service`), resolution of `provider: "agnostic"`,
-references/dependencies between resources in the same Specification, cost
-policy (`max_cost_monthly` was removed in RFC 011 §2.9 — it was validated
-but never enforced; real enforcement needs a pricing model and its own
-RFC), multi-tenant isolation
-of state, network-layer sealing (VPC/security-group isolation per Environment, RFC
-005 §5 — no networked `ResourceType` exists yet), zone-aware HA placement
-logic for any concrete `ResourceType`, and a `DeploymentTarget` keyed by
-`(Account, Environment)` pairs (today `Environment` is a CloudSDD-enforced
-logical boundary within shared credentials, not a new credential-scoping
-mechanism).
+Not yet implemented:
+
+- `container_service`, the one `ResourceType` in the schema no provider
+  implements.
+- **Azure `relational_database` parity.** Azure has no
+  `deletion_protection` property, so the secure default the other two
+  providers apply has no Azure equivalent; and Azure MySQL Flexible Server
+  gets no network isolation, because `pulumi-azure` v5 exposes it only
+  through `DelegatedSubnetId` and RFC 008 modelled no VNet. RFC 013 has
+  since built a VNet/subnet/NSG for `compute_instance`, so the primitive
+  now exists. Both gaps need an RFC: they change the Azure resource graph.
+- References/dependencies between resources in the same Specification —
+  which is also why `Destroy` walks the resource list in reverse rather
+  than in dependency order.
+- Cost policy. `max_cost_monthly` was removed in RFC 011 §2.9: it was
+  validated but never enforced, so it read as a guarantee and provided
+  none. Real enforcement needs a pricing model and its own RFC.
+- Portable region names. `agnostic` today still requires a
+  provider-specific region string, which makes it that provider spelled
+  indirectly rather than portability (RFC 014 §7.1).
+- Multi-tenant isolation of state; network-layer sealing per `Environment`
+  (VPC/security-group, RFC 005 §5); zone-aware HA placement for any
+  `ResourceType` (`compute_instance` consumes `Scope.Zones` but places a
+  single machine); and a `DeploymentTarget` keyed by
+  `(Account, Environment)` pairs — today `Environment` is a
+  CloudSDD-enforced logical boundary within shared credentials, not a new
+  credential-scoping mechanism.
