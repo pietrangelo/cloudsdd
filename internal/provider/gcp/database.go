@@ -71,7 +71,7 @@ func cloudSQLDatabaseVersion(engine, version string) (string, error) {
 // declareRelationalDatabase registers the Cloud SQL instance and
 // returns it, so the power schedules of RFC 012 §4.2 can be declared
 // against its project and name.
-func declareRelationalDatabase(ctx *pulumi.Context, id, region string, p relationalDatabaseProperties) (*sql.DatabaseInstance, error) {
+func declareRelationalDatabase(ctx *pulumi.Context, id, region, networkName string, p relationalDatabaseProperties) (*sql.DatabaseInstance, error) {
 	pwd, err := random.NewRandomPassword(ctx, id+"-pwd", &random.RandomPasswordArgs{
 		Length:  pulumi.Int(32),
 		Special: pulumi.Bool(false),
@@ -97,7 +97,14 @@ func declareRelationalDatabase(ctx *pulumi.Context, id, region string, p relatio
 			Tier:             pulumi.String("db-f1-micro"),
 			AvailabilityType: pulumi.String(availabilityType),
 			IpConfiguration: &sql.DatabaseInstanceSettingsIpConfigurationArgs{
-				Ipv4Enabled: pulumi.Bool(false), // Private IP only
+				Ipv4Enabled: pulumi.Bool(false), // No public address
+				// The scope's network (RFC 016 §2.3). Before this,
+				// Ipv4Enabled: false was set with no PrivateNetwork,
+				// which does not make the instance private so much as
+				// unaddressable: Cloud SQL needs a peered VPC to have a
+				// private IP at all, so the database came up with no path
+				// to it of any kind.
+				PrivateNetwork: pulumi.String(networkName),
 			},
 			BackupConfiguration: &sql.DatabaseInstanceSettingsBackupConfigurationArgs{
 				Enabled: pulumi.Bool(true),

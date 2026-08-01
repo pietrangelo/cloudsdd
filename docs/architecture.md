@@ -62,7 +62,7 @@ cloudsdd/
 │   ├── state/                # Local ledger of deployed resources, fed back to the translator (RFC 009)
 │   ├── provider/             # CloudProvider interface, Diff/Result types, AllowedRegions helper
 │   │   ├── aws/              # AWS implementation (RFC 002/003/004/007/012/013/016)
-│   │   ├── gcp/              # GCP implementation (RFC 008/012/013)
+│   │   ├── gcp/              # GCP implementation (RFC 008/012/013/016)
 │   │   ├── azure/            # Azure implementation (RFC 008/012/013)
 │   │   ├── compute/          # Cloud-agnostic compute_instance shape, shared by all three (RFC 013)
 │   │   ├── decode/           # Shared strict property decoder + credential-name denylist (RFC 011)
@@ -254,9 +254,9 @@ reported. Accounts never share a network (RFC 016 §2.1), so there is
 nothing to collide; a warning that fires on correct behaviour is how real
 warnings come to be ignored.
 
-**Status: implemented on AWS** (RFC 016 §6 steps 1-3). GCP and Azure
-still return nil from `EnsureNetwork`, so their resources go where they
-went before; steps 4-6 are outstanding.
+**Status: implemented on AWS and GCP** (RFC 016 §6 steps 1-4). Azure
+still returns nil from `EnsureNetwork`, so its resources stay in the
+per-resource VNets RFC 015 built; steps 5-6 are outstanding.
 
 ### `internal/provider/compute`
 
@@ -380,6 +380,28 @@ the machine, but invokes it itself).
 Cloud Storage and Cloud SQL, both private by default; encryption at rest
 is unconditional on GCP, so a Specification asking to disable it is
 refused rather than quietly ignored.
+
+**The scope network (RFC 016 §2.3)** is a custom-mode VPC — auto mode
+would create a subnet per region out of ranges Google picks, which is the
+overlap the address plan exists to prevent — with a workload subnet
+carrying `PrivateIpGoogleAccess`, a reserved peering range, and a
+`servicenetworking` connection.
+
+That connection is the whole point. Cloud SQL was previously declared with
+`Ipv4Enabled: false` and no `PrivateNetwork`, which does not make an
+instance private so much as **unaddressable**: a private IP requires a
+peered VPC, so the database came up with no path to it of any kind. The
+peering range is carved from the scope's own /20 rather than left to
+Google to choose, so the whole scope stays inside the range the address
+plan assigned it.
+
+Unlike AWS, no lookup and no invoke are needed: GCP resource names are
+unique within a project and resolvable by name, so a resource program
+derives the same network name from the same scope the network stack used.
+The priority-0 deny rule RFC 013 added is kept on `compute_instance` as
+defence in depth, retargeted at the scope network — it existed to
+neutralise the `default` network's `default-allow-ssh`, and the scope
+network ships no rules at all.
 
 Power scheduling uses a Cloud Scheduler job calling the Cloud SQL Admin
 API (`settings.activationPolicy`: `ALWAYS`/`NEVER`) with an OAuth token
@@ -655,14 +677,12 @@ artifact it archives.
 
 Not yet implemented:
 
-- **The network model, on GCP and Azure.** RFC 016 steps 1-3 are done:
-  the address plan, the Engine's sequencing, and the AWS network, so an
-  AWS database now sits in a VPC of CloudSDD's own with a security group
-  admitting only its environment. **GCP and Azure still return nil from
-  `EnsureNetwork`**, so a GCP database still has no network path at all
-  and an Azure one is still alone in a VNet of its own. Steps 4-6 — GCP's
-  private services access, collapsing Azure's per-resource VNets, and
-  gating network teardown on the ledger — are outstanding.
+- **The network model, on Azure.** RFC 016 steps 1-4 are done: the
+  address plan, the Engine's sequencing, and the AWS and GCP networks.
+  **Azure still returns nil from `EnsureNetwork`**, so its resources stay
+  in the per-resource VNets RFC 015 built — private, and containing
+  nothing but themselves. Steps 5-6 — collapsing those into the scope's
+  network, and gating network teardown on the ledger — are outstanding.
 - **`container_service`.** Approved as RFC 017 and blocked on RFC 016
   finishing: it needs egress to pull an image and an ingress that is
   deliberate rather than inherited. It remains the one `ResourceType` in

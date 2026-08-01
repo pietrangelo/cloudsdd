@@ -161,8 +161,9 @@ func (p *GCPProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		if err != nil {
 			return nil, "", err
 		}
+		netName := scopeNetworkName(resourceScope(r))
 		return func(ctx *pulumi.Context) error {
-			instance, err := declareRelationalDatabase(ctx, r.ID, region, *props)
+			instance, err := declareRelationalDatabase(ctx, r.ID, region, netName, *props)
 			if err != nil {
 				return err
 			}
@@ -184,8 +185,9 @@ func (p *GCPProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		if err != nil {
 			return nil, "", err
 		}
+		netName := scopeNetworkName(resourceScope(r))
 		return func(ctx *pulumi.Context) error {
-			_, err := declareComputeInstance(ctx, r.ID, region, zone, *props, rules)
+			_, err := declareComputeInstance(ctx, r.ID, region, zone, netName, *props, rules)
 			return err
 		}, region, nil
 

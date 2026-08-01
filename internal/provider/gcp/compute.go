@@ -13,11 +13,6 @@ import (
 	"cloudsdd/internal/schedule"
 )
 
-// defaultNetwork is the VPC new instances attach to. Modelling a VPC of
-// our own is a separate resource type; until then the instance is isolated
-// by the deny rule in declareComputeFirewall rather than by its network.
-const defaultNetwork = "default"
-
 // machineType maps a cloud-agnostic size onto a Compute Engine machine
 // type.
 func machineType(size compute.Size) (string, error) {
@@ -83,7 +78,7 @@ func instanceZone(region, zone string) string {
 // native instance schedule policy (RFC 013).
 func declareComputeInstance(
 	ctx *pulumi.Context,
-	id, region, zone string,
+	id, region, zone, networkName string,
 	p compute.Properties,
 	rules []schedule.Rule,
 ) (*gcpcompute.Instance, error) {
@@ -97,14 +92,16 @@ func declareComputeInstance(
 	}
 
 	networkTag := id + "-cloudsdd"
-	if err := declareComputeFirewall(ctx, id, networkTag); err != nil {
+	if err := declareComputeFirewall(ctx, id, networkName, networkTag); err != nil {
 		return nil, err
 	}
 
-	// A public address is opt-in and, thanks to the deny rule above,
-	// still reaches nothing.
+	// The scope's own network and its workload subnet (RFC 016 §2.3),
+	// not GCP's `default` network. A public address is opt-in and, thanks
+	// to the deny rule above, still reaches nothing.
 	networkInterface := &gcpcompute.InstanceNetworkInterfaceArgs{
-		Network: pulumi.String(defaultNetwork),
+		Network:    pulumi.String(networkName),
+		Subnetwork: pulumi.String(networkName + "-subnet"),
 	}
 	if p.EffectivePublicIP() {
 		networkInterface.AccessConfigs = gcpcompute.InstanceNetworkInterfaceAccessConfigArray{
@@ -164,14 +161,19 @@ func declareComputeInstance(
 
 // declareComputeFirewall denies every inbound connection to the instance.
 //
-// This rule is not decoration. GCP's `default` network ships with
-// `default-allow-ssh`, which permits port 22 from anywhere, so an instance
-// placed there is reachable from the internet the moment it has a public
-// address. Firewall rules in GCP are allow-only by default; a deny rule at
-// priority 0 is what actually overrides that (RFC 013 §2.2).
-func declareComputeFirewall(ctx *pulumi.Context, id, networkTag string) error {
+// The rule was written for GCP's `default` network, which ships
+// `default-allow-ssh` — port 22 from anywhere — so an instance placed
+// there was reachable from the internet the moment it had a public
+// address. Firewall rules in GCP are allow-only, and a deny at priority 0
+// is what actually overrides that (RFC 013 §2.2).
+//
+// Since RFC 016 the instance sits in the scope's own network, which ships
+// no rules at all, so the deny is no longer load-bearing. It is kept, and
+// retargeted at that network, as defence in depth: the day something adds
+// an allow rule to a scope network, this instance stays closed.
+func declareComputeFirewall(ctx *pulumi.Context, id, networkName, networkTag string) error {
 	_, err := gcpcompute.NewFirewall(ctx, id+"-deny-ingress", &gcpcompute.FirewallArgs{
-		Network:     pulumi.String(defaultNetwork),
+		Network:     pulumi.String(networkName),
 		Description: pulumi.String(fmt.Sprintf("CloudSDD %s: no inbound access", id)),
 		Direction:   pulumi.String("INGRESS"),
 		Priority:    pulumi.Int(0),

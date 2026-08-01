@@ -220,7 +220,7 @@ func TestDeclareRelationalDatabaseHonoursEngine(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorded := runProgram(t, func(ctx *pulumi.Context) error {
-				_, err := declareRelationalDatabase(ctx, "app-db", "us-east1", tt.props)
+				_, err := declareRelationalDatabase(ctx, "app-db", "us-east1", testNetworkName, tt.props)
 				return err
 			})
 
@@ -245,7 +245,7 @@ func TestDeclareRelationalDatabaseSecureDefaults(t *testing.T) {
 	props := relationalDatabaseProperties{Engine: "postgres", Version: "15"}
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareRelationalDatabase(ctx, "app-db", "us-east1", props)
+		_, err := declareRelationalDatabase(ctx, "app-db", "us-east1", testNetworkName, props)
 		return err
 	})
 	instance := findResource(t, recorded, "gcp:sql/databaseInstance:DatabaseInstance")
@@ -277,7 +277,7 @@ func TestDeclareRelationalDatabaseAllowsExplicitDisposability(t *testing.T) {
 	props := relationalDatabaseProperties{Engine: "postgres", Version: "15", DeletionProtection: &no}
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareRelationalDatabase(ctx, "app-db", "us-east1", props)
+		_, err := declareRelationalDatabase(ctx, "app-db", "us-east1", testNetworkName, props)
 		return err
 	})
 	instance := findResource(t, recorded, "gcp:sql/databaseInstance:DatabaseInstance")

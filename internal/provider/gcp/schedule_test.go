@@ -46,7 +46,7 @@ func declareScheduledDatabase(t *testing.T, sch *schedule.Schedule) []recordedRe
 	}
 
 	return runProgram(t, func(ctx *pulumi.Context) error {
-		instance, err := declareRelationalDatabase(ctx, "app-db", "europe-west1",
+		instance, err := declareRelationalDatabase(ctx, "app-db", "europe-west1", testNetworkName,
 			relationalDatabaseProperties{Engine: "postgres", Version: "15"})
 		if err != nil {
 			return err
@@ -193,7 +193,7 @@ func TestDeclareDatabaseScheduleGrantsLeastPrivilege(t *testing.T) {
 
 func TestDeclareDatabaseScheduleDeclaresNothingWhenUnscheduled(t *testing.T) {
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		instance, err := declareRelationalDatabase(ctx, "app-db", "europe-west1",
+		instance, err := declareRelationalDatabase(ctx, "app-db", "europe-west1", testNetworkName,
 			relationalDatabaseProperties{Engine: "postgres", Version: "15"})
 		if err != nil {
 			return err

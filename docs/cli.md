@@ -141,11 +141,11 @@ connect from:
 |---|---|---|
 | AWS | A VPC of CloudSDD's own, one per environment and region, with a security group admitting only the engine's port from that VPC | Anything in the same environment — and nothing in another one |
 | Azure | VNet integration: delegated subnet + private DNS zone | Anything in the database's own VNet, which today contains only the database |
-| GCP | Private IP only (`ipv4_enabled: false`) | Nothing yet — a private IP needs a VPC with private services access, which CloudSDD does not model |
+| GCP | A custom-mode VPC per environment and region, peered with `servicenetworking` so Cloud SQL has a private address at all | Anything in the same environment |
 
-This is what RFC 016 exists to fix, and it is **in progress**: AWS is
-done, GCP and Azure are not, so the last two rows above are still the
-current behaviour there.
+This is what RFC 016 exists to fix, and it is **in progress**: AWS and
+GCP are done, Azure is not, so its row above is still the current
+behaviour there.
 Until the remaining steps land, treat these databases as
 provisioned-and-private rather than connected, and know that Azure at
 least gives you a VNet to peer or attach to.

@@ -28,7 +28,7 @@ func defaultVMProperties() compute.Properties {
 func declareVM(t *testing.T, p compute.Properties, zone string, rules []schedule.Rule) []recordedResource {
 	t.Helper()
 	return runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareComputeInstance(ctx, "build-agent", "europe-west1", zone, p, rules)
+		_, err := declareComputeInstance(ctx, "build-agent", "europe-west1", zone, testNetworkName, p, rules)
 		return err
 	})
 }
@@ -309,7 +309,7 @@ func TestComputeMappingRejectsUnknownValues(t *testing.T) {
 	} {
 		var declareErr error
 		_ = runProgram(t, func(ctx *pulumi.Context) error {
-			_, declareErr = declareComputeInstance(ctx, "vm", "europe-west1", "", p, nil)
+			_, declareErr = declareComputeInstance(ctx, "vm", "europe-west1", "", testNetworkName, p, nil)
 			return nil
 		})
 		if declareErr == nil {

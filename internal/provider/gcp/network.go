@@ -5,19 +5,262 @@ package gcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"fmt"
+	"math"
+	"net/netip"
+	"strings"
+
+	gcpcompute "github.com/pulumi/pulumi-gcp/sdk/v7/go/gcp/compute"
+	"github.com/pulumi/pulumi-gcp/sdk/v7/go/gcp/servicenetworking"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider"
+	"cloudsdd/internal/provider/network"
 	"cloudsdd/internal/spec"
 )
 
-// EnsureNetwork provisions the shared network for a scope (RFC 016 §2.2).
+// The service GCP peers a VPC with so that managed products — Cloud SQL
+// among them — can be reached on a private address.
+const (
+	peeringService = "servicenetworking.googleapis.com"
+
+	// peeringPrefixLength is the size of the range handed to Google for
+	// the peered subnet its managed services live in. /24 is the smallest
+	// Cloud SQL accepts; the scope's own /20 has room for it alongside
+	// the workload subnet.
+	peeringPrefixLength = 24
+
+	// peeringPurpose marks the reserved range as one Google may consume.
+	peeringPurpose     = "VPC_PEERING"
+	peeringAddressType = "INTERNAL"
+)
+
+// EnsureNetwork provisions the shared VPC for a scope (RFC 016 §2.2).
 //
-// Not yet implemented: RFC 016 §6 lands the interface and the Engine's
-// sequencing first, with every provider a no-op, so that the ordering and
-// the address derivation can be reviewed and tested before any provider
-// starts building VPCs. Returning nil here means "this provider has
-// nothing to share", which is the truthful answer today — resources still
-// go where they went before.
+// This is the change that makes a GCP database reachable at all. Before
+// it, the provider set Ipv4Enabled: false with no PrivateNetwork, which
+// is not "private" so much as *absent*: Cloud SQL needs a VPC with
+// private services access to have any address, so the instance came up
+// with no path to it whatsoever (RFC 016 §1).
 func (p *GCPProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, policies spec.Policies) error {
+	// object_storage is global on GCP and reaches here without a region.
+	// It lives in no network.
+	if s.Region == "" {
+		return nil
+	}
+
+	cidr, err := network.Derive(networkScope(s), addressPolicy(policies))
+	if err != nil {
+		return err
+	}
+
+	program := func(pctx *pulumi.Context) error {
+		return declareScopeNetwork(pctx, s, cidr)
+	}
+
+	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", program)
+	if err != nil {
+		return fmt.Errorf("gcp: failed to prepare the network stack for scope %q: %w", scopeName(s), err)
+	}
+	if _, err := stack.Up(ctx); err != nil {
+		return fmt.Errorf("gcp: failed to provision the network for scope %q: %w", scopeName(s), err)
+	}
 	return nil
+}
+
+// declareScopeNetwork builds the VPC, the workload subnet, and the
+// private services access peering without which Cloud SQL has no address.
+func declareScopeNetwork(
+	ctx *pulumi.Context,
+	s provider.NetworkScope,
+	cidr netip.Prefix,
+) error {
+	name := scopeNetworkName(s)
+
+	// AutoCreateSubnetworks false: the automatic mode would create a
+	// subnet in every region out of a range Google picks, which is
+	// exactly the overlap RFC 016 §2.4.1 exists to prevent.
+	vpc, err := gcpcompute.NewNetwork(ctx, name, &gcpcompute.NetworkArgs{
+		Name:                  pulumi.String(name),
+		AutoCreateSubnetworks: pulumi.Bool(false),
+		Description: pulumi.String(fmt.Sprintf(
+			"CloudSDD network for scope %s", scopeName(s))),
+	})
+	if err != nil {
+		return fmt.Errorf("gcp: failed to declare the network for scope %q: %w", scopeName(s), err)
+	}
+
+	workload, err := subnetBlock(cidr, 0)
+	if err != nil {
+		return fmt.Errorf("gcp: scope %q: %w", scopeName(s), err)
+	}
+	if _, err := gcpcompute.NewSubnetwork(ctx, name+"-subnet", &gcpcompute.SubnetworkArgs{
+		Name:        pulumi.String(name + "-subnet"),
+		Network:     vpc.ID(),
+		Region:      pulumi.String(s.Region),
+		IpCidrRange: pulumi.String(workload.String()),
+		// Lets an instance with no external address reach Google APIs —
+		// which is how it reaches Cloud SQL's admin API and the OS Login
+		// service without a route to the internet.
+		PrivateIpGoogleAccess: pulumi.Bool(true),
+	}); err != nil {
+		return fmt.Errorf("gcp: failed to declare the subnet for scope %q: %w", scopeName(s), err)
+	}
+
+	// The peered range Google allocates its managed services out of. It
+	// is carved from the scope's own /20 rather than left to Google to
+	// choose, so the whole scope stays inside the range the address plan
+	// assigned it (RFC 016 §2.4.1) — a Google-chosen range would be
+	// outside it and could overlap another scope.
+	peering, err := subnetBlock(cidr, 1)
+	if err != nil {
+		return fmt.Errorf("gcp: scope %q: %w", scopeName(s), err)
+	}
+	peeringRange, err := gcpcompute.NewGlobalAddress(ctx, name+"-peering", &gcpcompute.GlobalAddressArgs{
+		Name:         pulumi.String(name + "-peering"),
+		Purpose:      pulumi.String(peeringPurpose),
+		AddressType:  pulumi.String(peeringAddressType),
+		Address:      pulumi.String(peering.Addr().String()),
+		PrefixLength: pulumi.Int(peeringPrefixLength),
+		Network:      vpc.ID(),
+	})
+	if err != nil {
+		return fmt.Errorf("gcp: failed to reserve the peering range for scope %q: %w", scopeName(s), err)
+	}
+
+	// Without this connection the reserved range is just a reservation:
+	// Cloud SQL cannot place an instance, and Ipv4Enabled: false yields
+	// an instance with no address of any kind.
+	if _, err := servicenetworking.NewConnection(ctx, name+"-peering-connection",
+		&servicenetworking.ConnectionArgs{
+			Network:               vpc.ID(),
+			Service:               pulumi.String(peeringService),
+			ReservedPeeringRanges: pulumi.StringArray{peeringRange.Name},
+		}); err != nil {
+		return fmt.Errorf("gcp: failed to peer the network for scope %q with %s: %w",
+			scopeName(s), peeringService, err)
+	}
+
+	// No firewall rules are declared here. GCP rules are allow-only and a
+	// network with none denies inbound already; the priority-0 deny RFC
+	// 013 added exists because the *default* network ships
+	// default-allow-ssh, and this network ships nothing. compute_instance
+	// still declares its own deny as defence in depth, retargeted at this
+	// network.
+	return nil
+}
+
+// subnetBlock carves the index'th /24 out of the scope's range.
+//
+// Whole-address arithmetic rather than an octet increment, for the reason
+// the AWS provider records: incrementing an octet is correct only while
+// the scope is a /16 or smaller, and wraps silently otherwise.
+func subnetBlock(cidr netip.Prefix, index int) (netip.Prefix, error) {
+	const subnetBits = 24
+
+	if !cidr.Addr().Is4() {
+		return netip.Prefix{}, fmt.Errorf("scope range %s is not IPv4", cidr)
+	}
+	if cidr.Bits() > subnetBits {
+		return netip.Prefix{}, fmt.Errorf("scope range %s is smaller than a /%d subnet", cidr, subnetBits)
+	}
+	available := uint64(1) << (subnetBits - cidr.Bits())
+	if index < 0 || uint64(index) >= available {
+		return netip.Prefix{}, fmt.Errorf("scope range %s holds %d subnets, asked for index %d",
+			cidr, available, index)
+	}
+
+	baseAddr := cidr.Addr().As4()
+	start := uint64(binary.BigEndian.Uint32(baseAddr[:]))
+	addr := start + uint64(index)*(1<<(32-subnetBits))
+	if addr > math.MaxUint32 {
+		return netip.Prefix{}, fmt.Errorf("subnet %d does not fit in %s", index, cidr)
+	}
+
+	var raw [4]byte
+	binary.BigEndian.PutUint32(raw[:], uint32(addr))
+	return netip.PrefixFrom(netip.AddrFrom4(raw), subnetBits), nil
+}
+
+// scopeNetworkName is the VPC's name, derived from the scope.
+//
+// GCP resource names are unique within a project and addressable by name,
+// so unlike AWS this provider needs no tag lookup and no invoke: a
+// resource program names the network it wants and GCP resolves it. The
+// name must start with a letter, hold only lowercase letters, digits and
+// hyphens, and fit in 63 characters.
+func scopeNetworkName(s provider.NetworkScope) string {
+	var b strings.Builder
+	b.WriteString("cloudsdd-")
+	for _, r := range strings.ToLower(scopeName(s)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+
+	name := b.String()
+	if len(name) > 63 {
+		// Truncating risks a collision between two long scopes, so the
+		// tail is replaced by a hash of the whole name rather than
+		// dropped. Distinct scopes keep distinct networks, which is the
+		// property that matters.
+		name = name[:54] + "-" + shortHash(name)
+	}
+	return strings.TrimRight(name, "-")
+}
+
+// scopeName is the scope's label, used in names and error messages.
+func scopeName(s provider.NetworkScope) string {
+	label := networkScope(s).String()
+	if label == "" {
+		return "default"
+	}
+	return label
+}
+
+// networkScope projects a provider scope onto the address model.
+func networkScope(s provider.NetworkScope) network.Scope {
+	return network.Scope{
+		Account:     s.Account,
+		Environment: s.Environment,
+		Region:      s.Region,
+	}
+}
+
+// addressPolicy translates the Specification's network policy for the
+// address package, which stays free of spec types.
+func addressPolicy(p spec.Policies) network.Policy {
+	if p.Network == nil {
+		return network.Policy{}
+	}
+	return network.Policy{BaseCIDR: p.Network.BaseCIDR, Scopes: p.Network.Scopes}
+}
+
+// shortHash is a stable 8-character tag used to keep two long scope names
+// from colliding after truncation.
+func shortHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:4])
+}
+
+// resourceScope is the network scope a resource belongs to.
+//
+// GCP needs no lookup to find its network: names are unique within a
+// project and resolvable directly, so the resource program derives the
+// same name the network stack used from the same inputs. That is one
+// fewer invoke than the AWS provider needs, and one fewer way for the two
+// halves to disagree.
+func resourceScope(r spec.Resource) provider.NetworkScope {
+	return provider.NetworkScope{
+		Provider:    spec.ProviderGCP,
+		Account:     r.Account,
+		Environment: r.Scope.Environment,
+		Region:      r.Scope.Region,
+	}
 }
