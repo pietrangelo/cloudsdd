@@ -36,9 +36,10 @@ const (
 //
 // This is a property of the type, not of the cloud: an object store cannot
 // be switched off on any provider, and an IAM role costs nothing to leave
-// in place. compute_instance and container_service are declared by the
-// schema but implemented by no provider yet; they are listed here so that
-// the day a provider implements one, scheduling is not silently rejected.
+// in place. compute_instance has since been implemented on all three
+// providers (RFC 013); container_service is still declared by the schema
+// and implemented by none, and stays listed here so that the day a
+// provider implements it, scheduling is not silently rejected.
 func (t ResourceType) SupportsSchedule() bool {
 	switch t {
 	case ResourceTypeRelationalDatabase, ResourceTypeComputeInstance, ResourceTypeContainerService:
