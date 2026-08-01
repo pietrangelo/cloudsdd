@@ -63,7 +63,7 @@ cloudsdd/
 │   ├── provider/             # CloudProvider interface, Diff/Result types, AllowedRegions helper
 │   │   ├── aws/              # AWS implementation (RFC 002/003/004/007/012/013/016)
 │   │   ├── gcp/              # GCP implementation (RFC 008/012/013/016)
-│   │   ├── azure/            # Azure implementation (RFC 008/012/013)
+│   │   ├── azure/            # Azure implementation (RFC 008/012/013/015/016)
 │   │   ├── compute/          # Cloud-agnostic compute_instance shape, shared by all three (RFC 013)
 │   │   ├── decode/           # Shared strict property decoder + credential-name denylist (RFC 011)
 │   │   ├── network/          # Address derivation and conflict checking for scope networks (RFC 016)
@@ -254,9 +254,10 @@ reported. Accounts never share a network (RFC 016 §2.1), so there is
 nothing to collide; a warning that fires on correct behaviour is how real
 warnings come to be ignored.
 
-**Status: implemented on AWS and GCP** (RFC 016 §6 steps 1-4). Azure
-still returns nil from `EnsureNetwork`, so its resources stay in the
-per-resource VNets RFC 015 built; steps 5-6 are outstanding.
+**Status: implemented on all three providers** (RFC 016 §6 steps 1-5).
+Step 6 — gating network teardown on the ledger — is outstanding, so a
+scope's network currently outlives the resources in it rather than being
+removed with the last one.
 
 ### `internal/provider/compute`
 
@@ -423,21 +424,28 @@ error.
 Blob storage and Flexible Server databases, in a resource group per
 resource since Azure has no ambient container and no default network.
 
-**Databases are VNet-integrated on both engines** (RFC 015 §2.2): a
-virtual network, a subnet delegated to the engine's own service, a
-private DNS zone and its link, then a server carrying `DelegatedSubnetId`
-and `PrivateDnsZoneId`. Only the delegation name and the DNS suffix
-differ between PostgreSQL and MySQL, so they come from a two-entry table
-rather than a branch in each declare function — the point of the change
-being that the two engines stop producing different resource graphs. The
-address space is `10.1.0.0/16` against compute's `10.0.0.0/16`, because
-overlapping ranges cannot be peered and peering is what the deferred
-network model needs.
+**Databases are VNet-integrated on both engines** (RFC 015 §2.2), now in
+the scope's shared network rather than one of their own (RFC 016 §2.3).
+The scope's VNet carries a general subnet for compute plus one subnet
+delegated per engine — a subnet delegated to `Microsoft.DBforMySQL`
+cannot host a PostgreSQL server or a VM — and one private DNS zone per
+engine, shared by every database of that engine in the scope. Both
+engines' subnets are declared whether or not a database of that engine
+exists: the network is built before the resources in it, so it cannot
+know, and an empty subnet costs nothing.
 
 This replaced two unsatisfying postures. MySQL exposes no
 `PublicNetworkAccessEnabled` at all, so it had a public endpoint that only
 the absence of a firewall rule kept closed; PostgreSQL had that flag set
 false, which is genuinely private but leaves no path to the server at all.
+
+The security group is attached to the **subnet**, not to each network
+interface as RFC 013 did — at scope level the perimeter is a property of
+the network, so a resource cannot end up outside it by forgetting to
+attach one. Discovery is by derived name through `LookupSubnet` and
+`GetDnsZone`: Azure resource IDs carry the subscription, which a resource
+program cannot compute, so unlike GCP the IDs must be looked up even
+though the names are derived.
 
 **`deletion_protection` is enforced twice** (RFC 015 §2.1), because
 Flexible Server has no server-side equivalent of the flag AWS and GCP
@@ -677,12 +685,14 @@ artifact it archives.
 
 Not yet implemented:
 
-- **The network model, on Azure.** RFC 016 steps 1-4 are done: the
-  address plan, the Engine's sequencing, and the AWS and GCP networks.
-  **Azure still returns nil from `EnsureNetwork`**, so its resources stay
-  in the per-resource VNets RFC 015 built — private, and containing
-  nothing but themselves. Steps 5-6 — collapsing those into the scope's
-  network, and gating network teardown on the ledger — are outstanding.
+- **Network teardown (RFC 016 §2.6, step 6).** All three providers now
+  build a scope network, but nothing removes one. A scope's network
+  outlives the resources in it: destroying the last database in an
+  environment leaves its VPC, subnets and DNS zones behind. The ledger
+  already keys entries by `(account, environment, region, id)`, so the
+  Engine can ask whether a scope still holds anything and tear the
+  network stack down only when it does not — which also makes the ledger
+  load-bearing for correctness rather than only for translation context.
 - **`container_service`.** Approved as RFC 017 and blocked on RFC 016
   finishing: it needs egress to pull an image and an ingress that is
   deliberate rather than inherited. It remains the one `ResourceType` in

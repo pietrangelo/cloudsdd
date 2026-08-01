@@ -61,7 +61,7 @@ func declareScheduledDatabase(t *testing.T, engine string, sch *schedule.Schedul
 	}
 
 	return runProgram(t, func(ctx *pulumi.Context) error {
-		server, err := declareRelationalDatabase(ctx, "app-db", "westeurope",
+		server, err := declareRelationalDatabase(ctx, "app-db", "westeurope", testScope(),
 			relationalDatabaseProperties{Engine: engine, Version: "15"})
 		if err != nil {
 			return err
@@ -311,7 +311,7 @@ func TestDeclareDatabaseScheduleSkipsExpiredWindows(t *testing.T) {
 
 func TestDeclareDatabaseScheduleDeclaresNothingWhenUnscheduled(t *testing.T) {
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		server, err := declareRelationalDatabase(ctx, "app-db", "westeurope",
+		server, err := declareRelationalDatabase(ctx, "app-db", "westeurope", testScope(),
 			relationalDatabaseProperties{Engine: "postgres", Version: "15"})
 		if err != nil {
 			return err

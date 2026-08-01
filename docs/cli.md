@@ -140,12 +140,14 @@ connect from:
 | Provider | Mechanism | What can reach it |
 |---|---|---|
 | AWS | A VPC of CloudSDD's own, one per environment and region, with a security group admitting only the engine's port from that VPC | Anything in the same environment — and nothing in another one |
-| Azure | VNet integration: delegated subnet + private DNS zone | Anything in the database's own VNet, which today contains only the database |
+| Azure | A VNet per environment and region, with a subnet delegated per engine and a shared private DNS zone | Anything in the same environment |
 | GCP | A custom-mode VPC per environment and region, peered with `servicenetworking` so Cloud SQL has a private address at all | Anything in the same environment |
 
-This is what RFC 016 exists to fix, and it is **in progress**: AWS and
-GCP are done, Azure is not, so its row above is still the current
-behaviour there.
+All three now put a scope's resources on one network, so a VM and a
+database in the same `environment` and region can reach each other, and
+nothing in another environment can reach either. What is still missing is
+teardown: destroying the last resource in an environment leaves its
+network behind.
 Until the remaining steps land, treat these databases as
 provisioned-and-private rather than connected, and know that Azure at
 least gives you a VNet to peer or attach to.

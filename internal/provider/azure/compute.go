@@ -12,6 +12,7 @@ import (
 	"github.com/pulumi/pulumi-tls/sdk/v5/go/tls"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
+	"cloudsdd/internal/provider"
 	"cloudsdd/internal/provider/compute"
 	"cloudsdd/internal/schedule"
 )
@@ -109,6 +110,7 @@ func (v virtualMachine) powerTarget() powerTarget {
 func declareComputeInstance(
 	ctx *pulumi.Context,
 	id, location, zone string,
+	scope provider.NetworkScope,
 	p compute.Properties,
 	rules []schedule.Rule,
 ) (virtualMachine, error) {
@@ -128,7 +130,7 @@ func declareComputeInstance(
 		return virtualMachine{}, fmt.Errorf("azure: failed to declare resource group for %q: %w", id, err)
 	}
 
-	nic, err := declareComputeNetwork(ctx, id, rg, p)
+	nic, err := declareComputeNetwork(ctx, id, rg, scope, p)
 	if err != nil {
 		return virtualMachine{}, err
 	}
@@ -205,51 +207,32 @@ func declareComputeInstance(
 	return machine, nil
 }
 
-// declareComputeNetwork builds the network the VM attaches to: a VNet, a
-// subnet, a network security group with no inbound allow rules, and the
-// interface itself.
+// declareComputeNetwork attaches the VM to the scope's shared network
+// (RFC 016 §2.3), declaring only the interface and, if asked for, the
+// public address.
 //
-// Azure has no default network, so unlike AWS and GCP this is not
-// optional. The upside is that the perimeter is entirely ours: an NSG
-// with no custom rules still carries Azure's DenyAllInBound default, and
-// nothing has been added to open it.
+// RFC 013 built a VNet, subnet and NSG here, per virtual machine, because
+// Azure has no default network and nothing else existed to attach to.
+// That perimeter was entirely ours, which was the upside, and it also
+// meant a VM could never be placed beside the database it was meant to
+// use. The perimeter is still entirely ours — the scope's NSG carries
+// Azure's DenyAllInBound default with nothing added to open it — but it
+// is now shared by everything in the environment.
 func declareComputeNetwork(
 	ctx *pulumi.Context,
 	id string,
 	rg *core.ResourceGroup,
+	scope provider.NetworkScope,
 	p compute.Properties,
 ) (*network.NetworkInterface, error) {
-	vnet, err := network.NewVirtualNetwork(ctx, id+"-vnet", &network.VirtualNetworkArgs{
-		ResourceGroupName: rg.Name,
-		Location:          rg.Location,
-		AddressSpaces:     pulumi.StringArray{pulumi.String(computeVNetAddressSpace)},
-	})
+	net, err := lookupScopeNetwork(ctx, scope, generalSubnetName)
 	if err != nil {
-		return nil, fmt.Errorf("azure: failed to declare the network for %q: %w", id, err)
-	}
-
-	subnet, err := network.NewSubnet(ctx, id+"-subnet", &network.SubnetArgs{
-		ResourceGroupName:  rg.Name,
-		VirtualNetworkName: vnet.Name,
-		AddressPrefixes:    pulumi.StringArray{pulumi.String(computeSubnetAddressSpace)},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("azure: failed to declare the subnet for %q: %w", id, err)
-	}
-
-	// No security rules at all: the NSG's own defaults deny inbound from
-	// the internet, and nothing here opens a hole in them.
-	nsg, err := network.NewNetworkSecurityGroup(ctx, id+"-nsg", &network.NetworkSecurityGroupArgs{
-		ResourceGroupName: rg.Name,
-		Location:          rg.Location,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("azure: failed to declare the security group for %q: %w", id, err)
+		return nil, err
 	}
 
 	ipConfig := &network.NetworkInterfaceIpConfigurationArgs{
 		Name:                       pulumi.String("internal"),
-		SubnetId:                   subnet.ID(),
+		SubnetId:                   pulumi.String(net.subnetID),
 		PrivateIpAddressAllocation: pulumi.String("Dynamic"),
 	}
 	if p.EffectivePublicIP() {
@@ -273,13 +256,8 @@ func declareComputeNetwork(
 		return nil, fmt.Errorf("azure: failed to declare the network interface for %q: %w", id, err)
 	}
 
-	if _, err := network.NewNetworkInterfaceSecurityGroupAssociation(ctx, id+"-nsg-assoc",
-		&network.NetworkInterfaceSecurityGroupAssociationArgs{
-			NetworkInterfaceId:     nic.ID(),
-			NetworkSecurityGroupId: nsg.ID(),
-		}); err != nil {
-		return nil, fmt.Errorf("azure: failed to attach the security group for %q: %w", id, err)
-	}
-
+	// No NSG association here: the scope's subnet carries it, so anything
+	// placed in that subnet inherits the deny-all perimeter rather than
+	// depending on each resource remembering to attach one.
 	return nic, nil
 }

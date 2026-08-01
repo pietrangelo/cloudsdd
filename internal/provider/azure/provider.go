@@ -163,7 +163,7 @@ func (p *AzureProvider) resourceProgram(r spec.Resource, policies spec.Policies)
 			return nil, "", err
 		}
 		return func(ctx *pulumi.Context) error {
-			server, err := declareRelationalDatabase(ctx, r.ID, region, *props)
+			server, err := declareRelationalDatabase(ctx, r.ID, region, resourceScope(r), *props)
 			if err != nil {
 				return err
 			}
@@ -186,7 +186,7 @@ func (p *AzureProvider) resourceProgram(r spec.Resource, policies spec.Policies)
 			return nil, "", err
 		}
 		return func(ctx *pulumi.Context) error {
-			_, err := declareComputeInstance(ctx, r.ID, region, zone, *props, rules)
+			_, err := declareComputeInstance(ctx, r.ID, region, zone, resourceScope(r), *props, rules)
 			return err
 		}, region, nil
 

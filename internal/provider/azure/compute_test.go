@@ -30,7 +30,7 @@ func defaultVMProperties() compute.Properties {
 func declareVM(t *testing.T, p compute.Properties, zone string, rules []schedule.Rule) []recordedResource {
 	t.Helper()
 	return runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareComputeInstance(ctx, "build-agent", "westeurope", zone, p, rules)
+		_, err := declareComputeInstance(ctx, "build-agent", "westeurope", zone, testScope(), p, rules)
 		return err
 	})
 }
@@ -99,24 +99,46 @@ func TestDeclareComputeInstanceGeneratesItsOwnKey(t *testing.T) {
 	}
 }
 
-func TestDeclareComputeInstanceHasNoInboundAllowRules(t *testing.T) {
+func TestDeclareComputeInstanceUsesTheScopeNetwork(t *testing.T) {
 	recorded := declareVM(t, defaultVMProperties(), "", nil)
-	nsg := findResource(t, recorded, nsgToken).Inputs.Mappable()
 
-	// Azure's NSG defaults already carry DenyAllInBound; the point is
-	// that nothing here opens a hole in them.
-	if rules, ok := nsg["securityRules"]; ok {
-		if list, _ := rules.([]any); len(list) > 0 {
-			t.Errorf("securityRules = %v, want none", rules)
+	// RFC 013 built a VNet, subnet and NSG per virtual machine, because
+	// Azure has no default network and there was nothing else to attach
+	// to. RFC 016 moves all three to the scope, so the VM declares none
+	// of them — asserting their absence is what pins the change.
+	for _, token := range []string{
+		vnetToken,
+		subnetToken,
+		nsgToken,
+		"azure:network/networkInterfaceSecurityGroupAssociation:NetworkInterfaceSecurityGroupAssociation",
+	} {
+		if hasResource(recorded, token) {
+			t.Errorf("%s was declared per instance; it belongs to the scope network", token)
 		}
 	}
 
-	// The group has to actually be attached to the interface.
-	if !hasResource(recorded, "azure:network/networkInterfaceSecurityGroupAssociation:NetworkInterfaceSecurityGroupAssociation") {
-		t.Error("the security group was never associated with the interface")
+	// It attaches to the scope's general subnet — not a delegated one,
+	// which could not host a VM at all.
+	lookup := findResource(t, recorded, getSubnetToken)
+	if got := lookup.Inputs["name"].StringValue(); got != generalSubnetName {
+		t.Errorf("looked up subnet %q, want the general subnet %q", got, generalSubnetName)
 	}
-	if !hasResource(recorded, nicToken) {
-		t.Error("no network interface was declared")
+
+	nic := findResource(t, recorded, nicToken)
+	configs := nic.Inputs["ipConfigurations"].ArrayValue()
+	if len(configs) != 1 {
+		t.Fatalf("got %d ip configurations, want 1", len(configs))
+	}
+	if got := configs[0].ObjectValue()["subnetId"].StringValue(); got != testSubnetID {
+		t.Errorf("subnetId = %q, want the looked-up subnet", got)
+	}
+
+	// The perimeter still exists; it is now the subnet's, which means an
+	// instance cannot end up outside it by forgetting to attach one.
+	if configs[0].ObjectValue()["publicIpAddressId"].IsNull() != true {
+		if _, hasPublic := configs[0].ObjectValue()["publicIpAddressId"]; hasPublic {
+			t.Error("a public address was attached without being asked for")
+		}
 	}
 }
 
@@ -192,12 +214,19 @@ func TestDeclareComputeInstanceExplicitPublicIP(t *testing.T) {
 	if !hasResource(recorded, publicIPToken) {
 		t.Error("no public IP was declared though one was requested")
 	}
-	// A public address must not imply an open door.
-	nsg := findResource(t, recorded, nsgToken).Inputs.Mappable()
-	if rules, ok := nsg["securityRules"]; ok {
-		if list, _ := rules.([]any); len(list) > 0 {
-			t.Errorf("a public instance gained %d security rules; it must stay closed", len(list))
+
+	// A public address must not imply an open door. Since RFC 016 the
+	// perimeter belongs to the scope's subnet, so what this test can
+	// assert is that asking for a public address does not make the
+	// instance declare a network of its own with rules of its own —
+	// which would sidestep the scope's deny-all entirely.
+	for _, token := range []string{vnetToken, subnetToken, nsgToken} {
+		if hasResource(recorded, token) {
+			t.Errorf("a public instance declared %s, escaping the scope network's perimeter", token)
 		}
+	}
+	if got := findResource(t, recorded, getSubnetToken).Inputs["name"].StringValue(); got != generalSubnetName {
+		t.Errorf("a public instance attached to subnet %q, want the scope's %q", got, generalSubnetName)
 	}
 }
 
@@ -289,7 +318,7 @@ func TestComputeMappingRejectsUnknownValues(t *testing.T) {
 	} {
 		var declareErr error
 		_ = runProgram(t, func(ctx *pulumi.Context) error {
-			_, declareErr = declareComputeInstance(ctx, "vm", "westeurope", "", p, nil)
+			_, declareErr = declareComputeInstance(ctx, "vm", "westeurope", "", testScope(), p, nil)
 			return nil
 		})
 		if declareErr == nil {

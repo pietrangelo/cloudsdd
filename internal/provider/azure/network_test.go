@@ -5,32 +5,261 @@ package azure
 
 import (
 	"context"
+	"net/netip"
+	"strings"
 	"testing"
+
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider"
 	"cloudsdd/internal/spec"
 )
 
-// TestEnsureNetworkIsANoOpForNow pins the staged rollout RFC 016 §6
-// prescribes: the interface and the Engine's sequencing land first, with
-// every provider returning nil, so that ordering and address derivation
-// are reviewable before any provider starts building VPCs.
-//
-// This test is meant to be replaced, not kept. When this provider's
-// network lands it should assert what gets declared; until then it
-// asserts the honest current answer, so that "returns nil" is a decision
-// on record rather than an omission nobody noticed.
-func TestEnsureNetworkIsANoOpForNow(t *testing.T) {
+const (
+	vnetToken     = "azure:network/virtualNetwork:VirtualNetwork"
+	subnetToken   = "azure:network/subnet:Subnet"
+	nsgAssocToken = "azure:network/subnetNetworkSecurityGroupAssociation:SubnetNetworkSecurityGroupAssociation"
+	dnsZoneToken  = "azure:privatedns/zone:Zone"
+	dnsLinkToken  = "azure:privatedns/zoneVirtualNetworkLink:ZoneVirtualNetworkLink"
+	rgToken       = "azure:core/resourceGroup:ResourceGroup"
+)
+
+func testScope() provider.NetworkScope {
+	return provider.NetworkScope{
+		Provider:    spec.ProviderAzure,
+		Environment: "dev",
+		Region:      "westeurope",
+		Sealed:      true,
+	}
+}
+
+// TestDeclareScopeNetwork covers RFC 016 §2.3 for Azure. The shape it
+// replaces is RFC 015's: a VNet per database, containing nothing but that
+// database, which was private and left no way to put an application
+// beside the thing it was meant to talk to.
+func TestDeclareScopeNetwork(t *testing.T) {
+	cidr := netip.MustParsePrefix("10.42.0.0/20")
+
+	recorded := runProgram(t, func(ctx *pulumi.Context) error {
+		return declareScopeNetwork(ctx, testScope(), cidr)
+	})
+
+	// The network's resource group is its own. A shared network inside a
+	// resource's group would be destroyed with that resource, taking the
+	// rest of the scope's connectivity with it.
+	rg := findResource(t, recorded, rgToken)
+	if got := rg.Inputs["name"].StringValue(); got != scopeResourceGroupName(testScope()) {
+		t.Errorf("resource group = %q, want the derived %q", got, scopeResourceGroupName(testScope()))
+	}
+
+	vnet := findResource(t, recorded, vnetToken)
+	spaces := vnet.Inputs["addressSpaces"].ArrayValue()
+	if len(spaces) != 1 || spaces[0].StringValue() != cidr.String() {
+		t.Errorf("vnet address space = %v, want the derived %s", spaces, cidr)
+	}
+
+	// One general subnet plus one per engine: a subnet delegated to a
+	// database service cannot host a VM or the other engine's server.
+	subnets := resourcesOfType(recorded, subnetToken)
+	if len(subnets) != 3 {
+		t.Fatalf("declared %d subnets, want 3 (general, postgres, mysql)", len(subnets))
+	}
+
+	byName := map[string]recordedResource{}
+	for _, s := range subnets {
+		byName[s.Inputs["name"].StringValue()] = s
+	}
+	for _, want := range []string{generalSubnetName, "postgres", "mysql"} {
+		if _, ok := byName[want]; !ok {
+			t.Errorf("no %q subnet was declared", want)
+		}
+	}
+
+	// The general subnet takes no delegation, or it could not host a VM.
+	if d, ok := byName[generalSubnetName].Inputs["delegations"]; ok && len(d.ArrayValue()) != 0 {
+		t.Error("the general subnet is delegated; it could not then host a virtual machine")
+	}
+
+	for engine, delegation := range map[string]string{
+		"postgres": "Microsoft.DBforPostgreSQL/flexibleServers",
+		"mysql":    "Microsoft.DBforMySQL/flexibleServers",
+	} {
+		delegations := byName[engine].Inputs["delegations"].ArrayValue()
+		if len(delegations) != 1 {
+			t.Errorf("%s subnet has %d delegations, want 1", engine, len(delegations))
+			continue
+		}
+		svc := delegations[0].ObjectValue()["serviceDelegation"].ObjectValue()
+		if got := svc["name"].StringValue(); got != delegation {
+			t.Errorf("%s delegation = %q, want %q", engine, got, delegation)
+		}
+	}
+
+	// Subnets must not overlap, or two of them claim the same addresses.
+	var blocks []netip.Prefix
+	for name, s := range byName {
+		prefixes := s.Inputs["addressPrefixes"].ArrayValue()
+		if len(prefixes) != 1 {
+			t.Fatalf("subnet %q has %d prefixes, want 1", name, len(prefixes))
+		}
+		p := netip.MustParsePrefix(prefixes[0].StringValue())
+		if !cidr.Overlaps(p) {
+			t.Errorf("subnet %q at %s falls outside the scope range %s", name, p, cidr)
+		}
+		for _, prev := range blocks {
+			if prev.Overlaps(p) {
+				t.Errorf("subnets overlap: %s and %s", prev, p)
+			}
+		}
+		blocks = append(blocks, p)
+	}
+
+	// The perimeter is a property of the network, attached to the subnet
+	// rather than to each interface, so a resource cannot end up outside
+	// it by forgetting to attach one.
+	if !hasResource(recorded, nsgToken) {
+		t.Error("no network security group was declared")
+	}
+	if !hasResource(recorded, nsgAssocToken) {
+		t.Error("the security group was not attached to the subnet")
+	}
+
+	// One DNS zone per engine, shared by every database of that engine in
+	// the scope — the change from RFC 015, where each database had one.
+	zones := resourcesOfType(recorded, dnsZoneToken)
+	if len(zones) != 2 {
+		t.Fatalf("declared %d private DNS zones, want one per engine", len(zones))
+	}
+	for _, z := range zones {
+		name := z.Inputs["name"].StringValue()
+		if !strings.HasSuffix(name, ".postgres.database.azure.com") &&
+			!strings.HasSuffix(name, ".mysql.database.azure.com") {
+			t.Errorf("zone %q does not end in an engine's domain; Azure rejects it", name)
+		}
+	}
+	if n := len(resourcesOfType(recorded, dnsLinkToken)); n != 2 {
+		t.Errorf("declared %d zone links, want one per zone — an unlinked zone resolves for nobody", n)
+	}
+}
+
+// TestEnsureNetworkSkipsRegionlessScopes: a scope with no region has no
+// network to build.
+func TestEnsureNetworkSkipsRegionlessScopes(t *testing.T) {
 	p := &AzureProvider{}
 
 	err := p.EnsureNetwork(context.Background(), provider.NetworkScope{
-		Provider:    spec.Provider("azure"),
+		Provider:    spec.ProviderAzure,
 		Environment: "dev",
-		Region:      "test-region",
-		Sealed:      true,
 	}, spec.Policies{})
 
 	if err != nil {
-		t.Errorf("EnsureNetwork() error = %v, want nil while unimplemented", err)
+		t.Errorf("EnsureNetwork() error = %v, want nil for a scope with no region", err)
+	}
+}
+
+// TestScopeNamesAreDerivable is what lets two stacks agree without a
+// shared state backend: Azure addresses resources by (resource group,
+// name), and both derive from the scope.
+func TestScopeNamesAreDerivable(t *testing.T) {
+	tests := []struct {
+		name     string
+		scope    provider.NetworkScope
+		wantNet  string
+		wantRG   string
+		wantZone string
+	}{
+		{
+			name:     "environment and region",
+			scope:    provider.NetworkScope{Environment: "dev", Region: "westeurope"},
+			wantNet:  "cloudsdd-dev--westeurope",
+			wantRG:   "cloudsdd-dev--westeurope-net-rg",
+			wantZone: "cloudsdd-dev--westeurope.postgres.database.azure.com",
+		},
+		{
+			name:     "unscoped",
+			scope:    provider.NetworkScope{},
+			wantNet:  "cloudsdd-default",
+			wantRG:   "cloudsdd-default-net-rg",
+			wantZone: "cloudsdd-default.postgres.database.azure.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := scopeNetworkName(tt.scope); got != tt.wantNet {
+				t.Errorf("scopeNetworkName() = %q, want %q", got, tt.wantNet)
+			}
+			if got := scopeResourceGroupName(tt.scope); got != tt.wantRG {
+				t.Errorf("scopeResourceGroupName() = %q, want %q", got, tt.wantRG)
+			}
+			if got := engineZoneName(tt.scope, "postgres"); got != tt.wantZone {
+				t.Errorf("engineZoneName() = %q, want %q", got, tt.wantZone)
+			}
+		})
+	}
+}
+
+// TestScopeNetworkNameStaysUniqueWhenTruncated: two long scopes cut to
+// the same prefix would share one network, which is RFC 016's central
+// failure arriving through a string length rather than an address.
+func TestScopeNetworkNameStaysUniqueWhenTruncated(t *testing.T) {
+	long := strings.Repeat("environment", 4)
+
+	a := scopeNetworkName(provider.NetworkScope{
+		Account: "account-one", Environment: long, Region: "westeurope",
+	})
+	b := scopeNetworkName(provider.NetworkScope{
+		Account: "account-two", Environment: long, Region: "westeurope",
+	})
+
+	if a == b {
+		t.Errorf("two distinct scopes derived the same network name %q", a)
+	}
+	// The zone name is built on top of this, and Azure caps a private DNS
+	// zone label too, so the network name has to leave room for a suffix.
+	for _, name := range []string{a, b} {
+		if len(name) > 40 {
+			t.Errorf("name %q is %d characters, too long once the DNS suffix is added", name, len(name))
+		}
+		if strings.HasSuffix(name, "-") {
+			t.Errorf("name %q ends with a hyphen, which Azure rejects", name)
+		}
+	}
+}
+
+func TestSubnetBlock(t *testing.T) {
+	tests := []struct {
+		name    string
+		cidr    string
+		index   int
+		want    string
+		wantErr bool
+	}{
+		{name: "general", cidr: "10.42.0.0/20", index: subnetIndexGeneral, want: "10.42.0.0/24"},
+		{name: "postgres", cidr: "10.42.0.0/20", index: subnetIndexPostgres, want: "10.42.1.0/24"},
+		{name: "mysql", cidr: "10.42.0.0/20", index: subnetIndexMySQL, want: "10.42.2.0/24"},
+		{name: "past the end", cidr: "10.42.0.0/20", index: 16, wantErr: true},
+		{name: "negative", cidr: "10.42.0.0/20", index: -1, wantErr: true},
+		// The wrap the AWS provider's equivalent had before it was fixed.
+		{name: "no wrap on a wide range", cidr: "10.0.0.0/8", index: 256, want: "10.1.0.0/24"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := subnetBlock(netip.MustParsePrefix(tt.cidr), tt.index)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("subnetBlock() = %s, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("subnetBlock() error = %v", err)
+			}
+			if got.String() != tt.want {
+				t.Errorf("subnetBlock() = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }

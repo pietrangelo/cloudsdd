@@ -13,6 +13,8 @@ import (
 	"github.com/pulumi/pulumi-azure/sdk/v5/go/azure/postgresql"
 	"github.com/pulumi/pulumi-random/sdk/v4/go/random"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+
+	"cloudsdd/internal/provider"
 )
 
 // backupRetentionDays is the automated-backup window applied to every
@@ -62,7 +64,7 @@ func decodeRelationalDatabaseProperties(props map[string]any) (*relationalDataba
 // postgresql.NewFlexibleServer regardless of Engine, and decoded
 // HighAvailability without ever reading it — so a request for an HA MySQL
 // instance produced a single-node PostgreSQL one.
-func declareRelationalDatabase(ctx *pulumi.Context, id, location string, p relationalDatabaseProperties) (databaseServer, error) {
+func declareRelationalDatabase(ctx *pulumi.Context, id, location string, scope provider.NetworkScope, p relationalDatabaseProperties) (databaseServer, error) {
 	rg, err := core.NewResourceGroup(ctx, id+"-rg", &core.ResourceGroupArgs{
 		Location: pulumi.String(location),
 	})
@@ -78,11 +80,11 @@ func declareRelationalDatabase(ctx *pulumi.Context, id, location string, p relat
 		return databaseServer{}, err
 	}
 
-	// Both engines are VNet-integrated, so the network is built once here
-	// rather than inside each declare function (RFC 015 §2.2). Only the
-	// delegation name and the DNS suffix differ, and those come from a
-	// lookup rather than a branch.
-	net, err := declareDatabaseNetwork(ctx, id, rg, p)
+	// The scope's shared network, provisioned by the Engine before this
+	// program runs (RFC 016 §2.2). RFC 015 built one VNet per database
+	// here, which was private and contained nothing but the database —
+	// there was no way to put an application beside it.
+	net, err := lookupEngineNetwork(ctx, scope, strings.ToLower(p.Engine))
 	if err != nil {
 		return databaseServer{}, err
 	}
@@ -159,7 +161,7 @@ func declareDeletionLock(ctx *pulumi.Context, id string, server databaseServer, 
 	return nil
 }
 
-func declarePostgresFlexibleServer(ctx *pulumi.Context, id string, rg *core.ResourceGroup, pwd *random.RandomPassword, net databaseNetwork, p relationalDatabaseProperties) (databaseServer, error) {
+func declarePostgresFlexibleServer(ctx *pulumi.Context, id string, rg *core.ResourceGroup, pwd *random.RandomPassword, net scopeNetwork, p relationalDatabaseProperties) (databaseServer, error) {
 	args := &postgresql.FlexibleServerArgs{
 		ResourceGroupName:     rg.Name,
 		Location:              rg.Location,
@@ -177,8 +179,8 @@ func declarePostgresFlexibleServer(ctx *pulumi.Context, id string, rg *core.Reso
 		// which is both private and reachable from its own network — and
 		// is the same mechanism MySQL is now obliged to use, so the two
 		// engines stop differing.
-		DelegatedSubnetId: net.subnetID,
-		PrivateDnsZoneId:  net.privateDNSID,
+		DelegatedSubnetId: pulumi.String(net.subnetID),
+		PrivateDnsZoneId:  pulumi.String(net.dnsZoneID),
 	}
 
 	if p.HighAvailability {
@@ -195,7 +197,7 @@ func declarePostgresFlexibleServer(ctx *pulumi.Context, id string, rg *core.Reso
 	return databaseServer{engine: "postgres", id: server.ID(), resourceGroup: rg}, nil
 }
 
-func declareMySQLFlexibleServer(ctx *pulumi.Context, id string, rg *core.ResourceGroup, pwd *random.RandomPassword, net databaseNetwork, p relationalDatabaseProperties) (databaseServer, error) {
+func declareMySQLFlexibleServer(ctx *pulumi.Context, id string, rg *core.ResourceGroup, pwd *random.RandomPassword, net scopeNetwork, p relationalDatabaseProperties) (databaseServer, error) {
 	args := &mysql.FlexibleServerArgs{
 		ResourceGroupName:     rg.Name,
 		Location:              rg.Location,
@@ -214,8 +216,8 @@ func declareMySQLFlexibleServer(ctx *pulumi.Context, id string, rg *core.Resourc
 		// portal click from open, while docs/cli.md claimed the resource
 		// was not publicly reachable. VNet integration removes the public
 		// endpoint rather than leaving it unfirewalled.
-		DelegatedSubnetId: net.subnetID,
-		PrivateDnsZoneId:  net.privateDNSID,
+		DelegatedSubnetId: pulumi.String(net.subnetID),
+		PrivateDnsZoneId:  pulumi.String(net.dnsZoneID),
 	}
 
 	if p.HighAvailability {

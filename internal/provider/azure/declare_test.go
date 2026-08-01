@@ -4,6 +4,7 @@
 package azure
 
 import (
+	"strings"
 	"sync"
 	"testing"
 
@@ -77,7 +78,33 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 	return args.Name + "-id", outputs, nil
 }
 
+// Scope-network discovery (RFC 016 §2.2). Azure resource IDs carry the
+// subscription, which a resource program cannot compute, so unlike GCP
+// the IDs are looked up — from names both stacks derive from the scope.
+const (
+	getSubnetToken  = "azure:network/getSubnet:getSubnet"
+	getDnsZoneToken = "azure:privatedns/getDnsZone:getDnsZone"
+)
+
+const (
+	testSubnetID  = "/subscriptions/sub-id/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet/subnets/general"
+	testDNSZoneID = "/subscriptions/sub-id/resourceGroups/rg/providers/Microsoft.Network/privateDnsZones/z"
+)
+
 func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	switch args.Token {
+	case getSubnetToken:
+		m.rec.add(recordedResource{Type: args.Token, Name: getSubnetToken, Inputs: args.Args})
+		return resource.PropertyMap{
+			"id":            resource.NewStringProperty(testSubnetID),
+			"addressPrefix": resource.NewStringProperty("10.42.0.0/24"),
+		}, nil
+	case getDnsZoneToken:
+		m.rec.add(recordedResource{Type: args.Token, Name: getDnsZoneToken, Inputs: args.Args})
+		return resource.PropertyMap{
+			"id": resource.NewStringProperty(testDNSZoneID),
+		}, nil
+	}
 	return resource.PropertyMap{}, nil
 }
 
@@ -222,7 +249,7 @@ func TestDeclareRelationalDatabaseSelectsEngine(t *testing.T) {
 			props := relationalDatabaseProperties{Engine: tt.engine, Version: "15"}
 
 			recorded := runProgram(t, func(ctx *pulumi.Context) error {
-				_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+				_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", testScope(), props)
 				return err
 			})
 
@@ -253,7 +280,7 @@ func TestDeclareRelationalDatabaseHonoursHighAvailability(t *testing.T) {
 			t.Run("without HA", func(t *testing.T) {
 				props := relationalDatabaseProperties{Engine: tt.engine, Version: "15"}
 				recorded := runProgram(t, func(ctx *pulumi.Context) error {
-					_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+					_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", testScope(), props)
 					return err
 				})
 
@@ -266,7 +293,7 @@ func TestDeclareRelationalDatabaseHonoursHighAvailability(t *testing.T) {
 			t.Run("with HA", func(t *testing.T) {
 				props := relationalDatabaseProperties{Engine: tt.engine, Version: "15", HighAvailability: true}
 				recorded := runProgram(t, func(ctx *pulumi.Context) error {
-					_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+					_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", testScope(), props)
 					return err
 				})
 
@@ -326,7 +353,7 @@ func TestDeclareDatabaseIsNotPubliclyReachable(t *testing.T) {
 			props := relationalDatabaseProperties{Engine: tt.engine, Version: tt.version}
 
 			recorded := runProgram(t, func(ctx *pulumi.Context) error {
-				_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", props)
+				_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", testScope(), props)
 				return err
 			})
 
@@ -343,32 +370,41 @@ func TestDeclareDatabaseIsNotPubliclyReachable(t *testing.T) {
 				t.Errorf("backupRetentionDays = %v, want %d", got, backupRetentionDays)
 			}
 
-			// The subnet must be delegated to this engine's service, or
-			// Azure refuses to place the server in it.
-			subnet := findResource(t, recorded, "azure:network/subnet:Subnet")
-			delegations := subnet.Inputs["delegations"].ArrayValue()
-			if len(delegations) != 1 {
-				t.Fatalf("got %d subnet delegations, want 1", len(delegations))
-			}
-			svc := delegations[0].ObjectValue()["serviceDelegation"].ObjectValue()
-			if got := svc["name"].StringValue(); got != tt.delegation {
-				t.Errorf("service delegation = %q, want %q", got, tt.delegation)
-			}
-			actions := svc["actions"].ArrayValue()
-			if len(actions) != 1 || actions[0].StringValue() != subnetJoinAction {
-				t.Errorf("delegation actions = %v, want only %q", actions, subnetJoinAction)
+			// The subnet and zone come from the scope's network, which
+			// the Engine provisioned first (RFC 016 §2.2). RFC 015
+			// declared both per database; asserting they are *not*
+			// declared here is what pins the change.
+			for _, token := range []string{
+				"azure:network/subnet:Subnet",
+				"azure:privatedns/zone:Zone",
+				"azure:network/virtualNetwork:VirtualNetwork",
+			} {
+				if hasResource(recorded, token) {
+					t.Errorf("%s was declared per database; it belongs to the scope network", token)
+				}
 			}
 
-			// Azure validates the DNS zone suffix and rejects anything
-			// that is not the engine's own domain.
-			zone := findResource(t, recorded, "azure:privatedns/zone:Zone")
-			if got := zone.Inputs["name"].StringValue(); got != "app-db."+tt.dnsSuffix {
-				t.Errorf("private DNS zone = %q, want %q", got, "app-db."+tt.dnsSuffix)
+			// The lookup must ask for this engine's delegated subnet and
+			// its zone, or the server lands in the wrong one.
+			lookup := findResource(t, recorded, getSubnetToken)
+			if got := lookup.Inputs["name"].StringValue(); got != tt.engine {
+				t.Errorf("looked up subnet %q, want the %q delegated subnet", got, tt.engine)
 			}
-			// A zone with no link resolves for nobody.
-			link := findResource(t, recorded, "azure:privatedns/zoneVirtualNetworkLink:ZoneVirtualNetworkLink")
-			if link.Inputs["registrationEnabled"].BoolValue() {
-				t.Error("registrationEnabled = true; databases should not auto-register records")
+			if got := lookup.Inputs["virtualNetworkName"].StringValue(); got != scopeNetworkName(testScope()) {
+				t.Errorf("looked up vnet %q, want the scope's %q", got, scopeNetworkName(testScope()))
+			}
+
+			zoneLookup := findResource(t, recorded, getDnsZoneToken)
+			if got := zoneLookup.Inputs["name"].StringValue(); !strings.HasSuffix(got, tt.dnsSuffix) {
+				t.Errorf("looked up zone %q, want one ending in %q", got, tt.dnsSuffix)
+			}
+
+			// And the looked-up identifiers are what reach the server.
+			if got := server.Inputs["delegatedSubnetId"].StringValue(); got != testSubnetID {
+				t.Errorf("delegatedSubnetId = %q, want the looked-up subnet", got)
+			}
+			if got := server.Inputs["privateDnsZoneId"].StringValue(); got != testDNSZoneID {
+				t.Errorf("privateDnsZoneId = %q, want the looked-up zone", got)
 			}
 		})
 	}
@@ -413,7 +449,7 @@ func TestDeclareDatabaseDeletionProtection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorded := runProgram(t, func(ctx *pulumi.Context) error {
-				_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", tt.props)
+				_, err := declareRelationalDatabase(ctx, "app-db", "westeurope", testScope(), tt.props)
 				return err
 			})
 
@@ -435,16 +471,6 @@ func TestDeclareDatabaseDeletionProtection(t *testing.T) {
 				t.Error("lock has no scope; it must name the server it protects")
 			}
 		})
-	}
-}
-
-// TestDatabaseNetworkDoesNotOverlapCompute pins the constant RFC 015 §2.2
-// chose deliberately. The two VNets are separate today and could overlap
-// indefinitely without breaking, but overlapping ranges cannot be peered,
-// and peering is exactly what the deferred network model needs.
-func TestDatabaseNetworkDoesNotOverlapCompute(t *testing.T) {
-	if databaseVNetAddressSpace == computeVNetAddressSpace {
-		t.Errorf("database and compute VNets share the address space %q", databaseVNetAddressSpace)
 	}
 }
 
