@@ -3,7 +3,11 @@
 
 package aws
 
-import "fmt"
+import (
+	"fmt"
+
+	"cloudsdd/internal/provider"
+)
 
 // validateRegionAllowed checks that region is included in allowed, when
 // the latter is non-empty (RFC 001 §3, RFC 002 §2.5). An empty allowed
@@ -11,14 +15,14 @@ import "fmt"
 // decide whether that is acceptable for a given ResourceType (RFC 003
 // §2.3 imposes a stricter constraint specific to cross_account_role,
 // checked separately in AWSProvider.Validate).
+//
+// The rule itself now lives on the cloud-agnostic contract
+// (provider.ValidateRegionAllowed, RFC 011 §2.3) so GCP and Azure enforce
+// it too; this wrapper preserves the "aws: " prefix and the package-local
+// ErrRegionNotAllowed sentinel that existing callers and tests match on.
 func validateRegionAllowed(region string, allowed []string) error {
-	if len(allowed) == 0 {
-		return nil
+	if err := provider.ValidateRegionAllowed(region, allowed); err != nil {
+		return fmt.Errorf("aws: region %q not in allowed_regions %v: %w", region, allowed, ErrRegionNotAllowed)
 	}
-	for _, a := range allowed {
-		if a == region {
-			return nil
-		}
-	}
-	return fmt.Errorf("aws: region %q not in allowed_regions %v: %w", region, allowed, ErrRegionNotAllowed)
+	return nil
 }

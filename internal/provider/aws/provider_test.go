@@ -132,8 +132,8 @@ func TestAWSProvider_Validate(t *testing.T) {
 		{
 			name: "unsupported resource type",
 			resource: spec.Resource{
-				ID: "db", Type: spec.ResourceTypeRelationalDatabase, Provider: spec.ProviderAWS,
-				Properties: map[string]any{"engine": "postgres"},
+				ID: "vm", Type: spec.ResourceTypeComputeInstance, Provider: spec.ProviderAWS,
+				Properties: map[string]any{"ami": "ami-123"},
 			},
 			wantErr: ErrUnsupportedResourceType,
 		},
@@ -210,8 +210,8 @@ func TestAWSProvider_resourceProgram(t *testing.T) {
 
 	t.Run("unsupported resource type", func(t *testing.T) {
 		_, _, err := p.resourceProgram(spec.Resource{
-			ID: "db", Type: spec.ResourceTypeRelationalDatabase, Provider: spec.ProviderAWS,
-			Properties: map[string]any{"engine": "postgres"},
+			ID: "vm", Type: spec.ResourceTypeComputeInstance, Provider: spec.ProviderAWS,
+			Properties: map[string]any{"ami": "ami-123"},
 		}, spec.Policies{})
 		if !errors.Is(err, ErrUnsupportedResourceType) {
 			t.Fatalf("error = %v, want errors.Is ErrUnsupportedResourceType", err)

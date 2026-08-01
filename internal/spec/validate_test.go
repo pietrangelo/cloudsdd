@@ -24,8 +24,6 @@ func validSpec() Specification {
 }
 
 func TestValidate(t *testing.T) {
-	maxCost := 100.0
-	negativeCost := -1.0
 
 	tests := []struct {
 		name    string
@@ -40,7 +38,7 @@ func TestValidate(t *testing.T) {
 		{
 			name: "valid specification with policies",
 			mutate: func(s *Specification) {
-				s.Policies = Policies{MaxCostMonthly: &maxCost, AllowedRegions: []string{"eu-central-1"}}
+				s.Policies = Policies{AllowedRegions: []string{"eu-central-1"}}
 			},
 			wantErr: false,
 		},
@@ -146,11 +144,6 @@ func TestValidate(t *testing.T) {
 		{
 			name:    "nil properties",
 			mutate:  func(s *Specification) { s.Resources[0].Properties = nil },
-			wantErr: true,
-		},
-		{
-			name:    "negative max_cost_monthly",
-			mutate:  func(s *Specification) { s.Policies.MaxCostMonthly = &negativeCost },
 			wantErr: true,
 		},
 	}

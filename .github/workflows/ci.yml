@@ -1,0 +1,101 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Pietrangelo Masala
+#
+# RFC 011 §5.1. The absence of this workflow is what let the defects in
+# RFC 011 §1.1 land: nothing ran the tests, the vet pass, or the security
+# scanners between the RFCs that introduced the code and the audit that
+# found the problems.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, vet, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify formatting
+        run: |
+          unformatted=$(gofmt -l . | grep -v '^vendor/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Verify go.mod is tidy
+        run: |
+          cp go.mod go.mod.bak
+          cp go.sum go.sum.bak
+          go mod tidy
+          diff -u go.mod.bak go.mod || { echo "go.mod is not tidy" >&2; exit 1; }
+          diff -u go.sum.bak go.sum || { echo "go.sum is not tidy" >&2; exit 1; }
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Enforce coverage floor
+        run: ./scripts/coverage-gate.sh coverage.out
+
+      - name: Upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  fuzz:
+    name: Fuzz (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A short run on every PR catches a parser that panics on malformed
+      # input; the corpus persists in testdata for longer local runs.
+      - name: Fuzz the Specification parser
+        run: go test -run=X -fuzz=FuzzParse -fuzztime=60s ./internal/spec/
+
+      - name: Fuzz the provider property decoder
+        run: go test -run=X -fuzz=FuzzProperties -fuzztime=60s ./internal/provider/decode/
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: gosec
+        run: go run github.com/securego/gosec/v2/cmd/gosec@latest ./...

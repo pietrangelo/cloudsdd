@@ -1,1 +1,7 @@
 /.gitconfig
+
+# Build artifacts
+/cloudsdd
+
+# Test artifacts
+/coverage.out

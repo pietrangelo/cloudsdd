@@ -11,7 +11,7 @@ providers, through a cloud-agnostic Go engine. The intended end-to-end
 flow is:
 
 ```
-NL request ──(not yet implemented)──► JSON Specification ──► Engine.Validate
+NL request ──(CLI NLP Translation)──► JSON Specification ──► Engine.Validate
                                                                       │
                                                                       ▼
                                                                 Engine.Plan
@@ -20,9 +20,16 @@ NL request ──(not yet implemented)──► JSON Specification ──► Eng
                                                                 Engine.Apply
 ```
 
-The "JSON Specification → Engine → Provider" part is implemented for AWS
-(RFC 002, 003, 004). Natural-language translation → Specification and the
-HTTP API layer remain out of scope and do not yet have a dedicated RFC.
+The full path is implemented: the CLI (`cobra`, RFC 006) translates natural
+language through a configurable AI provider (RFC 010), and the Engine applies
+the resulting Specification via AWS (RFC 002-004, 007), GCP, and Azure
+(RFC 008) providers. Deployed resources are recorded in a local ledger
+(RFC 009) that is fed back to the translator as context. RFC 011 hardened
+the providers added after RFC 006 and added the CI that had been missing.
+
+The original HTTP API layer concept was replaced by this CLI-first approach;
+`docs/api.md` and `docs/openapi.yaml` are retained only as a record of that
+earlier direction and describe nothing that exists.
 
 ## License
 
@@ -39,8 +46,10 @@ for the full breakdown and the process for vetting new dependencies.
 
 ```
 cloudsdd/
-├── cmd/                    # Executable entry points (empty: no RFC has defined them yet)
+├── cmd/
+│   └── cloudsdd/            # CLI entry point (cobra root, deploy, destroy commands)
 ├── internal/
+│   ├── nlp/                 # LLM translation interface from Natural Language to Specification
 │   ├── spec/                # Specification types, strict parsing, domain validation
 │   ├── provider/             # CloudProvider interface, Diff/Result types
 │   │   └── aws/                # Concrete AWS implementation (RFC 002/003/004)
@@ -48,9 +57,9 @@ cloudsdd/
 ├── pkg/                     # Empty: no public type exposed yet
 ├── LICENSE                  # GNU AGPLv3 (or later), full text
 └── docs/
-    ├── rfc/001-005...        # Foundation + AWS provider + cross-account + multi-account + account/env/region scoping (approved)
+    ├── rfc/001-006...        # Foundation + AWS + scoping + CLI (approved)
     ├── architecture.md        # This document
-    ├── api.md                 # HTTP API status (not yet implemented) + programmatic usage
+    ├── cli.md                 # CLI commands and usage guide
     ├── dependency-licenses.md # Third-party license audit vs. AGPLv3
     └── openapi.yaml            # OpenAPI schema (Specification + AWS properties, no paths)
 ```
@@ -71,7 +80,7 @@ Represents and validates the SDD Specification (`Specification`,
   an enum, at least one resource, resource `id` constrained to the
   pattern `^[a-zA-Z0-9_-]{1,63}$` (custom `resourceid` tag), `type`
   (including `cross_account_role`, RFC 003) and `provider` constrained to
-  enums, `max_cost_monthly` positive if present. `Resource.Account` (RFC
+  enums. `Resource.Account` (RFC
   004 §2.2) is optional: it references, by name, a `DeploymentTarget`
   resolved by the `Engine`, never an ARN or a credential.
 - **`Resource.Scope` (RFC 005 §2.2)**: cloud-agnostic "where" for a
@@ -265,14 +274,14 @@ transitive dependency not invoked by our code).
 
 ## Out of scope / next steps
 
-See RFC 001 §4-5, RFC 002 §6, RFC 003 §5-6, RFC 004 §5-6, RFC 005 §5-6. In
-summary, not yet implemented: GCP/Azure providers, other AWS
-`ResourceType`s (`relational_database`, `compute_instance`,
+summary, not yet implemented: other AWS/GCP/Azure
+`ResourceType`s (`compute_instance`,
 `container_service`), resolution of `provider: "agnostic"`,
 references/dependencies between resources in the same Specification, cost
-estimation and enforcement of `max_cost_monthly`, multi-tenant isolation
-of state (real BOLA), HTTP API layer, NL → Specification translation,
-network-layer sealing (VPC/security-group isolation per Environment, RFC
+policy (`max_cost_monthly` was removed in RFC 011 §2.9 — it was validated
+but never enforced; real enforcement needs a pricing model and its own
+RFC), multi-tenant isolation
+of state, network-layer sealing (VPC/security-group isolation per Environment, RFC
 005 §5 — no networked `ResourceType` exists yet), zone-aware HA placement
 logic for any concrete `ResourceType`, and a `DeploymentTarget` keyed by
 `(Account, Environment)` pairs (today `Environment` is a CloudSDD-enforced

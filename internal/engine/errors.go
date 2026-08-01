@@ -33,3 +33,12 @@ var ErrDeploymentTargetProviderMismatch = errors.New("engine: deployment target 
 // 004 §4): the Engine does not know how to build a CloudProvider with
 // assumed credentials for that cloud.
 var ErrNoTargetProviderFactory = errors.New("engine: no target provider factory registered")
+
+// ErrIntentMismatch indicates that the Specification's declared Intent
+// does not permit the operation being performed (RFC 011 §2.4).
+//
+// Intent was previously parsed and validated but never consulted, so
+// Apply would happily apply a destroy-intent Specification and the CLI's
+// destroy command had to overwrite Intent after translation to compensate
+// — which silently masked a translator that misread the user's request.
+var ErrIntentMismatch = errors.New("engine: specification intent does not permit this operation")

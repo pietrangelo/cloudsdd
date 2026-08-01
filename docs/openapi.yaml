@@ -3,7 +3,9 @@ info:
   title: CloudSDD API
   version: "0.1.0-draft"
   description: >
-    Draft. No HTTP endpoint is implemented yet (see docs/api.md).
+    Superseded, retained for history. CloudSDD is a CLI tool; the HTTP API
+    layer this document sketched was never built and is no longer planned
+    (see docs/api.md and docs/cli.md).
     This document currently only exposes the Specification component
     schema, defined in docs/rfc/001-core-architecture-and-json-schema.md
     and implemented in internal/spec, so it can be referenced by future
@@ -177,9 +179,6 @@ components:
       type: object
       additionalProperties: false
       properties:
-        max_cost_monthly:
-          type: number
-          exclusiveMinimum: 0
         allowed_regions:
           type: array
           items:

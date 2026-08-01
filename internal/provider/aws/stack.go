@@ -16,6 +16,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider"
+	"cloudsdd/internal/provider/pulumiutil"
 )
 
 // stackScopeSeparator joins the components of a composite stack name
@@ -101,48 +102,19 @@ func (p *AWSProvider) providerOpts(ctx *pulumi.Context, region string) ([]pulumi
 	return []pulumi.ResourceOption{pulumi.Provider(explicit)}, nil
 }
 
-// summarizeChangeSummary reduces the ChangeSummary of a Preview/Up
-// (aggregated across all Pulumi resources declared for a single CloudSDD
-// Resource, RFC 002 §2.7) to a single provider.Action.
+// The three helpers below moved to internal/provider/pulumiutil (RFC 011
+// §2.2) so GCP and Azure share one correct implementation instead of
+// hand-copying a degraded one. They are kept as thin aliases to leave the
+// AWS call sites untouched.
+
 func summarizeChangeSummary(cs map[apitype.OpType]int) provider.Action {
-	if cs[apitype.OpCreate] > 0 || cs[apitype.OpCreateReplacement] > 0 {
-		return provider.ActionCreate
-	}
-	if cs[apitype.OpUpdate] > 0 || cs[apitype.OpReplace] > 0 {
-		return provider.ActionUpdate
-	}
-	if cs[apitype.OpDelete] > 0 || cs[apitype.OpDeleteReplaced] > 0 {
-		return provider.ActionDestroy
-	}
-	return provider.ActionNoop
+	return pulumiutil.SummarizeChangeSummary(cs)
 }
 
 func changesFromSummary(cs map[apitype.OpType]int) map[string]any {
-	if len(cs) == 0 {
-		return nil
-	}
-	out := make(map[string]any, len(cs))
-	for op, n := range cs {
-		out[string(op)] = n
-	}
-	return out
+	return pulumiutil.ChangesFromSummary(cs)
 }
 
-// detailsFromOutputs converts Pulumi outputs into Result.Details. Outputs
-// marked Secret are redacted: Result.Details can end up in logs/reports,
-// which is not the right place for sensitive material even when Pulumi
-// itself considers it a secret.
 func detailsFromOutputs(outputs auto.OutputMap) map[string]any {
-	if len(outputs) == 0 {
-		return nil
-	}
-	out := make(map[string]any, len(outputs))
-	for k, v := range outputs {
-		if v.Secret {
-			out[k] = "[redacted]"
-			continue
-		}
-		out[k] = v.Value
-	}
-	return out
+	return pulumiutil.DetailsFromOutputs(outputs)
 }

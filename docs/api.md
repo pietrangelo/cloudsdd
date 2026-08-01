@@ -1,5 +1,19 @@
 # CloudSDD API
 
+> **Status: superseded, retained for history.**
+>
+> CloudSDD is a CLI tool. The HTTP API layer this document describes was
+> never built, and is no longer planned: the project mandate was changed to
+> a CLI-first design (RFC 006), and the OWASP-API-specific requirements
+> referenced below — Chi routing, BOLA prevention, rate limiting — were
+> removed from CLAUDE.md along with it.
+>
+> For what actually exists, see [cli.md](cli.md) and
+> [architecture.md](architecture.md). Reviving an HTTP layer would require a
+> new RFC.
+
+---
+
 ## Status: not implemented
 
 No HTTP layer exists yet in the code (`internal/api` has not been

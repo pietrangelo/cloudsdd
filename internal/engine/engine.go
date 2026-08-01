@@ -28,4 +28,7 @@ type Engine interface {
 	// Apply applies the Specification, resource by resource, through the
 	// registered CloudProviders.
 	Apply(ctx context.Context, s spec.Specification) ([]provider.Result, error)
+
+	// Destroy removes the Specification's resources from real infrastructure.
+	Destroy(ctx context.Context, s spec.Specification) ([]provider.Result, error)
 }

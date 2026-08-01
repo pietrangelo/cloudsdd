@@ -89,6 +89,18 @@ var _ provider.CloudProvider = (*AWSProvider)(nil)
 // call to AWS/Pulumi.
 func (p *AWSProvider) Validate(ctx context.Context, r spec.Resource, policies spec.Policies) error {
 	switch r.Type {
+	case spec.ResourceTypeRelationalDatabase:
+		if _, err := decodeRelationalDatabaseProperties(r.Properties); err != nil {
+			return err
+		}
+		if r.Scope.Region == "" {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrRegionRequired)
+		}
+		if err := validateAWSRegionFormat(r.Scope.Region); err != nil {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
+		}
+		return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
+
 	case spec.ResourceTypeObjectStorage:
 		if _, err := decodeS3Properties(r.Properties); err != nil {
 			return err
@@ -220,6 +232,21 @@ func (p *AWSProvider) Destroy(ctx context.Context, r spec.Resource, policies spe
 // §2.3).
 func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (program pulumi.RunFunc, region string, err error) {
 	switch r.Type {
+	case spec.ResourceTypeRelationalDatabase:
+		dbp, err := decodeRelationalDatabaseProperties(r.Properties)
+		if err != nil {
+			return nil, "", err
+		}
+		region := r.Scope.Region
+		program := func(ctx *pulumi.Context) error {
+			opts, err := p.providerOpts(ctx, region)
+			if err != nil {
+				return err
+			}
+			return declareRelationalDatabase(ctx, r.ID, *dbp, opts...)
+		}
+		return program, region, nil
+
 	case spec.ResourceTypeObjectStorage:
 		s3p, err := decodeS3Properties(r.Properties)
 		if err != nil {

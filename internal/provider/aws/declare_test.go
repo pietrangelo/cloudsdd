@@ -1,0 +1,295 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Pietrangelo Masala
+
+package aws
+
+import (
+	"sync"
+	"testing"
+
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+)
+
+type recordedResource struct {
+	Type   string
+	Name   string
+	Inputs resource.PropertyMap
+}
+
+// recorder collects declared resources. Pulumi registers resources
+// concurrently, so access to the slice must be synchronized.
+type recorder struct {
+	mu        sync.Mutex
+	resources []recordedResource
+}
+
+func (r *recorder) add(res recordedResource) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resources = append(r.resources, res)
+}
+
+func (r *recorder) snapshot() []recordedResource {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedResource(nil), r.resources...)
+}
+
+// mockMonitor captures declared resources without contacting AWS.
+type mockMonitor struct {
+	rec *recorder
+}
+
+func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
+	m.rec.add(recordedResource{
+		Type:   args.TypeToken,
+		Name:   args.Name,
+		Inputs: args.Inputs,
+	})
+
+	outputs := args.Inputs.Copy()
+	if args.TypeToken == "random:index/randomPassword:RandomPassword" {
+		outputs["result"] = resource.NewStringProperty("generated-password")
+	}
+	return args.Name + "-id", outputs, nil
+}
+
+func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	return resource.PropertyMap{}, nil
+}
+
+func runProgram(t *testing.T, fn func(ctx *pulumi.Context) error) []recordedResource {
+	t.Helper()
+
+	rec := &recorder{}
+	if err := pulumi.RunErr(fn, pulumi.WithMocks("cloudsdd-aws", "test", mockMonitor{rec: rec})); err != nil {
+		t.Fatalf("pulumi program failed: %v", err)
+	}
+	return rec.snapshot()
+}
+
+func findResource(t *testing.T, recorded []recordedResource, typeToken string) recordedResource {
+	t.Helper()
+	for _, r := range recorded {
+		if r.Type == typeToken {
+			return r
+		}
+	}
+	t.Fatalf("no %q resource was declared; got %v", typeToken, typeTokens(recorded))
+	return recordedResource{}
+}
+
+func hasResource(recorded []recordedResource, typeToken string) bool {
+	for _, r := range recorded {
+		if r.Type == typeToken {
+			return true
+		}
+	}
+	return false
+}
+
+func typeTokens(recorded []recordedResource) []string {
+	out := make([]string, 0, len(recorded))
+	for _, r := range recorded {
+		out = append(out, r.Type)
+	}
+	return out
+}
+
+const rdsInstanceToken = "aws:rds/instance:Instance"
+
+// TestDeclareRelationalDatabaseSecureDefaults pins the RFC 011 §2.5
+// reversal end-to-end: SkipFinalSnapshot shipped hardcoded true "for
+// simplified teardown during dev", so a destroy discarded the database
+// with no recovery point at all.
+func TestDeclareRelationalDatabaseSecureDefaults(t *testing.T) {
+	props := relationalDatabaseProperties{Engine: "postgres", Version: "15"}
+
+	recorded := runProgram(t, func(ctx *pulumi.Context) error {
+		return declareRelationalDatabase(ctx, "app-db", props)
+	})
+	instance := findResource(t, recorded, rdsInstanceToken)
+
+	if !instance.Inputs["deletionProtection"].BoolValue() {
+		t.Error("deletionProtection = false, want true by default (RFC 011 §2.5)")
+	}
+	if instance.Inputs["skipFinalSnapshot"].BoolValue() {
+		t.Error("skipFinalSnapshot = true, want false by default (RFC 011 §2.5)")
+	}
+	// RDS requires an identifier whenever a final snapshot is taken,
+	// which is now the default — omitting it would fail at apply time.
+	id, ok := instance.Inputs["finalSnapshotIdentifier"]
+	if !ok {
+		t.Fatal("finalSnapshotIdentifier is unset while a final snapshot is required")
+	}
+	if id.StringValue() != "app-db-final-snapshot" {
+		t.Errorf("finalSnapshotIdentifier = %q, want it derived from the resource ID", id.StringValue())
+	}
+
+	if instance.Inputs["publiclyAccessible"].BoolValue() {
+		t.Error("publiclyAccessible = true, want false")
+	}
+	if !instance.Inputs["storageEncrypted"].BoolValue() {
+		t.Error("storageEncrypted = false, want true")
+	}
+	if !instance.Inputs["iamDatabaseAuthenticationEnabled"].BoolValue() {
+		t.Error("iamDatabaseAuthenticationEnabled = false, want true")
+	}
+	if got := instance.Inputs["backupRetentionPeriod"].NumberValue(); got != 7 {
+		t.Errorf("backupRetentionPeriod = %v, want 7", got)
+	}
+}
+
+func TestDeclareRelationalDatabaseExplicitDisposability(t *testing.T) {
+	yes, no := true, false
+	props := relationalDatabaseProperties{
+		Engine:             "postgres",
+		Version:            "15",
+		DeletionProtection: &no,
+		SkipFinalSnapshot:  &yes,
+	}
+
+	recorded := runProgram(t, func(ctx *pulumi.Context) error {
+		return declareRelationalDatabase(ctx, "app-db", props)
+	})
+	instance := findResource(t, recorded, rdsInstanceToken)
+
+	if instance.Inputs["deletionProtection"].BoolValue() {
+		t.Error("deletionProtection = true, want the explicitly requested false")
+	}
+	if !instance.Inputs["skipFinalSnapshot"].BoolValue() {
+		t.Error("skipFinalSnapshot = false, want the explicitly requested true")
+	}
+	// With no final snapshot there is nothing to name.
+	if _, ok := instance.Inputs["finalSnapshotIdentifier"]; ok {
+		t.Error("finalSnapshotIdentifier was set even though the final snapshot is skipped")
+	}
+}
+
+func TestDeclareRelationalDatabaseHonoursEngineAndHA(t *testing.T) {
+	tests := []struct {
+		name         string
+		props        relationalDatabaseProperties
+		wantEngine   string
+		wantMultiAz  bool
+		wantInstance string
+	}{
+		{
+			name:         "postgres single-az",
+			props:        relationalDatabaseProperties{Engine: "postgres", Version: "15"},
+			wantEngine:   "postgres",
+			wantInstance: "db.t3.micro",
+		},
+		{
+			name:         "mysql is not substituted",
+			props:        relationalDatabaseProperties{Engine: "mysql", Version: "8.0"},
+			wantEngine:   "mysql",
+			wantInstance: "db.t3.micro",
+		},
+		{
+			name:         "high availability is multi-az",
+			props:        relationalDatabaseProperties{Engine: "postgres", Version: "15", HighAvailability: true},
+			wantEngine:   "postgres",
+			wantMultiAz:  true,
+			wantInstance: "db.t3.small",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorded := runProgram(t, func(ctx *pulumi.Context) error {
+				return declareRelationalDatabase(ctx, "app-db", tt.props)
+			})
+			instance := findResource(t, recorded, rdsInstanceToken)
+
+			if got := instance.Inputs["engine"].StringValue(); got != tt.wantEngine {
+				t.Errorf("engine = %q, want %q", got, tt.wantEngine)
+			}
+			if got := instance.Inputs["multiAz"].BoolValue(); got != tt.wantMultiAz {
+				t.Errorf("multiAz = %v, want %v", got, tt.wantMultiAz)
+			}
+			if got := instance.Inputs["instanceClass"].StringValue(); got != tt.wantInstance {
+				t.Errorf("instanceClass = %q, want %q", got, tt.wantInstance)
+			}
+		})
+	}
+}
+
+func TestDeclareRelationalDatabaseGeneratesAPassword(t *testing.T) {
+	props := relationalDatabaseProperties{Engine: "postgres", Version: "15"}
+
+	recorded := runProgram(t, func(ctx *pulumi.Context) error {
+		return declareRelationalDatabase(ctx, "app-db", props)
+	})
+
+	if !hasResource(recorded, "random:index/randomPassword:RandomPassword") {
+		t.Fatal("no RandomPassword was declared; the master password must be generated, not fixed")
+	}
+	pwd := findResource(t, recorded, "random:index/randomPassword:RandomPassword")
+	if got := pwd.Inputs["length"].NumberValue(); got < 32 {
+		t.Errorf("password length = %v, want at least 32", got)
+	}
+
+	instance := findResource(t, recorded, rdsInstanceToken)
+	if got := instance.Inputs["username"].StringValue(); got != "masteruser" {
+		t.Errorf("username = %q, want masteruser", got)
+	}
+}
+
+// TestDeclareS3BucketSecureDefaults pins the pre-existing S3 posture so
+// the shared-decoder refactor could not quietly change it.
+func TestDeclareS3BucketSecureDefaults(t *testing.T) {
+	props := S3Properties{BucketName: "my-bucket"}
+
+	recorded := runProgram(t, func(ctx *pulumi.Context) error {
+		return declareS3Bucket(ctx, "my-bucket", props)
+	})
+
+	if !hasResource(recorded, "aws:s3/bucketServerSideEncryptionConfigurationV2:BucketServerSideEncryptionConfigurationV2") {
+		t.Error("no server-side encryption configuration was declared; encryption must be on by default")
+	}
+	if !hasResource(recorded, "aws:s3/bucketPublicAccessBlock:BucketPublicAccessBlock") {
+		t.Error("no public access block was declared; it must be on by default")
+	}
+
+	block := findResource(t, recorded, "aws:s3/bucketPublicAccessBlock:BucketPublicAccessBlock")
+	for _, field := range []string{"blockPublicAcls", "blockPublicPolicy", "ignorePublicAcls", "restrictPublicBuckets"} {
+		if !block.Inputs[resource.PropertyKey(field)].BoolValue() {
+			t.Errorf("%s = false, want true", field)
+		}
+	}
+
+	versioning := findResource(t, recorded, "aws:s3/bucketVersioningV2:BucketVersioningV2")
+	status := versioning.Inputs["versioningConfiguration"].ObjectValue()["status"].StringValue()
+	if status != "Disabled" {
+		t.Errorf("versioning status = %q, want Disabled by default", status)
+	}
+}
+
+func TestDeclareS3BucketHonoursExplicitOverrides(t *testing.T) {
+	yes, no := true, false
+	props := S3Properties{
+		BucketName:        "my-bucket",
+		Versioning:        &yes,
+		Encryption:        &no,
+		BlockPublicAccess: &no,
+	}
+
+	recorded := runProgram(t, func(ctx *pulumi.Context) error {
+		return declareS3Bucket(ctx, "my-bucket", props)
+	})
+
+	if hasResource(recorded, "aws:s3/bucketServerSideEncryptionConfigurationV2:BucketServerSideEncryptionConfigurationV2") {
+		t.Error("encryption configuration was declared despite encryption:false")
+	}
+	if hasResource(recorded, "aws:s3/bucketPublicAccessBlock:BucketPublicAccessBlock") {
+		t.Error("public access block was declared despite block_public_access:false")
+	}
+
+	versioning := findResource(t, recorded, "aws:s3/bucketVersioningV2:BucketVersioningV2")
+	status := versioning.Inputs["versioningConfiguration"].ObjectValue()["status"].StringValue()
+	if status != "Enabled" {
+		t.Errorf("versioning status = %q, want Enabled", status)
+	}
+}

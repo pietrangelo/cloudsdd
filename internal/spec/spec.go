@@ -125,7 +125,12 @@ func boolOrDefault(p *bool, def bool) bool {
 }
 
 // Policies expresses the global constraints applied to all resources in the Specification.
+//
+// max_cost_monthly was removed in RFC 011 §2.9. It was declared and
+// validated but enforced nowhere, so it read as a guarantee and provided
+// none — worse than not offering it at all. Real cost enforcement needs
+// per-provider pricing data and a currency/period model, and is deferred
+// to its own RFC.
 type Policies struct {
-	MaxCostMonthly *float64 `json:"max_cost_monthly,omitempty" validate:"omitempty,gt=0"`
 	AllowedRegions []string `json:"allowed_regions,omitempty"`
 }

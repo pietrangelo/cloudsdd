@@ -136,12 +136,35 @@ func (e *DefaultEngine) Validate(ctx context.Context, s spec.Specification) erro
 			return err
 		}
 		for _, region := range effectiveRegions(r.Scope) {
+			// Policies.AllowedRegions is enforced here, centrally, as
+			// well as inside each provider (RFC 011 §2.3). It was
+			// previously implemented only by the AWS provider, so a
+			// Specification pinning allowed_regions deployed anywhere at
+			// all on GCP and Azure. Enforcing it at the Engine means a
+			// new provider cannot silently omit the check.
+			if region != "" {
+				if err := provider.ValidateRegionAllowed(region, s.Policies.AllowedRegions); err != nil {
+					return fmt.Errorf("engine: resource %q: %w", r.ID, err)
+				}
+			}
 			if err := p.Validate(ctx, scopedResource(r, region), s.Policies); err != nil {
 				return fmt.Errorf("engine: resource %q: %w", r.ID, err)
 			}
 		}
 	}
 	return nil
+}
+
+// checkIntent enforces that the Specification's declared Intent permits
+// the operation about to run (RFC 011 §2.4). Plan is exempt: it is
+// side-effect free, so previewing any Specification is safe.
+func checkIntent(s spec.Specification, allowed ...spec.Intent) error {
+	for _, a := range allowed {
+		if s.Intent == a {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: intent is %q, expected one of %v", ErrIntentMismatch, s.Intent, allowed)
 }
 
 func (e *DefaultEngine) Plan(ctx context.Context, s spec.Specification) ([]provider.Diff, error) {
@@ -167,7 +190,14 @@ func (e *DefaultEngine) Plan(ctx context.Context, s spec.Specification) ([]provi
 	return diffs, nil
 }
 
+// Apply applies the Specification. It requires an Intent of "deploy" or
+// "update": applying a Specification the translator marked "destroy" or
+// "plan" is a mismatch the user must see, not something to silently
+// coerce (RFC 011 §2.4).
 func (e *DefaultEngine) Apply(ctx context.Context, s spec.Specification) ([]provider.Result, error) {
+	if err := checkIntent(s, spec.IntentDeploy, spec.IntentUpdate); err != nil {
+		return nil, err
+	}
 	if err := e.Validate(ctx, s); err != nil {
 		return nil, err
 	}
@@ -185,6 +215,42 @@ func (e *DefaultEngine) Apply(ctx context.Context, s spec.Specification) ([]prov
 			}
 			res.Region = region
 			results = append(results, res)
+		}
+	}
+	return results, nil
+}
+
+// Destroy removes the Specification's resources. It requires an Intent of
+// "destroy" (RFC 011 §2.4), so a prompt the translator rendered as
+// "deploy" cannot reach a destructive operation.
+func (e *DefaultEngine) Destroy(ctx context.Context, s spec.Specification) ([]provider.Result, error) {
+	if err := checkIntent(s, spec.IntentDestroy); err != nil {
+		return nil, err
+	}
+	if err := e.Validate(ctx, s); err != nil {
+		return nil, err
+	}
+
+	results := make([]provider.Result, 0, len(s.Resources))
+	// Typically destruction should be in reverse order, but dependencies are not yet implemented (RFC 001).
+	for i := len(s.Resources) - 1; i >= 0; i-- {
+		r := s.Resources[i]
+		p, err := e.resolveProvider(ctx, r)
+		if err != nil {
+			return results, err
+		}
+
+		regions := effectiveRegions(r.Scope)
+		for j := len(regions) - 1; j >= 0; j-- {
+			region := regions[j]
+			if err := p.Destroy(ctx, scopedResource(r, region), s.Policies); err != nil {
+				return results, fmt.Errorf("engine: destroy failed for resource %q: %w", r.ID, err)
+			}
+			results = append(results, provider.Result{
+				ResourceID: r.ID,
+				Region:     region,
+				Status:     provider.StatusDestroyed,
+			})
 		}
 	}
 	return results, nil
