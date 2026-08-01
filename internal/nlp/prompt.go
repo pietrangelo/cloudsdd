@@ -42,6 +42,7 @@ The JSON schema must exactly match this structure:
   ],
   "policies": {
     "allowed_regions": ["eu-central-1"], // optional list of strings
+    "provider_preference": ["aws"], // optional; see "Choosing a provider" below
     "schedule": { } // optional, see "Power scheduling" below
   }
 }
@@ -116,8 +117,21 @@ Examples:
 - "everything off over the Christmas shutdown" ->
   an "always_off" exception window.
 
+Choosing a provider:
+
+Use "agnostic" ONLY when the user expresses no preference at all and names no
+region. If they name a region, use the provider that region belongs to:
+"eu-central-1" is AWS, "europe-west1" is GCP, "westeurope" is Azure. Writing
+"agnostic" alongside a provider-specific region is not portability, it is that
+provider spelled indirectly.
+
+An "agnostic" resource is resolved by the CLI before anything is applied, and
+the user is shown which cloud was chosen. If more than one could serve it and
+the user did state an order of preference, put it in
+"policies.provider_preference".
+
 Important rules:
-- If the provider is not mentioned, use "aws".
+- If the provider is not mentioned and no region is given, use "aws".
 - Region format is provider-specific: AWS "eu-central-1", GCP "europe-west1",
   Azure "westeurope".
 - Set "intent" to match what the user actually asked for. If they describe

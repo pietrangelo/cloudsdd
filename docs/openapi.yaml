@@ -222,6 +222,18 @@ components:
           type: array
           items:
             type: string
+        provider_preference:
+          type: array
+          maxItems: 3
+          uniqueItems: true
+          items:
+            type: string
+            enum: [aws, gcp, azure]
+          description: >
+            Ordered tie-break for resources declaring provider "agnostic"
+            when more than one registered provider can express them
+            (RFC 014 §2.4). "agnostic" is excluded from the values on
+            purpose: a preference that could name it would be circular.
         schedule:
           $ref: "#/components/schemas/Schedule"
           description: >

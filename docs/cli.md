@@ -202,6 +202,63 @@ Two provider notes worth knowing:
   anywhere, and GCP firewall rules are allow-only — so nothing less actually
   closes the machine.
 
+## Choosing a cloud
+
+A resource may declare `"provider": "agnostic"` and let CloudSDD decide.
+
+```
+$ cloudsdd deploy "a bucket in europe-west1"
+...
+Resolved agnostic resources:
+- assets -> gcp (the only provider that can express it)
+```
+
+**Resolution is a declared rule, never a guess.** A candidate is a provider
+whose validation accepts the resource — the same check that would run if you
+had named it — so a cloud can never be chosen for a resource it would then
+reject.
+
+In practice the region usually decides on its own, because the three formats
+are mutually exclusive:
+
+| Provider | Shape | Example |
+|---|---|---|
+| AWS | `xx-name-N` | `eu-central-1` |
+| GCP | `name-nameN` | `europe-west1` |
+| Azure | one lowercase word | `westeurope` |
+
+So `agnostic` plus `eu-central-1` has exactly one candidate and needs no
+configuration. It also means writing `agnostic` with a provider-specific region
+is not portability — it is that provider spelled indirectly. Portable region
+names are a separate, larger feature (RFC 014 §7.1).
+
+When more than one cloud could serve a resource, CloudSDD looks for an explicit
+preference and **refuses to choose** if it finds none:
+
+1. `policies.provider_preference` in the Specification, an ordered list;
+2. `defaults.provider` in `~/.cloudsdd/config.yaml`;
+3. otherwise an error naming every candidate.
+
+```yaml
+# ~/.cloudsdd/config.yaml
+defaults:
+  provider: aws
+```
+
+The refusal is deliberate. A Specification that resolved to AWS in review and
+Azure in production would be a change of blast radius nobody approved.
+
+A provider that cannot be constructed — no passphrase, no credentials — is
+excluded from candidacy and **reported**:
+
+```
+Note: azure is not available as a candidate (CLOUDSDD_PULUMI_PASSPHRASE must be set)
+```
+
+Silently dropping it would make the same Specification resolve differently on a
+colleague's machine with no way to see why. A provider you named *explicitly*
+still fails hard: you asked for it specifically.
+
 ## Policies
 
 ```json

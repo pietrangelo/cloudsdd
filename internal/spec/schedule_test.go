@@ -320,3 +320,47 @@ func TestParseAcceptsAScheduledSpecification(t *testing.T) {
 		t.Error("the second resource declares enabled:false and must not be scheduled")
 	}
 }
+
+func TestValidateProviderPreference(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      []Provider
+		wantErr bool
+	}{
+		{name: "absent", in: nil},
+		{name: "single", in: []Provider{ProviderAWS}},
+		{name: "ordered list", in: []Provider{ProviderGCP, ProviderAWS, ProviderAzure}},
+		{
+			// A preference that could name "agnostic" would be circular:
+			// it is the value resolution exists to replace (RFC 014 §2.1).
+			name:    "agnostic is circular",
+			in:      []Provider{ProviderAgnostic},
+			wantErr: true,
+		},
+		{name: "unknown provider", in: []Provider{"oracle"}, wantErr: true},
+		{
+			// A duplicate is either a typo or a misunderstanding of how
+			// the order is read; neither should pass silently.
+			name:    "duplicates",
+			in:      []Provider{ProviderAWS, ProviderAWS},
+			wantErr: true,
+		},
+		{
+			name:    "more entries than there are providers",
+			in:      []Provider{ProviderAWS, ProviderGCP, ProviderAzure, "oracle"},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := validSpec()
+			s.Policies.ProviderPreference = tt.in
+
+			err := Validate(&s)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}

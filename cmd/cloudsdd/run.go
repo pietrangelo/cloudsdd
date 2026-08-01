@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -105,17 +106,33 @@ func runIntent(cmd *cobra.Command, args []string, intent spec.Intent) error {
 		return err
 	}
 
+	eng, notes, err := buildEngine(sddSpec, cfg)
+	if err != nil {
+		return err
+	}
+	// A provider that could not be constructed is excluded from agnostic
+	// resolution. Saying so is the point: otherwise the same
+	// Specification resolves differently on a colleague's machine with no
+	// way to see why (RFC 014 §2.5).
+	for _, note := range notes {
+		fmt.Fprintf(out, "Note: %s\n", note)
+	}
+
+	// Bind any "agnostic" resource before rendering, so the user approves
+	// a Specification that names a concrete cloud (RFC 014 §2.6).
+	resolvedSpec, resolutions, err := eng.Resolve(ctx, sddSpec)
+	if err != nil {
+		return err
+	}
+	sddSpec = resolvedSpec
+
 	specJSON, err := json.MarshalIndent(sddSpec, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to render specification: %w", err)
 	}
 	fmt.Fprintf(out, "\n--- Translated Specification (intent: %s) ---\n%s\n%s\n",
 		intent, specJSON, strings.Repeat("-", 44))
-
-	eng, err := buildEngine(sddSpec)
-	if err != nil {
-		return err
-	}
+	printResolutions(out, resolutions)
 
 	fmt.Fprintln(out, "Planning infrastructure changes...")
 	diffs, err := eng.Plan(ctx, sddSpec)
@@ -226,35 +243,86 @@ func displayRegion(region string) string {
 	return region
 }
 
-// buildEngine constructs only the providers the Specification actually
-// references.
+// printResolutions reports which cloud each agnostic resource was bound
+// to, and why.
 //
-// Previously all three were built unconditionally, and each NewProvider
-// hard-fails without CLOUDSDD_PULUMI_PASSPHRASE — so deploying to AWS
-// alone still required GCP and Azure to be configured (RFC 011 §2.8).
-func buildEngine(s spec.Specification) (engine.Engine, error) {
-	needed := make(map[spec.Provider]struct{}, len(s.Resources))
+// Resolution is a decision made on the user's behalf, so it is shown
+// before the confirmation gate rather than inferred from the rendered
+// Specification (RFC 014 §2.1).
+func printResolutions(out io.Writer, resolutions []engine.Resolution) {
+	if len(resolutions) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "Resolved agnostic resources:")
+	for _, r := range resolutions {
+		fmt.Fprintf(out, "- %s -> %s (%s)\n", r.ResourceID, r.Provider, r.Reason)
+	}
+}
+
+// buildEngine constructs the providers the Specification needs.
+//
+// For explicitly-named providers that is only the ones referenced, which
+// is what RFC 011 §2.8 made lazy so an AWS-only deploy would not demand
+// GCP and Azure credentials. A Specification containing an "agnostic"
+// resource needs candidates, so every provider is attempted — and one
+// that cannot be constructed is excluded and reported rather than
+// silently dropped (RFC 014 §2.5).
+func buildEngine(s spec.Specification, cfg *config.Config) (engine.Engine, []string, error) {
+	explicit := make(map[spec.Provider]bool, len(s.Resources))
+	agnostic := false
 	for _, r := range s.Resources {
-		needed[r.Provider] = struct{}{}
+		if r.Provider == spec.ProviderAgnostic {
+			agnostic = true
+			continue
+		}
+		explicit[r.Provider] = true
 	}
 
-	providers := make(map[spec.Provider]provider.CloudProvider, len(needed))
-	for name := range needed {
+	wanted := make(map[spec.Provider]bool, len(providerFactories))
+	for name := range explicit {
+		wanted[name] = true
+	}
+	if agnostic {
+		for name := range providerFactories {
+			wanted[name] = true
+		}
+	}
+
+	// Sorted, so the notes below appear in the same order every run.
+	names := make([]spec.Provider, 0, len(wanted))
+	for name := range wanted {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return names[i] < names[j] })
+
+	var notes []string
+	providers := make(map[spec.Provider]provider.CloudProvider, len(names))
+	for _, name := range names {
 		factory, ok := providerFactories[name]
 		if !ok {
-			// spec.Validate already rejects unknown providers; the
-			// remaining case is "agnostic", which the Engine reports
-			// with its own error.
+			// spec.Validate already rejects unknown providers.
 			continue
 		}
 		p, err := factory()
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize %s provider: %w", name, err)
+			// A provider the user named by hand is a hard failure: they
+			// asked for it specifically. One that was only a candidate
+			// for resolution is merely unavailable.
+			if explicit[name] {
+				return nil, nil, fmt.Errorf("failed to initialize %s provider: %w", name, err)
+			}
+			notes = append(notes, fmt.Sprintf("%s is not available as a candidate (%v)", name, err))
+			continue
 		}
 		providers[name] = p
 	}
 
-	return engine.New(providers), nil
+	var opts []engine.Option
+	if cfg != nil && cfg.Defaults.Provider != "" {
+		opts = append(opts, engine.WithDefaultProvider(spec.Provider(cfg.Defaults.Provider)))
+	}
+
+	return engine.New(providers, opts...), notes, nil
 }
 
 // confirm gates every destructive operation. It reads a whole line rather

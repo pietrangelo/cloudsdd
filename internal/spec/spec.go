@@ -166,6 +166,15 @@ type Policies struct {
 	// types with no power state ignore it; a resource that declares its
 	// own Schedule overrides it.
 	Schedule *schedule.Schedule `json:"schedule,omitempty"`
+
+	// ProviderPreference breaks a tie when a resource declares
+	// Provider "agnostic" and more than one registered provider can
+	// express it (RFC 014 §2.4). Ordered: the first candidate that
+	// appears here wins.
+	//
+	// "agnostic" is excluded from the allowed values on purpose — a
+	// preference list that could contain it would be circular.
+	ProviderPreference []Provider `json:"provider_preference,omitempty" validate:"omitempty,max=3,unique,dive,oneof=aws gcp azure"`
 }
 
 // EffectiveSchedule returns the Schedule governing r: its own if it

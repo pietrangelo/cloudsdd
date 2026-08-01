@@ -20,6 +20,12 @@ type DefaultEngine struct {
 	targets         map[string]DeploymentTarget
 	targetFactories map[spec.Provider]TargetProviderFactory
 
+	// defaultProvider breaks a tie for agnostic resources when the
+	// Specification states no preference (RFC 014 §2.4). It arrives as an
+	// Option rather than being read from internal/config, which sits
+	// above this package.
+	defaultProvider spec.Provider
+
 	targetCacheMu sync.Mutex
 	targetCache   map[string]provider.CloudProvider
 }
@@ -40,6 +46,13 @@ func WithDeploymentTargets(targets map[string]DeploymentTarget) Option {
 		}
 		e.targets = registry
 	}
+}
+
+// WithDefaultProvider sets the machine-wide tie-break for resources
+// declaring Provider "agnostic" (RFC 014 §2.4). Absent, an ambiguous
+// resource is refused rather than guessed at.
+func WithDefaultProvider(p spec.Provider) Option {
+	return func(e *DefaultEngine) { e.defaultProvider = p }
 }
 
 // WithTargetProviderFactory registers the TargetProviderFactory to use to
@@ -81,9 +94,6 @@ var _ Engine = (*DefaultEngine)(nil)
 func (e *DefaultEngine) resolveProvider(ctx context.Context, r spec.Resource) (provider.CloudProvider, error) {
 	if r.Account != "" {
 		return e.resolveTargetProvider(ctx, r)
-	}
-	if r.Provider == spec.ProviderAgnostic {
-		return nil, fmt.Errorf("%w: resource %q", ErrAgnosticResolutionNotImplemented, r.ID)
 	}
 	p, ok := e.providers[r.Provider]
 	if !ok {
@@ -128,6 +138,15 @@ func (e *DefaultEngine) resolveTargetProvider(ctx context.Context, r spec.Resour
 // exactly once, preserving pre-RFC-005 behavior.
 func (e *DefaultEngine) Validate(ctx context.Context, s spec.Specification) error {
 	if err := spec.Validate(&s); err != nil {
+		return err
+	}
+
+	// Bind any agnostic resource before delegating, so no CloudProvider
+	// is ever handed one (RFC 014 §2.6). The CLI resolves first and shows
+	// the user the concrete result; this call makes an Engine driven
+	// directly behave the same, and is a no-op once nothing is agnostic.
+	s, _, err := e.Resolve(ctx, s)
+	if err != nil {
 		return err
 	}
 	for _, r := range s.Resources {

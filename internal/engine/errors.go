@@ -9,10 +9,19 @@ import "errors"
 // the provider requested by a resource.
 var ErrProviderNotFound = errors.New("engine: provider not registered")
 
-// ErrAgnosticResolutionNotImplemented indicates that the resource requests
-// the "agnostic" provider but the automatic resolution policy has not
-// been implemented yet (RFC 001 §5, open question 2).
-var ErrAgnosticResolutionNotImplemented = errors.New("engine: agnostic provider resolution not implemented")
+// ErrNoCandidateProvider indicates that no registered provider accepts a
+// resource declaring Provider "agnostic" (RFC 014 §2.4). The wrapped
+// message quotes each provider's own reason, which is usually more useful
+// than any summary this package could write.
+var ErrNoCandidateProvider = errors.New("engine: no provider can deploy this resource")
+
+// ErrAmbiguousProvider indicates that several providers accept an
+// agnostic resource and nothing says which to use.
+//
+// CloudSDD refuses rather than picking. A Specification that resolved to
+// AWS in review and Azure in production would be a change of blast radius
+// nobody approved (RFC 014 §2.1).
+var ErrAmbiguousProvider = errors.New("engine: several providers could deploy this resource")
 
 // ErrDeploymentTargetNotFound indicates that Resource.Account references a
 // DeploymentTarget that is not registered in the Engine (RFC 004 §4).

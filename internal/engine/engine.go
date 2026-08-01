@@ -17,6 +17,14 @@ import (
 // (diff) computation, and apply, without knowing the details of any
 // concrete provider.
 type Engine interface {
+	// Resolve binds every resource declaring Provider "agnostic" to a
+	// concrete provider, returning a copy of the Specification in which
+	// none remain, plus a record of what was decided (RFC 014 §2.6).
+	//
+	// It is separate from Validate so the caller can show the user a
+	// concrete Specification before anything is planned or applied.
+	Resolve(ctx context.Context, s spec.Specification) (spec.Specification, []Resolution, error)
+
 	// Validate checks the Specification (domain validation) and, for each
 	// resource, delegates to the resolved provider's specific validation.
 	Validate(ctx context.Context, s spec.Specification) error

@@ -20,9 +20,9 @@ PROFILE="${1:-coverage.out}"
 
 # package:minimum
 FLOORS=(
-  "cloudsdd/cmd/cloudsdd:88"
-  "cloudsdd/internal/config:82"
-  "cloudsdd/internal/engine:93"
+  "cloudsdd/cmd/cloudsdd:93"
+  "cloudsdd/internal/config:84"
+  "cloudsdd/internal/engine:95"
   "cloudsdd/internal/nlp:96"
   "cloudsdd/internal/provider:100"
   "cloudsdd/internal/provider/compute:100"

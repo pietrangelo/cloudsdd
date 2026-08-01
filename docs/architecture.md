@@ -58,7 +58,7 @@ cloudsdd/
 ├── pkg/                     # Empty: no public type exposed yet
 ├── LICENSE                  # GNU AGPLv3 (or later), full text
 └── docs/
-    ├── rfc/001-013...        # Foundation + AWS + scoping + CLI + scheduling + compute (approved)
+    ├── rfc/001-014...        # Foundation + AWS + scoping + CLI + scheduling + compute (approved)
     ├── architecture.md        # This document
     ├── cli.md                 # CLI commands and usage guide
     ├── dependency-licenses.md # Third-party license audit vs. AGPLv3
@@ -283,10 +283,27 @@ Relevant behavior:
   `Scope.Region`, still produces exactly one `Diff`/`Result`, unchanged
   from before this RFC. This keeps multi-region logic cloud-agnostic and
   written once, rather than duplicated in every provider package.
-- If `Resource.Provider == "agnostic"` (and `Resource.Account` is empty),
-  the Engine returns `ErrAgnosticResolutionNotImplemented`: the automatic
-  provider resolution policy is an open question from RFC 001 (§5, point
-  2) and has not yet been decided or implemented.
+- **Agnostic resolution (RFC 014)**: `Resolve` binds every resource
+  declaring `provider: "agnostic"` to a concrete one before anything is
+  planned. A *candidate* is a registered provider whose `Validate` accepts
+  the resource — deliberately not a capability table, which would be a
+  second source of truth free to drift from the `switch` statements it
+  mirrors, the exact RFC 011 §1.1 failure mode. Reusing `Validate` also
+  means resolution inherits `AllowedRegions`, property decoding and the
+  zone rules for free.
+
+  Candidates are evaluated in sorted order, because `DefaultEngine.providers`
+  is a map and ranging over one is randomised: resolution that depended on
+  iteration order would send the same Specification to a different cloud on
+  different runs. One candidate resolves; several require an explicit
+  preference (`policies.provider_preference`, then the configured
+  `defaults.provider`) and are otherwise refused with
+  `ErrAmbiguousProvider`; none produces `ErrNoCandidateProvider` quoting
+  every provider's own reason.
+
+  Because the three region formats are mutually exclusive, a resource that
+  names a region usually has exactly one candidate — so in the common case
+  resolution is determined by the Specification the user already wrote.
 - Unregistered providers produce `ErrProviderNotFound`.
 - **`DeploymentTarget` (RFC 004)**: when `Resource.Account` is set, the
   Engine instead resolves a `DeploymentTarget` registered via
@@ -384,6 +401,8 @@ Measures active as of today (see also RFC 001 §3, 002 §2.4-2.5, 003
 | Image supply chain (RFC 013 §4) | AMI lookups filter on owner ID as well as name pattern; a name-only filter would let any account publishing a matching public AMI be selected |
 | Key material in the Specification | No SSH key property exists on any provider; the one key Azure's API demands is generated in-program and kept in encrypted state, and the credential-name denylist rejects a user-supplied `private_key` independently |
 | Cost control that silently does not control cost | On Azure a scheduled stop **deallocates**: a VM in the `Stopped` state still bills for compute, so the obvious verb would run correctly and save nothing (RFC 013 §2.5) |
+| Non-deterministic target cloud (RFC 014 §4) | Candidate providers are evaluated in sorted order and ties are refused rather than broken implicitly, so a Specification cannot resolve to one cloud in review and another in production |
+| Reconnaissance during a deploy | Candidacy is decided by whether a provider *constructs*, never by probing the cloud for access; CloudSDD does not sweep three providers to discover what the operator can reach |
 | Terminal escape injection via prompt text | `schedule.Describe` strips control characters from `Window.Reason`, which originates in a natural language prompt, travels through the ledger, and is printed to the operator's terminal before the confirmation gate |
 | Silent schedule degradation | A rule a provider cannot express is a `Validate` error, never a dropped rule (RFC 012 §1.3). The failure mode of a silently broken schedule is a bill rather than an alert, so it must surface while somebody is watching |
 | Unrestricted Resource Consumption | Not yet applicable at the HTTP/API level (it does not exist yet); at the provider level, a cap of 20 entries on IAM lists (RFC 003), `Scope.Regions`/`Zones` capped at 10 entries (RFC 005 §3), `schedule.exceptions` capped at 12 windows, which bounds the number of scheduling resources one Specification can provision (RFC 012 §2.2) |

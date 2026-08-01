@@ -81,10 +81,13 @@ func TestDefaultEngine_Validate(t *testing.T) {
 			wantErr:   ErrProviderNotFound,
 		},
 		{
-			name:      "agnostic provider resolution not implemented",
+			// With no provider registered there is nothing to resolve
+			// against, so an agnostic resource has no candidate rather
+			// than an unimplemented feature (RFC 014 §2.4).
+			name:      "agnostic with an empty registry has no candidate",
 			providers: map[spec.Provider]provider.CloudProvider{},
 			spec:      specWithProvider(spec.ProviderAgnostic),
-			wantErr:   ErrAgnosticResolutionNotImplemented,
+			wantErr:   ErrNoCandidateProvider,
 		},
 		{
 			name:      "invalid domain spec rejected before touching providers",

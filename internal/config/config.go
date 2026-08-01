@@ -6,6 +6,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,8 +25,37 @@ type AIConfig struct {
 	Model    string `yaml:"model"`
 }
 
+// DefaultsConfig carries machine-wide defaults applied when a
+// Specification does not state a preference of its own.
+type DefaultsConfig struct {
+	// Provider breaks a tie for resources declaring "agnostic", after
+	// the Specification's own policies.provider_preference and before
+	// CloudSDD refuses to choose (RFC 014 §2.4).
+	//
+	// Absent by default: an installation that has never said which cloud
+	// it prefers should be told to choose, not guessed at.
+	Provider string `yaml:"provider,omitempty"`
+}
+
 type Config struct {
-	AI AIConfig `yaml:"ai"`
+	AI       AIConfig       `yaml:"ai"`
+	Defaults DefaultsConfig `yaml:"defaults,omitempty"`
+}
+
+// ErrInvalidDefaultProvider indicates a defaults.provider naming
+// something that is not a concrete cloud.
+var ErrInvalidDefaultProvider = errors.New("config: defaults.provider must be one of aws, gcp, azure")
+
+// validate checks the fields that have a closed set of values. The AI
+// provider is left to the translator factory, which already rejects an
+// unknown one with a better message.
+func (c *Config) validate() error {
+	switch c.Defaults.Provider {
+	case "", "aws", "gcp", "azure":
+		return nil
+	default:
+		return fmt.Errorf("%w: got %q", ErrInvalidDefaultProvider, c.Defaults.Provider)
+	}
 }
 
 // HomeEnv overrides the directory CloudSDD keeps its local state in. It
@@ -82,6 +112,9 @@ func LoadConfig() (*Config, error) {
 	}
 
 	c.applyDefaults()
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
 	return &c, nil
 }
 

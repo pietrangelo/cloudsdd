@@ -275,7 +275,7 @@ func TestBuildEngineIsLazy(t *testing.T) {
 				}
 			}
 
-			if _, err := buildEngine(testSpec(spec.IntentDeploy, tt.providers...)); err != nil {
+			if _, _, err := buildEngine(testSpec(spec.IntentDeploy, tt.providers...), nil); err != nil {
 				t.Fatalf("buildEngine() error: %v", err)
 			}
 
@@ -311,7 +311,7 @@ func TestBuildEnginePropagatesFactoryErrors(t *testing.T) {
 		},
 	}
 
-	_, err := buildEngine(testSpec(spec.IntentDeploy))
+	_, _, err := buildEngine(testSpec(spec.IntentDeploy), nil)
 	if err == nil {
 		t.Fatal("buildEngine() error = nil, want the factory failure")
 	}
