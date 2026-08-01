@@ -72,6 +72,28 @@ physical expression of exactly that separation. `Scope.Environment`
 finally means something enforceable, and `Scope.Sealed` acquires the
 meaning its name has always implied — §2.5.
 
+**Accounts never share a network. This is an invariant, not a default.**
+A `DeploymentTarget` is a different account reached through different
+credentials (RFC 004), and its networks are built with those credentials,
+in that account, from that account's own address block (§2.4.1). There is no
+configuration that connects two accounts' networks, no shared DNS zone
+spanning them, and no CloudSDD-created route between them — including for
+`sealed: false` scopes, where §2.5's eligibility to be peered means
+*within one account only*.
+
+The reasoning is the same one RFC 004 §2.1 used to keep `DeploymentTarget`
+out of the Specification: the account boundary is the strongest one the
+cloud gives us, and a tool that quietly spans it has removed a control the
+operator was relying on without being asked. A cross-account path is a
+thing an operator builds deliberately, with peering or a transit gateway
+they own; it is not something a deployment tool should be able to create
+as a side effect of two resources sharing an `environment` label.
+
+Concretely, this means the account is the first segment of the network
+stack's name, the first input to address derivation, and a hard partition
+in the conflict check — three separate mechanisms that would each have to
+fail before two accounts could touch.
+
 ### 2.2 The network is its own stack, and the Engine sequences it
 
 The network gets a Pulumi stack of its own, named by the scope it serves:
@@ -129,7 +151,7 @@ Same shape everywhere: a private network with no path in from the
 internet, egress for patching, and room for the resource types CloudSDD
 supports.
 
-**AWS** — a VPC (`10.0.0.0/16`), private subnets in **at least two
+**AWS** — a VPC (address block per §2.4.1), private subnets in **at least two
 availability zones** (RDS refuses a subnet group with fewer), a DB subnet
 group, a NAT-less default route today, and no internet gateway unless a
 `compute_instance` in the scope asked for `public_ip`. `relational_database`
@@ -166,6 +188,86 @@ two clouds and *everyone's path* on the third. A scope-wide private
 network fixes both, and the finer-grained model needs the reference
 between resources that CloudSDD does not yet have.
 
+### 2.4.1 Address allocation, and why two scopes must never collide
+
+Every network needs an address block, and handing every scope the same
+`10.0.0.0/16` — which is what the first draft of this RFC proposed to do,
+deferring the problem — is wrong for a reason worth being precise about.
+
+While nothing is connected, overlapping ranges are harmless: two VPCs
+using `10.0.0.0/16` in different accounts, or in the same account in
+different regions, coexist perfectly well as long as no packet ever needs
+to cross between them. The damage is deferred, not avoided. The day
+somebody peers `dev` to a shared services VPC, or attaches a VPN, or
+connects two regions, overlapping ranges make the operation **impossible**
+— and the fix at that point is to rebuild the network, which means
+rebuilding everything in it. A tool that allocates addresses carelessly is
+writing a migration for its user to perform later.
+
+So allocation is deterministic and collision-free by construction:
+
+```
+network CIDR = <base block> ⊃ derive(account, environment, region)
+```
+
+- **The base block** defaults to `10.0.0.0/8` and is configurable per
+  account (§2.4.2), so an operator with an existing address plan can confine
+  CloudSDD to the part of RFC 1918 space they have set aside for it.
+- **`derive`** carves the base block into fixed-size slots — `/20` from a
+  `/8`, giving 4096 of them — and picks one by hashing the scope tuple.
+  The hash is stable across machines and releases, so the same scope
+  always yields the same range no matter who runs `cloudsdd` or when. That
+  property matters more than it looks: CloudSDD's state is a local file,
+  so two engineers deploying two environments from two laptops cannot
+  coordinate through it. Determinism is what lets them not need to.
+- **A `/20` per scope** is 4096 addresses, split into subnets per
+  availability zone with room to spare for every resource type CloudSDD
+  supports. It is deliberately not larger: slots are the scarce resource,
+  not addresses within a slot.
+
+Hashing 4096 slots is not collision-*proof*, so the derivation is paired
+with a check rather than trusted:
+
+- The Engine knows every scope in the Specification and the ledger records
+  every scope ever deployed, so before applying anything it derives the
+  range for each and **refuses to proceed if two distinct scopes in the
+  same account derive the same one**, naming both and the override that
+  resolves it.
+- Refusing is the RFC 014 stance, applied to addresses: an ambiguity the
+  system cannot resolve correctly is reported, never broken by a guess. A
+  silently overlapping VPC is the kind of defect that surfaces months
+  later, during an operation that cannot then be completed.
+
+Accounts are partitioned *before* any of this: the account is an input to
+`derive`, so two accounts' scopes are compared for collision only against
+their own account's, never against each other's. Two accounts reusing the
+same range is not a collision — it is the normal, correct outcome of
+§2.1's invariant, and flagging it would be noise.
+
+### 2.4.2 The explicit override
+
+Derivation covers the common case; it cannot cover an operator whose
+corporate address plan says "this account gets `172.20.0.0/14` and
+nothing else". So:
+
+```json
+"policies": {
+  "network": {
+    "base_cidr": "172.20.0.0/14",
+    "scopes": {
+      "prod::live::eu-central-1": "172.20.16.0/20"
+    }
+  }
+}
+```
+
+`base_cidr` confines derivation; the optional `scopes` map pins an
+individual scope, which is also the escape hatch when the collision check
+refuses. An explicit range is validated for being RFC 1918, for fitting
+inside `base_cidr`, and for not overlapping any other range in the same
+account — the same check derivation is held to, since a hand-written range
+is at least as likely to collide as a computed one.
+
 ### 2.5 `Sealed` becomes enforceable
 
 `Scope.Sealed` has defaulted to `true` since RFC 005 and been consulted by
@@ -197,20 +299,35 @@ out in §4 as such.
 
 ## 3. Impacted JSON Schema
 
-No new fields. This RFC changes what existing ones *mean*:
+Mostly a reinterpretation of existing fields:
 
 | Field | Before | After |
 |---|---|---|
-| `scope.environment` | A label used for stack naming and ledger keying | Also the network boundary: resources sharing it share a network |
+| `scope.environment` | A label used for stack naming and ledger keying | Also the network boundary: resources sharing it, *in one account*, share a network |
 | `scope.sealed` | Consulted only by `cross_account_role` | The network's isolation posture (§2.5) |
 | `scope.region` | Where the resource is created | Also which network it joins |
 
-The absence of new fields is the point: a user who never mentions
-networking gets a private network, which is what "the provider enforces
-best practice without being asked" means (CLAUDE.md).
+A user who never mentions networking gets a private, non-overlapping
+network, which is what "the provider enforces best practice without being
+asked" means (CLAUDE.md). Everything below is optional and exists for the
+operator who has an address plan to respect.
 
-`docs/openapi.yaml` gains the reinterpretation in the `Scope` schema's
-descriptions.
+One new policy object, `policies.network`:
+
+```yaml
+network:
+  base_cidr: string          # optional; RFC 1918 block, default 10.0.0.0/8
+  scopes:                    # optional; explicit per-scope pins
+    "<account>::<environment>::<region>": string
+```
+
+| Field | Validation |
+|---|---|
+| `base_cidr` | RFC 1918 (`10/8`, `172.16/12`, `192.168/16`), prefix ≤ `/20` so at least one slot fits |
+| `scopes` | Max 32 entries; each key a scope tuple in `stackNameFor` form; each value RFC 1918, inside `base_cidr`, non-overlapping with every other range in the same account |
+
+`docs/openapi.yaml` gains `NetworkPolicy` and the reinterpretation in the
+`Scope` schema's descriptions.
 
 ## 4. Security Considerations
 
@@ -223,7 +340,10 @@ descriptions.
 | A network destroyed under live resources | Teardown is gated on the ledger showing no remaining entries in the scope (§2.6) |
 | Over-broad intra-scope reachability | Accepted and documented (§2.4): scope-wide, port-limited by resource type. Finer policy needs inter-resource references and its own RFC |
 | A stale ledger stranding or orphaning a network | **New risk.** The ledger becomes load-bearing for a destroy decision, not merely for translation context. A ledger deleted by hand leaves the network stack orphaned — recoverable, since the stack still exists and is named by its scope, but it needs saying |
-| Cross-account reachability | Out of scope and unchanged: a `DeploymentTarget` is a different account, hence a different scope, hence a different network with no route to ours |
+| Cross-account reachability | **Invariant, not a default** (§2.1). Accounts never share a network: the account is a segment of the network stack's name, an input to address derivation, and a partition in the conflict check. `sealed: false` makes a scope eligible for peering *within its own account* only; no CloudSDD-created route crosses an account boundary, ever |
+| Address collision making a future connection impossible | Ranges are derived deterministically per scope from a configurable base block, and the Engine refuses to apply when two distinct scopes in one account resolve to the same range (§2.4.1). Overlapping VPCs are harmless until the day somebody peers them, at which point the only fix is rebuilding the network and everything in it |
+| Two accounts deriving the same range | Not a collision, and deliberately not flagged: it is the correct outcome of §2.1. Comparing across accounts would be noise, and silencing noise is how a real warning gets ignored |
+| An operator's existing address plan silently violated | `policies.network.base_cidr` confines derivation to the block the operator set aside; explicit per-scope pins are validated for RFC 1918, containment and non-overlap, i.e. held to the same standard as a derived range |
 
 ## 5. Testing Plan
 
@@ -251,6 +371,28 @@ descriptions.
 8. **Teardown gating**: destroying one of two resources in a scope leaves
    the network; destroying the last one removes it; a ledger with entries
    the destroy did not cover leaves it.
+9. **Address derivation is deterministic and stable**: the same scope
+   tuple yields the same range across runs, across processes, and — as a
+   golden-file test — across releases. A change to the hash silently
+   re-addresses every network that has ever been deployed, so it must
+   break a test rather than a deployment.
+10. **Distinct scopes get distinct ranges** within an account: a
+    table-driven sweep over a realistic scope matrix (several
+    environments × several regions) asserting pairwise disjointness, plus
+    a fuzz target over scope tuples asserting that every derived range
+    falls inside `base_cidr` and is correctly aligned.
+11. **Collision is refused, not resolved**: two scopes forced onto the
+    same range produce an error naming both scopes and the override,
+    and no network is created. The mirror of RFC 014's
+    `ErrAmbiguousProvider` test.
+12. **Accounts are partitioned**: two scopes in *different* accounts
+    deriving the same range apply cleanly and raise nothing. This is the
+    test that pins §2.1 — a future refactor of the conflict check that
+    started comparing across accounts would fail here rather than in
+    somebody's console.
+13. **Overrides are validated like derived ranges**: a pin outside
+    `base_cidr`, a non-RFC-1918 pin, and a pin overlapping another scope
+    in the same account are each rejected.
 
 ## 6. Rollout
 
@@ -276,12 +418,18 @@ Sequence:
 1. `EnsureNetwork` on the interface, the Engine's sequencing, and the
    stack naming — no provider builds anything yet, every implementation
    returns nil, behaviour unchanged.
-2. AWS network + moving both AWS resource types into it.
-3. GCP, including private services access — the change that makes a GCP
+2. Address derivation and the collision check, as a pure function in
+   `internal/provider/network` with no cloud in it. It lands before any
+   provider builds a VPC, because it is the one piece that is expensive to
+   change afterwards: a range that has been deployed cannot be recomputed
+   without rebuilding the network, so the algorithm must be settled and
+   golden-tested before the first VPC exists.
+3. AWS network + moving both AWS resource types into it.
+4. GCP, including private services access — the change that makes a GCP
    database reachable for the first time.
-4. Azure, collapsing RFC 015's per-resource VNets into the scope's.
-5. Teardown gating on the ledger.
-6. `cli.md`'s per-provider reachability table — currently three rows
+5. Azure, collapsing RFC 015's per-resource VNets into the scope's.
+6. Teardown gating on the ledger.
+7. `cli.md`'s per-provider reachability table — currently three rows
    explaining what you cannot connect to — becomes one sentence.
 
 ## 7. Open Questions
@@ -299,13 +447,21 @@ Sequence:
    rests on it. If it proves unusable, the fallback is for `EnsureNetwork`
    to return the network's identifiers to the Engine, which passes them to
    the provider's resource programs — more plumbing, same architecture.
-3. **Address ranges across scopes.** Every scope proposed here uses the
-   same `10.0.0.0/16`, which is fine while nothing is peered and fatal the
-   moment something is. Deriving a distinct range per scope needs an
-   allocator and some persisted state. Proposed: same range for now,
-   documented, and blocking on the peering feature rather than on this
-   RFC.
-4. **Existing deployments.** No migration path is offered: a user with a
+3. **Slot size.** §2.4.1 proposes a `/20` per scope, giving 4096 slots in
+   a `/8`. A `/16` per scope would be roomier per network and leave only
+   256 slots, which a hash would collide in far too readily; a `/24`
+   quadruples the slots but leaves 256 addresses for a multi-AZ network
+   with a NAT and endpoints. `/20` is the proposal; the number should be
+   argued with rather than inherited.
+4. **What the hash covers when a scope segment is empty.** An unscoped
+   resource — no account, no environment — is legal today and produces a
+   bare stack name. Its network's derivation therefore hashes empty
+   strings, which is deterministic and correct but means "the default
+   scope" is one particular range that every unscoped deployment on every
+   machine shares. Proposed: acceptable, since unscoped means "I have not
+   told CloudSDD where this belongs", and two such users were never going
+   to connect their networks anyway.
+5. **Existing deployments.** No migration path is offered: a user with a
    database in the default VPC must destroy and recreate it. Given no
    released version exists, proposed as acceptable — but it is the kind of
    decision that stops being acceptable exactly once.
@@ -324,6 +480,23 @@ Sequence:
 - RFC 014's candidate resolution calls `Validate` only, never
   `EnsureNetwork`: deciding which cloud can express a resource must not
   create a VPC on all three. This is worth an explicit test.
+- Address derivation belongs in a new `internal/provider/network`, pure
+  and cloud-free, alongside the CIDR arithmetic and the collision check —
+  the same shape as `internal/schedule`, which keeps every decision about
+  *time* in one testable place for exactly the same reason. Every decision
+  about *addresses* should live in one place too.
+- The hash must be a fixed algorithm, not `maphash` or anything seeded per
+  process: `sha256` of the scope tuple with a separator that cannot occur
+  in a scope segment, truncated to the slot index. `hash/fnv` would also
+  do, but the property that matters is that it is written down and
+  golden-tested, since changing it re-addresses every deployed network.
+- The tuple must be joined unambiguously before hashing. `("a", "bc")` and
+  `("ab", "c")` have to derive different ranges, so the separator is
+  `stackScopeSeparator` — already chosen in RFC 005 §2.6 for being outside
+  the `resourceid`, `scopename` and region charsets.
+- CIDR arithmetic on `net/netip` rather than `net`: `netip.Prefix` gives
+  containment and overlap checks without allocation, and the standard
+  library covers everything needed here, so no dependency.
 - AWS `aws.rds.Instance` needs `DbSubnetGroupName` and
   `VpcSecurityGroupIds`; GCP `sql.DatabaseInstance` needs
   `Settings.IpConfiguration.PrivateNetwork` plus a
