@@ -151,6 +151,56 @@ so explicitly.
 | `relational_database` | Final snapshot taken on destroy (AWS) | `skip_final_snapshot: true` |
 | `relational_database` | Not publicly reachable | — |
 | `relational_database` | Encrypted at rest, 7-day backups | — |
+| `compute_instance` | No public address | `public_ip: true` (opens no port) |
+| `compute_instance` | No inbound firewall rule at all | — |
+| `compute_instance` | Encrypted root disk | — |
+| `compute_instance` | IMDSv2 required, hop limit 1 (AWS) | — |
+| `compute_instance` | Verified boot and vTPM (GCP Shielded VM, Azure Trusted Launch) | — |
+| `compute_instance` | No SSH key; access via Session Manager, OS Login or AAD login | — |
+
+## Compute instances
+
+```
+cloudsdd deploy "a small ubuntu build agent in eu-central-1, off outside working hours"
+```
+
+```json
+{
+  "id": "build-agent",
+  "type": "compute_instance",
+  "provider": "aws",
+  "scope": { "region": "eu-central-1", "zones": ["eu-central-1a"] },
+  "properties": { "size": "small", "os": "ubuntu-22.04", "disk_size_gb": 30 }
+}
+```
+
+| Property | Values |
+|---|---|
+| `size` | `small`, `medium`, `large` — mapped per provider (`t3.small`, `e2-small`, `Standard_B1ms`, …) |
+| `os` | `ubuntu-22.04`, `ubuntu-24.04`, `debian-12` — only images that exist on all three clouds |
+| `disk_size_gb` | 8–1024, default 20 |
+| `public_ip` | default `false`; `true` attaches an address but opens no port |
+
+`scope.zones` accepts at most one entry: a VM occupies one availability zone,
+and taking the first of several would hand you infrastructure that does not
+match what you wrote.
+
+**There is no SSH key, AMI, or machine-type property.** Access goes through the
+cloud's own IAM-authenticated session service — Session Manager on AWS, OS Login
+on GCP, the AAD login extension on Azure — none of which needs an inbound port
+or a public address, and all of which leave an audit trail. Azure's API insists
+on an admin key, so one is generated during the deploy and its private half
+stays in the encrypted Pulumi state; nothing logs in with it.
+
+Two provider notes worth knowing:
+
+- On Azure, `encryption_at_host` requires the `Microsoft.Compute/EncryptionAtHost`
+  feature to be registered on the subscription. If it is not, the deploy fails
+  with an explicit error rather than quietly provisioning less protection.
+- On GCP the instance carries an explicit deny-ingress rule at priority 0. The
+  `default` network ships `default-allow-ssh`, which permits port 22 from
+  anywhere, and GCP firewall rules are allow-only — so nothing less actually
+  closes the machine.
 
 ## Policies
 
@@ -233,17 +283,20 @@ a database.
 
 | Provider | Mechanism | Exception windows |
 |---|---|---|
-| AWS | EventBridge Scheduler, universal RDS targets | Supported |
+| AWS | EventBridge Scheduler, universal RDS and EC2 targets | Supported |
 | Azure | Automation account, runbook and schedules | Supported |
-| GCP | Cloud Scheduler against the Cloud SQL Admin API | **Rejected** — a Cloud Scheduler job has no validity period |
+| GCP, `relational_database` | Cloud Scheduler against the Cloud SQL Admin API | **Rejected** — a Cloud Scheduler job has no validity period |
+| GCP, `compute_instance` | Native Compute Engine instance schedule | **Rejected** — an instance accepts one policy, with one validity interval |
 
 The GCP refusal is deliberate. Silently dropping a window would leave an
 environment running through a shutdown you believed you had scheduled, and the
 failure would reach you as an invoice rather than an error.
 
-One detail worth knowing: an `always_off` window issues a **daily** stop, not a
+Two details worth knowing. An `always_off` window issues a **daily** stop, not a
 single one, because AWS automatically restarts an RDS instance that has been
-stopped for more than seven days.
+stopped for more than seven days. And on Azure a scheduled stop **deallocates**
+the machine rather than stopping it: an Azure VM in the `Stopped` state still
+bills for compute, so the other verb would run correctly and save nothing.
 
 ## The ledger
 

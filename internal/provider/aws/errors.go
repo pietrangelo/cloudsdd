@@ -55,6 +55,16 @@ var ErrSealedCrossAccountRole = errors.New("aws: cross_account_role requires sco
 // leave in place.
 var ErrResourceNotSchedulable = errors.New("aws: resource type does not support a power schedule")
 
+// ErrUnsupportedSize indicates a compute_instance size that this provider
+// has no SKU mapping for (RFC 013 §2.1). An unmapped size is a hard error
+// rather than a fallback: silently substituting a different machine is the
+// failure mode an intent-driven system cannot tolerate.
+var ErrUnsupportedSize = errors.New("aws: unsupported compute size")
+
+// ErrUnsupportedOS indicates a compute_instance image that this provider
+// has no mapping for (RFC 013 §2.1).
+var ErrUnsupportedOS = errors.New("aws: unsupported operating system")
+
 // ErrMalformedARN indicates that an ARN the provider needed to read the
 // account or region out of does not have the expected shape (RFC 012
 // §4.1).

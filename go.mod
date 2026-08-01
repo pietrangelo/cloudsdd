@@ -14,6 +14,7 @@ require (
 	github.com/pulumi/pulumi-azure/sdk/v5 v5.89.3
 	github.com/pulumi/pulumi-gcp/sdk/v7 v7.38.0
 	github.com/pulumi/pulumi-random/sdk/v4 v4.21.1
+	github.com/pulumi/pulumi-tls/sdk/v5 v5.5.1
 	github.com/pulumi/pulumi/sdk/v3 v3.254.0
 	github.com/sashabaranov/go-openai v1.41.2
 	github.com/spf13/cobra v1.10.2

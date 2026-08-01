@@ -67,6 +67,9 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 	case customRoleToken:
 		outputs["name"] = resource.NewStringProperty(
 			"projects/" + testProjectID + "/roles/" + args.Inputs["roleId"].StringValue())
+	case resourcePolicyTokn:
+		outputs["selfLink"] = resource.NewStringProperty(
+			"https://www.googleapis.com/compute/v1/projects/" + testProjectID + "/regions/europe-west1/resourcePolicies/" + args.Name)
 	}
 	return args.Name + "-id", outputs, nil
 }

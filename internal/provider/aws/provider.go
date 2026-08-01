@@ -12,6 +12,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider"
+	"cloudsdd/internal/provider/compute"
 	"cloudsdd/internal/spec"
 )
 
@@ -99,6 +100,23 @@ func (p *AWSProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 	case spec.ResourceTypeRelationalDatabase:
 		if _, err := decodeRelationalDatabaseProperties(r.Properties); err != nil {
 			return err
+		}
+		if r.Scope.Region == "" {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrRegionRequired)
+		}
+		if err := validateAWSRegionFormat(r.Scope.Region); err != nil {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
+		}
+		return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
+
+	case spec.ResourceTypeComputeInstance:
+		if _, err := decodeComputeInstanceProperties(r.Properties); err != nil {
+			return err
+		}
+		// compute_instance is the first ResourceType to consume
+		// Scope.Zones (RFC 005 §2.4.3, RFC 013 §2.3).
+		if _, err := compute.Zone(r.Scope.Zones); err != nil {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
 		}
 		if r.Scope.Region == "" {
 			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrRegionRequired)
@@ -250,7 +268,7 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		}
 		region := r.Scope.Region
 		program := func(ctx *pulumi.Context) error {
-			opts, err := p.providerOpts(ctx, region)
+			opts, _, err := p.providerOpts(ctx, region)
 			if err != nil {
 				return err
 			}
@@ -264,6 +282,33 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		}
 		return program, region, nil
 
+	case spec.ResourceTypeComputeInstance:
+		cp, err := decodeComputeInstanceProperties(r.Properties)
+		if err != nil {
+			return nil, "", err
+		}
+		zone, err := compute.Zone(r.Scope.Zones)
+		if err != nil {
+			return nil, "", fmt.Errorf("aws: resource %q: %w", r.ID, err)
+		}
+		rules, err := resourceSchedule(r, policies)
+		if err != nil {
+			return nil, "", err
+		}
+		region := r.Scope.Region
+		program := func(ctx *pulumi.Context) error {
+			opts, invokeOpts, err := p.providerOpts(ctx, region)
+			if err != nil {
+				return err
+			}
+			instance, err := declareComputeInstance(ctx, r.ID, *cp, zone, invokeOpts, opts...)
+			if err != nil {
+				return err
+			}
+			return declareComputeSchedule(ctx, r.ID, instance, rules, opts...)
+		}
+		return program, region, nil
+
 	case spec.ResourceTypeObjectStorage:
 		s3p, err := decodeS3Properties(r.Properties)
 		if err != nil {
@@ -271,7 +316,7 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		}
 		region := r.Scope.Region
 		program := func(ctx *pulumi.Context) error {
-			opts, err := p.providerOpts(ctx, region)
+			opts, _, err := p.providerOpts(ctx, region)
 			if err != nil {
 				return err
 			}
@@ -286,7 +331,7 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		}
 		allowedRegions := policies.AllowedRegions
 		program := func(ctx *pulumi.Context) error {
-			opts, err := p.providerOpts(ctx, "")
+			opts, _, err := p.providerOpts(ctx, "")
 			if err != nil {
 				return err
 			}

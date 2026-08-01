@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/iam"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/rds"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/scheduler"
@@ -30,12 +31,13 @@ const (
 	// role when a schedule fires.
 	schedulerServicePrincipal = "scheduler.amazonaws.com"
 
-	// startDBInstanceTarget and stopDBInstanceTarget are the universal
-	// target ARNs for the two RDS operations. The empty region and
-	// account fields are part of the format: a universal target names a
-	// service API, not a resource.
+	// The universal target ARNs for the operations CloudSDD schedules.
+	// The empty region and account fields are part of the format: a
+	// universal target names a service API, not a resource.
 	startDBInstanceTarget = "arn:aws:scheduler:::aws-sdk:rds:startDBInstance"
 	stopDBInstanceTarget  = "arn:aws:scheduler:::aws-sdk:rds:stopDBInstance"
+	startInstancesTarget  = "arn:aws:scheduler:::aws-sdk:ec2:startInstances"
+	stopInstancesTarget   = "arn:aws:scheduler:::aws-sdk:ec2:stopInstances"
 
 	// defaultScheduleGroup is the schedule group new schedules land in.
 	// It appears in the ARN the trust policy constrains.
@@ -90,19 +92,101 @@ func declareDatabaseSchedule(
 	rules []schedule.Rule,
 	opts ...pulumi.ResourceOption,
 ) error {
+	// The universal target takes the RDS API's own request payload, which
+	// is why no Lambda has to exist to translate one.
+	input := instance.Identifier.ApplyT(func(identifier string) (string, error) {
+		return schedulePayload(map[string]any{"DbInstanceIdentifier": identifier})
+	}).(pulumi.StringOutput)
+
+	return declareSchedule(ctx, resourceID, scheduleTarget{
+		arn:       instance.Arn,
+		startAPI:  startDBInstanceTarget,
+		stopAPI:   stopDBInstanceTarget,
+		input:     input,
+		actions:   []string{"rds:StartDBInstance", "rds:StopDBInstance"},
+		scopedARN: instance.Arn,
+	}, rules, opts...)
+}
+
+// declareComputeSchedule registers the EventBridge schedules that power an
+// EC2 instance on and off (RFC 013 §2.5).
+func declareComputeSchedule(
+	ctx *pulumi.Context,
+	resourceID string,
+	instance *ec2.Instance,
+	rules []schedule.Rule,
+	opts ...pulumi.ResourceOption,
+) error {
+	// ec2:StartInstances and ec2:StopInstances both take a list, even for
+	// one machine.
+	input := instance.ID().ToStringOutput().ApplyT(func(id string) (string, error) {
+		return schedulePayload(map[string]any{"InstanceIds": []string{id}})
+	}).(pulumi.StringOutput)
+
+	return declareSchedule(ctx, resourceID, scheduleTarget{
+		arn:       instance.Arn,
+		startAPI:  startInstancesTarget,
+		stopAPI:   stopInstancesTarget,
+		input:     input,
+		actions:   []string{"ec2:StartInstances", "ec2:StopInstances"},
+		scopedARN: instance.Arn,
+	}, rules, opts...)
+}
+
+// scheduleTarget describes what a compiled Rule acts on, so the schedule
+// machinery — role, trust policy, permission policy, one schedule per rule
+// — is written once and each resource type contributes only the three
+// things that actually differ: which API to call, with what payload, and
+// which IAM actions that needs.
+type scheduleTarget struct {
+	// arn is any ARN of the target resource; its partition, region and
+	// account fields are what the trust policy is built from.
+	arn pulumi.StringOutput
+	// startAPI and stopAPI are the universal target ARNs.
+	startAPI, stopAPI string
+	// input is the request payload the universal target forwards.
+	input pulumi.StringOutput
+	// actions are the IAM actions the execution role is granted.
+	actions []string
+	// scopedARN is the single resource those actions are granted on.
+	scopedARN pulumi.StringOutput
+}
+
+// schedulePayload renders a universal target's request body.
+func schedulePayload(body map[string]any) (string, error) {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("aws: failed to build schedule input: %w", err)
+	}
+	return string(payload), nil
+}
+
+// declareSchedule registers the schedules for one target, plus the
+// least-privilege role they assume.
+//
+// It is declared inside the same Pulumi program as the resource, so the
+// schedules share its stack identity and the existing Destroy path tears
+// them down with no extra work.
+func declareSchedule(
+	ctx *pulumi.Context,
+	resourceID string,
+	target scheduleTarget,
+	rules []schedule.Rule,
+	opts ...pulumi.ResourceOption,
+) error {
 	if len(rules) == 0 {
 		return nil
 	}
 
 	prefix := schedulePrefix(resourceID, rules)
 
-	// The account and region are read out of the instance ARN rather than
+	// The account and region are read out of the target's ARN rather than
 	// through an aws:getCallerIdentity invoke: the schedules necessarily
-	// live in the same account and region as the instance they manage, so
+	// live in the same account and region as the resource they manage, so
 	// the ARN already carries the answer, and the program stays free of
 	// invokes that would have to be threaded through assumed-credential
 	// providers.
-	trustPolicy := instance.Arn.ApplyT(func(arn string) (string, error) {
+	trustPolicy := target.arn.ApplyT(func(arn string) (string, error) {
 		return buildSchedulerTrustPolicy(arn, prefix)
 	}).(pulumi.StringOutput)
 
@@ -114,7 +198,10 @@ func declareDatabaseSchedule(
 		return fmt.Errorf("aws: failed to declare scheduler role for resource %q: %w", resourceID, err)
 	}
 
-	permissionPolicy := instance.Arn.ApplyT(buildSchedulerPermissionPolicy).(pulumi.StringOutput)
+	actions := target.actions
+	permissionPolicy := target.scopedARN.ApplyT(func(arn string) (string, error) {
+		return buildSchedulerPermissionPolicy(arn, actions)
+	}).(pulumi.StringOutput)
 
 	if _, err := iam.NewRolePolicy(ctx, resourceID+"-scheduler-permissions", &iam.RolePolicyArgs{
 		Role:   role.ID(),
@@ -124,7 +211,7 @@ func declareDatabaseSchedule(
 	}
 
 	for _, rule := range rules {
-		if err := declareScheduleRule(ctx, prefix, rule, instance, role, opts...); err != nil {
+		if err := declareScheduleRule(ctx, prefix, rule, target, role, opts...); err != nil {
 			return err
 		}
 	}
@@ -137,7 +224,7 @@ func declareScheduleRule(
 	ctx *pulumi.Context,
 	prefix string,
 	rule schedule.Rule,
-	instance *rds.Instance,
+	target scheduleTarget,
 	role *iam.Role,
 	opts ...pulumi.ResourceOption,
 ) error {
@@ -146,19 +233,11 @@ func declareScheduleRule(
 		return err
 	}
 
-	targetARN := stopDBInstanceTarget
+	targetARN := target.stopAPI
 	if rule.Action == schedule.ActionStart {
-		targetARN = startDBInstanceTarget
+		targetARN = target.startAPI
 	}
-
-	// The universal target takes the RDS API's own request payload.
-	input := instance.Identifier.ApplyT(func(identifier string) (string, error) {
-		payload, err := json.Marshal(map[string]string{"DbInstanceIdentifier": identifier})
-		if err != nil {
-			return "", fmt.Errorf("aws: failed to build schedule input: %w", err)
-		}
-		return string(payload), nil
-	}).(pulumi.StringOutput)
+	input := target.input
 
 	args := &scheduler.ScheduleArgs{
 		Name:                       pulumi.String(prefix + rule.Name),
@@ -292,16 +371,16 @@ func buildSchedulerTrustPolicy(instanceARN, namePrefix string) (string, error) {
 }
 
 // buildSchedulerPermissionPolicy builds the inline policy the schedules
-// act through: two actions, one resource, no wildcards. A scheduling
-// feature that provisioned a broadly-privileged role would be a worse
-// trade than the money it saves.
-func buildSchedulerPermissionPolicy(instanceARN string) (string, error) {
+// act through: the target's two actions, one resource, no wildcards. A
+// scheduling feature that provisioned a broadly-privileged role would be
+// a worse trade than the money it saves.
+func buildSchedulerPermissionPolicy(resourceARN string, actions []string) (string, error) {
 	doc := iamPolicyDocument{
 		Version: "2012-10-17",
 		Statement: []iamStatement{{
 			Effect:   "Allow",
-			Action:   []string{"rds:StartDBInstance", "rds:StopDBInstance"},
-			Resource: []string{instanceARN},
+			Action:   actions,
+			Resource: []string{resourceARN},
 		}},
 	}
 

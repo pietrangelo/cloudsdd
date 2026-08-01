@@ -130,10 +130,13 @@ func TestAWSProvider_Validate(t *testing.T) {
 			wantErr: ErrZonesNotSupported,
 		},
 		{
+			// container_service is still advertised by the schema and
+			// implemented by nobody (RFC 013 §7.3). compute_instance used
+			// to sit here and is now supported.
 			name: "unsupported resource type",
 			resource: spec.Resource{
-				ID: "vm", Type: spec.ResourceTypeComputeInstance, Provider: spec.ProviderAWS,
-				Properties: map[string]any{"ami": "ami-123"},
+				ID: "api", Type: spec.ResourceTypeContainerService, Provider: spec.ProviderAWS,
+				Properties: map[string]any{"image": "nginx"},
 			},
 			wantErr: ErrUnsupportedResourceType,
 		},
@@ -210,8 +213,8 @@ func TestAWSProvider_resourceProgram(t *testing.T) {
 
 	t.Run("unsupported resource type", func(t *testing.T) {
 		_, _, err := p.resourceProgram(spec.Resource{
-			ID: "vm", Type: spec.ResourceTypeComputeInstance, Provider: spec.ProviderAWS,
-			Properties: map[string]any{"ami": "ami-123"},
+			ID: "api", Type: spec.ResourceTypeContainerService, Provider: spec.ProviderAWS,
+			Properties: map[string]any{"image": "nginx"},
 		}, spec.Policies{})
 		if !errors.Is(err, ErrUnsupportedResourceType) {
 			t.Fatalf("error = %v, want errors.Is ErrUnsupportedResourceType", err)

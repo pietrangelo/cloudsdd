@@ -116,6 +116,38 @@ components:
             otherwise specified"). A resource type that is inherently
             cross-boundary (e.g. cross_account_role) must set this
             explicitly to false.
+    ComputeInstanceProperties:
+      description: >
+        Properties of a Resource with type=compute_instance, on any
+        provider (RFC 013 §2.1). Cloud-agnostic by design: the size and
+        image are abstract, and each provider maps them onto its own SKU
+        and marketplace image. There is deliberately no SSH key, AMI, or
+        machine-type property.
+      type: object
+      additionalProperties: false
+      required: [size, os]
+      properties:
+        size:
+          type: string
+          enum: [small, medium, large]
+        os:
+          type: string
+          enum: [ubuntu-22.04, ubuntu-24.04, debian-12]
+          description: >
+            Only images that exist on all three clouds. Provider-specific
+            images are excluded so this field's validity never depends on
+            `provider`.
+        disk_size_gb:
+          type: integer
+          minimum: 8
+          maximum: 1024
+          default: 20
+        public_ip:
+          type: boolean
+          default: false
+          description: >
+            Attaches a public address. Opens no inbound port: the instance
+            ships with a default-deny firewall either way.
     S3ObjectStorageProperties:
       description: >
         Properties of a Resource with type=object_storage, provider=aws

@@ -113,8 +113,11 @@ func TestValidate(t *testing.T) {
 			wantErr:  "property validation failed",
 		},
 		{
+			// container_service remains advertised by the schema and
+			// implemented by nobody (RFC 013 §7.3); compute_instance used
+			// to stand in here and is now supported.
 			name:     "unsupported resource type",
-			resource: bucketResource(func(r *spec.Resource) { r.Type = spec.ResourceTypeComputeInstance }),
+			resource: bucketResource(func(r *spec.Resource) { r.Type = spec.ResourceTypeContainerService }),
 			wantErr:  "unsupported resource type",
 		},
 	}

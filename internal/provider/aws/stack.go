@@ -81,9 +81,13 @@ func (p *AWSProvider) setRegionConfig(ctx context.Context, stack auto.Stack, reg
 // credential chain (RFC 002 §2.4), or an explicit Pulumi provider with
 // the assumed credentials when p.creds is set (RFC 004 §4, a resource
 // applied against a DeploymentTarget).
-func (p *AWSProvider) providerOpts(ctx *pulumi.Context, region string) ([]pulumi.ResourceOption, error) {
+// It returns both flavours of option from a single provider instance:
+// resource options for the declarations, and invoke options for the AMI
+// lookup in RFC 013 §2.1. Building the provider twice would register two
+// resources under the same Pulumi name.
+func (p *AWSProvider) providerOpts(ctx *pulumi.Context, region string) ([]pulumi.ResourceOption, []pulumi.InvokeOption, error) {
 	if p.creds == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	args := &pulumiaws.ProviderArgs{
@@ -97,9 +101,10 @@ func (p *AWSProvider) providerOpts(ctx *pulumi.Context, region string) ([]pulumi
 
 	explicit, err := pulumiaws.NewProvider(ctx, "target", args)
 	if err != nil {
-		return nil, fmt.Errorf("aws: failed to build explicit provider for assumed credentials: %w", err)
+		return nil, nil, fmt.Errorf("aws: failed to build explicit provider for assumed credentials: %w", err)
 	}
-	return []pulumi.ResourceOption{pulumi.Provider(explicit)}, nil
+	return []pulumi.ResourceOption{pulumi.Provider(explicit)},
+		[]pulumi.InvokeOption{pulumi.Provider(explicit)}, nil
 }
 
 // The three helpers below moved to internal/provider/pulumiutil (RFC 011

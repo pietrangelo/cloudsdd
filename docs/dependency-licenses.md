@@ -122,6 +122,22 @@ github.com/emirpasic/gods, github.com/magiconair/properties, github.com/pkg/erro
 ### ISC (1)
 github.com/davecgh/go-spew.
 
+## Amendments
+
+### RFC 013 — `pulumi/pulumi-tls`
+
+`compute_instance` on Azure needs `github.com/pulumi/pulumi-tls/sdk/v5`,
+because `LinuxVirtualMachine` rejects a configuration with neither an admin
+SSH key nor password authentication. Rather than accept a password or ask
+for a key in the Specification, CloudSDD generates an ed25519 key pair in
+the Pulumi program and leaves its private half in the passphrase-encrypted
+state (RFC 013 §2.4).
+
+The module is **Apache-2.0**, verified against the `LICENSE` file in the
+published module, and therefore falls under the existing Apache-2.0 verdict
+above: one-way compatible with AGPLv3. No new licence class enters the
+graph.
+
 ## Adding new dependencies
 
 Before adding a new module to `go.mod`, check its license with:

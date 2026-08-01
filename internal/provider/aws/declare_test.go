@@ -60,11 +60,23 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 		outputs["identifier"] = resource.NewStringProperty(args.Name)
 	case iamRoleToken:
 		outputs["arn"] = resource.NewStringProperty("arn:aws:iam::" + testAccountID + ":role/" + args.Name)
+	case ec2InstanceToken:
+		outputs["arn"] = resource.NewStringProperty(testEC2ARN)
 	}
 	return args.Name + "-id", outputs, nil
 }
 
+// Call answers the provider's invokes. The AMI lookup of RFC 013 §2.1 is
+// the only one; it returns a fixed ID and echoes the filters back so a
+// test can assert what was actually asked for.
 func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	if args.Token == getAmiToken {
+		m.rec.add(recordedResource{Type: args.Token, Name: getAmiToken, Inputs: args.Args})
+		return resource.PropertyMap{
+			"id":   resource.NewStringProperty(testAMI),
+			"name": resource.NewStringProperty("resolved-image"),
+		}, nil
+	}
 	return resource.PropertyMap{}, nil
 }
 

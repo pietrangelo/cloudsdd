@@ -100,6 +100,27 @@ func buildTrustPolicy(p CrossAccountRoleProperties) (string, error) {
 	return string(b), nil
 }
 
+// buildServiceTrustPolicy builds an AssumeRolePolicyDocument for an AWS
+// service principal, used by the roles CloudSDD attaches to resources it
+// creates (RFC 013 §2.4). Unlike buildTrustPolicy above, there is no
+// external account and so no ExternalId: the principal is a service in
+// this same account.
+func buildServiceTrustPolicy(service string) (string, error) {
+	doc := iamPolicyDocument{
+		Version: "2012-10-17",
+		Statement: []iamStatement{{
+			Effect:    "Allow",
+			Principal: &iamPrincipal{Service: service},
+			Action:    []string{"sts:AssumeRole"},
+		}},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return "", fmt.Errorf("aws: failed to build service trust policy: %w", err)
+	}
+	return string(b), nil
+}
+
 // buildPermissionPolicy builds the inline policy attached to the role:
 // Permissions on ResourceARNs, with an aws:RequestedRegion constraint if
 // allowedRegions is non-empty (RFC 003 §2.3, which translates the "same

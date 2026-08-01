@@ -67,16 +67,29 @@ func resourceSchedule(r spec.Resource, policies spec.Policies) ([]schedule.Rule,
 		return nil, fmt.Errorf("gcp: resource %q: %w", r.ID, err)
 	}
 
-	// A Cloud Scheduler job has no start or expiry date, so an exception
-	// window cannot be expressed. Reporting that here is the whole point:
-	// silently dropping the window would leave an environment running
-	// through a shutdown the user believed they had scheduled.
+	// Neither scheduling mechanism on GCP can bound a rule to a date
+	// range, so an exception window cannot be expressed. Reporting that
+	// here is the whole point: silently dropping the window would leave an
+	// environment running through a shutdown the user believed they had
+	// scheduled.
 	for _, rule := range rules {
 		if rule.Bounded() {
-			return nil, fmt.Errorf("gcp: resource %q: %w", r.ID, ErrScheduleExceptionsUnsupported)
+			return nil, fmt.Errorf("gcp: resource %q: %w: %s; remove schedule.exceptions or deploy this resource on AWS or Azure",
+				r.ID, ErrScheduleExceptionsUnsupported, exceptionLimitReason(r.Type))
 		}
 	}
 	return rules, nil
+}
+
+// exceptionLimitReason explains why a resource type cannot carry exception
+// windows on GCP. The two reasons are genuinely different, and an error
+// that named the wrong one would send the reader looking in the wrong
+// place (RFC 013 §2.5).
+func exceptionLimitReason(t spec.ResourceType) string {
+	if t == spec.ResourceTypeComputeInstance {
+		return "an instance accepts one schedule policy, with a single validity interval"
+	}
+	return "a Cloud Scheduler job has no validity period"
 }
 
 // declareDatabaseSchedule registers the Cloud Scheduler jobs that power a

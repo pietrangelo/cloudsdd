@@ -30,7 +30,7 @@ import (
 // target are passed as runbook parameters, never as script text.
 const powerRunbook = `param(
     [Parameter(Mandatory = $true)][string] $resourceid,
-    [Parameter(Mandatory = $true)][ValidateSet('start', 'stop')][string] $action,
+    [Parameter(Mandatory = $true)][ValidateSet('start', 'stop', 'deallocate')][string] $action,
     [Parameter(Mandatory = $true)][string] $apiversion
 )
 
@@ -51,8 +51,9 @@ if ($response.StatusCode -ge 400) {
 // than tracking "latest": a schedule that silently starts calling a new
 // API version is a schedule that can silently stop working.
 const (
-	postgresAPIVersion = "2022-12-01"
-	mysqlAPIVersion    = "2023-06-30"
+	postgresAPIVersion       = "2022-12-01"
+	mysqlAPIVersion          = "2023-06-30"
+	virtualMachineAPIVersion = "2023-09-01"
 )
 
 const (
@@ -128,6 +129,45 @@ func (s databaseServer) powerActions() ([]string, error) {
 	}, nil
 }
 
+// powerTarget describes an ARM resource a schedule powers on and off, so
+// the Automation machinery is written once and each resource type
+// contributes only what actually differs: which API version to call, which
+// RBAC actions that needs, and which verb stops it.
+type powerTarget struct {
+	id            pulumi.IDOutput
+	resourceGroup *core.ResourceGroup
+	apiVersion    string
+	actions       []string
+
+	// stopAction is the ARM verb a schedule's stop rule invokes.
+	//
+	// It is a field rather than the constant "stop" because on a virtual
+	// machine `stop` leaves the VM allocated and **still billing for
+	// compute**; only `deallocate` releases the hardware. A scheduling
+	// feature whose whole purpose is cost reduction, wired to the wrong
+	// verb, would run correctly and save nothing (RFC 013 §2.5).
+	stopAction string
+}
+
+// powerTarget describes the Flexible Server for the scheduler.
+func (s databaseServer) powerTarget() (powerTarget, error) {
+	apiVersion, err := s.apiVersion()
+	if err != nil {
+		return powerTarget{}, err
+	}
+	actions, err := s.powerActions()
+	if err != nil {
+		return powerTarget{}, err
+	}
+	return powerTarget{
+		id:            s.id,
+		resourceGroup: s.resourceGroup,
+		apiVersion:    apiVersion,
+		actions:       actions,
+		stopAction:    "stop",
+	}, nil
+}
+
 // declareDatabaseSchedule registers the Automation Account, runbook, role
 // and schedules that power a Flexible Server on and off.
 func declareDatabaseSchedule(
@@ -139,15 +179,27 @@ func declareDatabaseSchedule(
 	if len(rules) == 0 {
 		return nil
 	}
+	target, err := server.powerTarget()
+	if err != nil {
+		return err
+	}
+	return declarePowerSchedule(ctx, resourceID, target, rules)
+}
 
-	apiVersion, err := server.apiVersion()
-	if err != nil {
-		return err
+// declarePowerSchedule registers the Automation Account, runbook, role and
+// schedules that power an ARM resource on and off.
+func declarePowerSchedule(
+	ctx *pulumi.Context,
+	resourceID string,
+	server powerTarget,
+	rules []schedule.Rule,
+) error {
+	if len(rules) == 0 {
+		return nil
 	}
-	actions, err := server.powerActions()
-	if err != nil {
-		return err
-	}
+
+	apiVersion := server.apiVersion
+	actions := server.actions
 
 	account, err := automation.NewAccount(ctx, resourceID+"-automation", &automation.AccountArgs{
 		ResourceGroupName: server.resourceGroup.Name,
@@ -220,7 +272,7 @@ func declareScheduleRule(
 	resourceID string,
 	rule schedule.Rule,
 	now time.Time,
-	server databaseServer,
+	server powerTarget,
 	account *automation.Account,
 	runbook *automation.RunBook,
 	apiVersion string,
@@ -272,7 +324,7 @@ func declareScheduleRule(
 		ScheduleName:          sched.Name,
 		Parameters: pulumi.StringMap{
 			"resourceid": server.id.ToStringOutput(),
-			"action":     pulumi.String(rule.Action),
+			"action":     pulumi.String(armAction(rule.Action, server.stopAction)),
 			"apiversion": pulumi.String(apiVersion),
 		},
 	}); err != nil {
@@ -338,4 +390,13 @@ func weekDayNames(days []schedule.Weekday) []string {
 		out = append(out, wd.String())
 	}
 	return out
+}
+
+// armAction maps a compiled rule's action onto the ARM verb for this
+// target. Start is universally "start"; stop is not (see powerTarget).
+func armAction(action schedule.Action, stopAction string) string {
+	if action == schedule.ActionStart {
+		return "start"
+	}
+	return stopAction
 }

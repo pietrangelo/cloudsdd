@@ -58,7 +58,7 @@ cloudsdd/
 ├── pkg/                     # Empty: no public type exposed yet
 ├── LICENSE                  # GNU AGPLv3 (or later), full text
 └── docs/
-    ├── rfc/001-012...        # Foundation + AWS + scoping + CLI + scheduling (approved)
+    ├── rfc/001-013...        # Foundation + AWS + scoping + CLI + scheduling + compute (approved)
     ├── architecture.md        # This document
     ├── cli.md                 # CLI commands and usage guide
     ├── dependency-licenses.md # Third-party license audit vs. AGPLv3
@@ -138,6 +138,25 @@ Two compilation decisions are worth recording:
 The compiler is covered by a native fuzz target (`FuzzCompile`) over the
 time, date, and mode strings, on the same reasoning as `spec`'s
 `FuzzParse`.
+
+### `internal/provider/compute`
+
+Holds the cloud-agnostic shape of a `compute_instance` — `size`, `os`,
+`disk_size_gb`, `public_ip` — and the single-zone placement rule (RFC 013
+§2.1, §2.3).
+
+The struct is shared rather than redeclared per provider for the reason
+RFC 011 §1.1H recorded: three copies of a schema drift, and a drifted
+schema means a Specification that is valid on one cloud and silently
+different on another. Each provider still decodes it through its own
+`decode.Decoder`, so error prefixes and provider-specific validator tags
+stay where they belong. What is deliberately *not* shared is the mapping
+onto SKUs and images, which is per-provider by nature.
+
+`compute_instance` is also the first ResourceType to consume
+`Scope.Zones`, which RFC 005 §2.4.3 introduced with no consumer. A VM
+occupies exactly one zone, so more than one entry is an error rather than
+a silent pick of the first.
 
 ## Package `internal/provider`
 
@@ -284,6 +303,33 @@ Relevant behavior:
   itself stays cloud-agnostic and knows nothing about STS/AssumeRole) and
   cached for the rest of the Engine's lifetime.
 
+### Compute instances (RFC 013)
+
+The security posture is the point of this resource type: every other type
+in the schema is a managed service, whereas a VM runs arbitrary code with
+an attached identity.
+
+- **AWS**: IMDSv2 required with a hop limit of 1 — the control that turns
+  an application SSRF from a credential compromise into a failed request —
+  an encrypted root volume, a security group with *no ingress rules at
+  all*, and an instance profile carrying only
+  `AmazonSSMManagedInstanceCore` so an operator can open an audited shell
+  without the workload gaining anything. The AMI lookup filters on owner ID
+  as well as name; filtering on a name pattern alone would let any account
+  publishing a matching public AMI be selected. It is the provider's only
+  Pulumi invoke, unavoidable because AMI IDs are region-specific.
+- **GCP**: Shielded VM (secure boot, vTPM, integrity monitoring), OS Login
+  with project SSH keys blocked, serial console off, and no service account
+  attached at all — the default compute identity would be a standing
+  credential. The explicit deny-ingress rule at priority 0 is load-bearing:
+  the `default` network ships `default-allow-ssh` and GCP firewall rules
+  are allow-only, so nothing weaker actually closes the machine.
+- **Azure**: Trusted Launch, encryption at host, a VNet/subnet/NSG of its
+  own since Azure has no default network, and a generated ed25519 key pair
+  whose private half never leaves the encrypted Pulumi state. The key
+  exists only because the API rejects a Linux VM without one; access goes
+  through the AAD login extension.
+
 ### Scheduling on GCP and Azure (RFC 012 §4.2, §4.3)
 
 `internal/provider/gcp` uses a Cloud Scheduler job calling the Cloud SQL
@@ -334,6 +380,10 @@ Measures active as of today (see also RFC 001 §3, 002 §2.4-2.5, 003
 | BOLA | Not yet applicable: no multi-tenant storage/state layer exists yet (note: the stack-per-scope design in RFC 002 §2.3 / RFC 005 §2.6 has no tenant namespacing, open question) |
 | Scheduling privilege escalation (RFC 012 §7) | The identity a power schedule acts through is scoped to one resource and two or three actions on every provider: AWS start/stop on one instance ARN, GCP a two-permission custom role, Azure a role scoped to the single server. A scheduling feature that provisioned a broadly-privileged role would be a worse trade than the money it saves |
 | Confused deputy (AWS scheduler service principal) | `aws:SourceAccount` and `ArnLike` `aws:SourceArn` conditions on the execution role's trust policy (RFC 012 §4.1) |
+| SSRF to credential theft (RFC 013 §2.2) | IMDSv2 required on every EC2 instance, with `httpPutResponseHopLimit = 1` so a container on the host cannot reach the metadata service either |
+| Image supply chain (RFC 013 §4) | AMI lookups filter on owner ID as well as name pattern; a name-only filter would let any account publishing a matching public AMI be selected |
+| Key material in the Specification | No SSH key property exists on any provider; the one key Azure's API demands is generated in-program and kept in encrypted state, and the credential-name denylist rejects a user-supplied `private_key` independently |
+| Cost control that silently does not control cost | On Azure a scheduled stop **deallocates**: a VM in the `Stopped` state still bills for compute, so the obvious verb would run correctly and save nothing (RFC 013 §2.5) |
 | Terminal escape injection via prompt text | `schedule.Describe` strips control characters from `Window.Reason`, which originates in a natural language prompt, travels through the ledger, and is printed to the operator's terminal before the confirmation gate |
 | Silent schedule degradation | A rule a provider cannot express is a `Validate` error, never a dropped rule (RFC 012 §1.3). The failure mode of a silently broken schedule is a bill rather than an alert, so it must surface while somebody is watching |
 | Unrestricted Resource Consumption | Not yet applicable at the HTTP/API level (it does not exist yet); at the provider level, a cap of 20 entries on IAM lists (RFC 003), `Scope.Regions`/`Zones` capped at 10 entries (RFC 005 §3), `schedule.exceptions` capped at 12 windows, which bounds the number of scheduling resources one Specification can provision (RFC 012 §2.2) |

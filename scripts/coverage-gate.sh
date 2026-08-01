@@ -25,6 +25,7 @@ FLOORS=(
   "cloudsdd/internal/engine:93"
   "cloudsdd/internal/nlp:96"
   "cloudsdd/internal/provider:100"
+  "cloudsdd/internal/provider/compute:100"
   "cloudsdd/internal/provider/decode:95"
   "cloudsdd/internal/provider/pulumiutil:100"
   "cloudsdd/internal/schedule:96"
@@ -32,8 +33,8 @@ FLOORS=(
   "cloudsdd/internal/state:85"
   # Pulumi-bound: see the note above.
   "cloudsdd/internal/provider/aws:65"
-  "cloudsdd/internal/provider/azure:68"
-  "cloudsdd/internal/provider/gcp:67"
+  "cloudsdd/internal/provider/azure:71"
+  "cloudsdd/internal/provider/gcp:70"
 )
 
 if [[ ! -f "$PROFILE" ]]; then

@@ -16,6 +16,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider"
+	"cloudsdd/internal/provider/compute"
 	"cloudsdd/internal/provider/pulumiutil"
 	"cloudsdd/internal/spec"
 )
@@ -80,6 +81,15 @@ func (p *GCPProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 	case spec.ResourceTypeRelationalDatabase:
 		if _, err := decodeRelationalDatabaseProperties(r.Properties); err != nil {
 			return err
+		}
+	case spec.ResourceTypeComputeInstance:
+		if _, err := decodeComputeInstanceProperties(r.Properties); err != nil {
+			return err
+		}
+		// The first ResourceType to consume Scope.Zones (RFC 005 §2.4.3,
+		// RFC 013 §2.3).
+		if _, err := compute.Zone(r.Scope.Zones); err != nil {
+			return fmt.Errorf("gcp: resource %q: %w", r.ID, err)
 		}
 	default:
 		return fmt.Errorf("gcp: resource %q: unsupported resource type: %q", r.ID, r.Type)
@@ -159,6 +169,24 @@ func (p *GCPProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 			// The power schedule shares the instance's stack, so the
 			// existing Destroy path removes both (RFC 012 §4.2).
 			return declareDatabaseSchedule(ctx, r.ID, region, instance, rules)
+		}, region, nil
+
+	case spec.ResourceTypeComputeInstance:
+		props, err := decodeComputeInstanceProperties(r.Properties)
+		if err != nil {
+			return nil, "", err
+		}
+		zone, err := compute.Zone(r.Scope.Zones)
+		if err != nil {
+			return nil, "", fmt.Errorf("gcp: resource %q: %w", r.ID, err)
+		}
+		rules, err := resourceSchedule(r, policies)
+		if err != nil {
+			return nil, "", err
+		}
+		return func(ctx *pulumi.Context) error {
+			_, err := declareComputeInstance(ctx, r.ID, region, zone, *props, rules)
+			return err
 		}, region, nil
 
 	default:

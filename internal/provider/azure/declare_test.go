@@ -68,6 +68,12 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 	if args.TypeToken == runbookToken || args.TypeToken == automationScheduleToken {
 		outputs["name"] = args.Inputs["name"]
 	}
+	// The generated host key of RFC 013 §2.4: the VM reads back the
+	// public half, so without it the declaration sees an unknown.
+	if args.TypeToken == privateKeyToken {
+		outputs["publicKeyOpenssh"] = resource.NewStringProperty("ssh-ed25519 AAAAC3Nz test")
+		outputs["privateKeyOpenssh"] = resource.NewStringProperty("-----BEGIN OPENSSH PRIVATE KEY-----")
+	}
 	return args.Name + "-id", outputs, nil
 }
 

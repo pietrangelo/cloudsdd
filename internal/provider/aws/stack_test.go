@@ -144,12 +144,15 @@ func TestProviderOpts(t *testing.T) {
 	t.Run("nil creds means no explicit provider (default credential chain)", func(t *testing.T) {
 		p := &AWSProvider{}
 		err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-			opts, err := p.providerOpts(ctx, "eu-central-1")
+			opts, invokeOpts, err := p.providerOpts(ctx, "eu-central-1")
 			if err != nil {
 				return err
 			}
 			if opts != nil {
 				t.Errorf("expected nil opts for default credential chain, got %v", opts)
+			}
+			if invokeOpts != nil {
+				t.Errorf("expected nil invoke opts for default credential chain, got %v", invokeOpts)
 			}
 			return nil
 		}, pulumi.WithMocks("cloudsdd-test", "test-stack", providerOptsMocks{}))
@@ -165,12 +168,17 @@ func TestProviderOpts(t *testing.T) {
 			SessionToken:    "token",
 		}}
 		err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-			opts, err := p.providerOpts(ctx, "eu-central-1")
+			opts, invokeOpts, err := p.providerOpts(ctx, "eu-central-1")
 			if err != nil {
 				return err
 			}
 			if len(opts) != 1 {
 				t.Errorf("expected exactly one ResourceOption for assumed credentials, got %d", len(opts))
+			}
+			// Both flavours come from one provider instance: building it
+			// twice would register two resources under the same name.
+			if len(invokeOpts) != 1 {
+				t.Errorf("expected exactly one InvokeOption for assumed credentials, got %d", len(invokeOpts))
 			}
 			return nil
 		}, pulumi.WithMocks("cloudsdd-test", "test-stack", providerOptsMocks{}))

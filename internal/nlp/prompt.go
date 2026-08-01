@@ -33,7 +33,8 @@ The JSON schema must exactly match this structure:
       "account": "", // optional target account name
       "scope": {
         "environment": "dev", // optional
-        "region": "eu-central-1" // optional (or "regions": ["eu-central-1", ...] for multi-region)
+        "region": "eu-central-1", // optional (or "regions": ["eu-central-1", ...] for multi-region)
+        "zones": ["eu-central-1a"] // optional; compute_instance accepts at most one
       },
       "schedule": { }, // optional, see "Power scheduling" below
       "properties": { }
@@ -66,6 +67,18 @@ Properties by resource type:
     deletion_protection(bool, optional, default true; AWS and GCP)
     skip_final_snapshot(bool, optional, default false; AWS only)
 
+- compute_instance (all providers):
+    size               (string, required, one of: "small", "medium", "large")
+    os                 (string, required, one of: "ubuntu-22.04", "ubuntu-24.04",
+                        "debian-12". These are the images available on every
+                        provider; do not invent others.)
+    disk_size_gb       (int, optional, default 20, between 8 and 1024)
+    public_ip          (bool, optional, default false)
+  There is NO property for an SSH key, an AMI, or a provider-specific machine
+  type: the size and image are cloud-agnostic, and interactive access goes
+  through the provider's own session service. A VM occupies one availability
+  zone, so scope.zones may hold at most one entry.
+
 - cross_account_role (AWS only):
     enabled            (bool)
     trusted_account_id (string)
@@ -94,8 +107,8 @@ exactly {"enabled": true} and nothing else. NEVER invent "start", "stop",
 "timezone", "days", or a date range. The CLI asks the user for what is
 missing. Inventing a stop time causes an outage.
 
-Only "relational_database" can be scheduled today. Object storage and IAM
-roles have no power state.
+Only "relational_database" and "compute_instance" can be scheduled. Object
+storage and IAM roles have no power state.
 
 Examples:
 - "keep it up during the release weekend, 12 to 14 September" ->
