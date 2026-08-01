@@ -272,7 +272,14 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 			if err != nil {
 				return err
 			}
-			instance, err := declareRelationalDatabase(ctx, r.ID, *dbp, opts...)
+			// The scope's network was provisioned by the Engine before
+			// this program runs (RFC 016 §2.2), so it is looked up
+			// rather than created here.
+			net, err := lookupScopeNetwork(ctx, r)
+			if err != nil {
+				return err
+			}
+			instance, err := declareRelationalDatabase(ctx, r.ID, *dbp, net, opts...)
 			if err != nil {
 				return err
 			}
@@ -301,7 +308,11 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 			if err != nil {
 				return err
 			}
-			instance, err := declareComputeInstance(ctx, r.ID, *cp, zone, invokeOpts, opts...)
+			net, err := lookupScopeNetwork(ctx, r)
+			if err != nil {
+				return err
+			}
+			instance, err := declareComputeInstance(ctx, r.ID, *cp, zone, net, invokeOpts, opts...)
 			if err != nil {
 				return err
 			}

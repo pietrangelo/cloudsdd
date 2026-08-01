@@ -139,13 +139,13 @@ connect from:
 
 | Provider | Mechanism | What can reach it |
 |---|---|---|
-| AWS | `publicly_accessible: false` | Anything in the account's default VPC |
+| AWS | A VPC of CloudSDD's own, one per environment and region, with a security group admitting only the engine's port from that VPC | Anything in the same environment — and nothing in another one |
 | Azure | VNet integration: delegated subnet + private DNS zone | Anything in the database's own VNet, which today contains only the database |
 | GCP | Private IP only (`ipv4_enabled: false`) | Nothing yet — a private IP needs a VPC with private services access, which CloudSDD does not model |
 
-This is what RFC 016 exists to fix, and it is **in progress**: the address
-plan and the engine sequencing are implemented, but no provider builds a
-shared network yet, so the table above is still the current behaviour.
+This is what RFC 016 exists to fix, and it is **in progress**: AWS is
+done, GCP and Azure are not, so the last two rows above are still the
+current behaviour there.
 Until the remaining steps land, treat these databases as
 provisioned-and-private rather than connected, and know that Azure at
 least gives you a VNet to peer or attach to.

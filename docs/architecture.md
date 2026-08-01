@@ -61,7 +61,7 @@ cloudsdd/
 │   ├── spec/                 # Specification types, strict parsing, domain validation
 │   ├── state/                # Local ledger of deployed resources, fed back to the translator (RFC 009)
 │   ├── provider/             # CloudProvider interface, Diff/Result types, AllowedRegions helper
-│   │   ├── aws/              # AWS implementation (RFC 002/003/004/007/012/013)
+│   │   ├── aws/              # AWS implementation (RFC 002/003/004/007/012/013/016)
 │   │   ├── gcp/              # GCP implementation (RFC 008/012/013)
 │   │   ├── azure/            # Azure implementation (RFC 008/012/013)
 │   │   ├── compute/          # Cloud-agnostic compute_instance shape, shared by all three (RFC 013)
@@ -254,9 +254,9 @@ reported. Accounts never share a network (RFC 016 §2.1), so there is
 nothing to collide; a warning that fires on correct behaviour is how real
 warnings come to be ignored.
 
-**Status: derivation and checking are implemented and wired into the
-Engine. No provider builds a network yet** — `EnsureNetwork` returns nil
-on all three, per RFC 016 §6's staged rollout.
+**Status: implemented on AWS** (RFC 016 §6 steps 1-3). GCP and Azure
+still return nil from `EnsureNetwork`, so their resources go where they
+went before; steps 4-6 are outstanding.
 
 ### `internal/provider/compute`
 
@@ -310,6 +310,30 @@ the machine, but invokes it itself).
   `cross_account_role` when `AllowedRegions` is empty (RFC 003 §2.3: IAM
   is global on AWS, so the region constraint translates into an
   `aws:RequestedRegion` `Condition` on the generated policy).
+- **The scope network (RFC 016 §2.3)**: `EnsureNetwork` upserts a stack
+  named for the scope alone — `stackNameFor(account, environment, region, "")`
+  — declaring a VPC at the derived range, private subnets in two
+  availability zones (RDS refuses a subnet group with fewer), and the DB
+  subnet group. No internet gateway and no NAT: nothing in it has a route
+  out, which is deliberate while a database and a Session-Manager-reached
+  VM are the only occupants, and is the question RFC 016 §7.1 leaves for
+  RFC 017.
+
+  Resource programs find that network by **tag**, not through a Pulumi
+  `StackReference` as RFC 016 §2.2 originally proposed. A StackReference
+  couples a resource stack to another stack's *name inside the state
+  backend*, and CloudSDD's backend is a local directory a user can move,
+  share or lose independently of the cloud; a tag lives in the account
+  next to the thing it describes. `relational_database` and
+  `compute_instance` both look up `ManagedBy=cloudsdd` plus their scope,
+  and a miss is an error naming the scope rather than a silent fall back
+  to the default VPC — falling back is the behaviour this RFC exists to
+  remove. The DB subnet group's physical name is derived from the scope on
+  both sides, so the two stacks agree without talking to each other.
+
+  `relational_database` gains a security group admitting only the engine's
+  port from the VPC's own range, replacing a posture where "private" meant
+  "reachable by everything else in the account".
 - **Scope enforcement (RFC 005 §2.5)**: `object_storage` requires
   `Scope.Region` (`ErrRegionRequired` if absent) and rejects `Scope.Zones`
   (`ErrZonesNotSupported`: no zone-aware HA logic exists yet).
@@ -631,16 +655,14 @@ artifact it archives.
 
 Not yet implemented:
 
-- **The network model, partially.** RFC 016 is approved and its first two
-  steps are implemented: `EnsureNetwork` is on the `CloudProvider`
-  interface, the Engine sequences it once per scope before applying
-  anything in that scope, and `internal/provider/network` derives and
-  conflict-checks every scope's address range. **No provider builds a
-  network yet**, so today's reachability is unchanged: "private by
-  default" still means *no configured path* on GCP and Azure, and the
-  account's default VPC on AWS. Steps 3-6 — the AWS, GCP and Azure
-  networks, and teardown gating on the ledger — are what make a CloudSDD
-  database reachable, and they are not done.
+- **The network model, on GCP and Azure.** RFC 016 steps 1-3 are done:
+  the address plan, the Engine's sequencing, and the AWS network, so an
+  AWS database now sits in a VPC of CloudSDD's own with a security group
+  admitting only its environment. **GCP and Azure still return nil from
+  `EnsureNetwork`**, so a GCP database still has no network path at all
+  and an Azure one is still alone in a VNet of its own. Steps 4-6 — GCP's
+  private services access, collapsing Azure's per-resource VNets, and
+  gating network teardown on the ledger — are outstanding.
 - **`container_service`.** Approved as RFC 017 and blocked on RFC 016
   finishing: it needs egress to pull an image and an ingress that is
   deliberate rather than inherited. It remains the one `ResourceType` in

@@ -77,6 +77,37 @@ func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error
 			"name": resource.NewStringProperty("resolved-image"),
 		}, nil
 	}
+	// The scope-network discovery a resource program makes (RFC 016
+	// §2.2): find the VPC by tag, then its private subnets.
+	if args.Token == getVpcToken {
+		m.rec.add(recordedResource{Type: args.Token, Name: getVpcToken, Inputs: args.Args})
+		return resource.PropertyMap{
+			"id":        resource.NewStringProperty("vpc-0123456789"),
+			"cidrBlock": resource.NewStringProperty("10.42.0.0/20"),
+		}, nil
+	}
+	if args.Token == getSubnetsToken {
+		m.rec.add(recordedResource{Type: args.Token, Name: getSubnetsToken, Inputs: args.Args})
+		return resource.PropertyMap{
+			"ids": resource.NewArrayProperty([]resource.PropertyValue{
+				resource.NewStringProperty("subnet-aaa"),
+				resource.NewStringProperty("subnet-bbb"),
+			}),
+		}, nil
+	}
+	// The availability zone lookup the network program makes (RFC 016).
+	// Three zones, so a test can tell "took the first two" apart from
+	// "took all of them".
+	if args.Token == getAvailabilityZonesToken {
+		m.rec.add(recordedResource{Type: args.Token, Name: getAvailabilityZonesToken, Inputs: args.Args})
+		return resource.PropertyMap{
+			"names": resource.NewArrayProperty([]resource.PropertyValue{
+				resource.NewStringProperty("eu-central-1a"),
+				resource.NewStringProperty("eu-central-1b"),
+				resource.NewStringProperty("eu-central-1c"),
+			}),
+		}, nil
+	}
 	return resource.PropertyMap{}, nil
 }
 
@@ -128,7 +159,7 @@ func TestDeclareRelationalDatabaseSecureDefaults(t *testing.T) {
 	props := relationalDatabaseProperties{Engine: "postgres", Version: "15"}
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareRelationalDatabase(ctx, "app-db", props)
+		_, err := declareRelationalDatabase(ctx, "app-db", props, testNetwork())
 		return err
 	})
 	instance := findResource(t, recorded, rdsInstanceToken)
@@ -173,7 +204,7 @@ func TestDeclareRelationalDatabaseExplicitDisposability(t *testing.T) {
 	}
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareRelationalDatabase(ctx, "app-db", props)
+		_, err := declareRelationalDatabase(ctx, "app-db", props, testNetwork())
 		return err
 	})
 	instance := findResource(t, recorded, rdsInstanceToken)
@@ -222,7 +253,7 @@ func TestDeclareRelationalDatabaseHonoursEngineAndHA(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorded := runProgram(t, func(ctx *pulumi.Context) error {
-				_, err := declareRelationalDatabase(ctx, "app-db", tt.props)
+				_, err := declareRelationalDatabase(ctx, "app-db", tt.props, testNetwork())
 				return err
 			})
 			instance := findResource(t, recorded, rdsInstanceToken)
@@ -244,7 +275,7 @@ func TestDeclareRelationalDatabaseGeneratesAPassword(t *testing.T) {
 	props := relationalDatabaseProperties{Engine: "postgres", Version: "15"}
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareRelationalDatabase(ctx, "app-db", props)
+		_, err := declareRelationalDatabase(ctx, "app-db", props, testNetwork())
 		return err
 	})
 
@@ -316,5 +347,17 @@ func TestDeclareS3BucketHonoursExplicitOverrides(t *testing.T) {
 	status := versioning.Inputs["versioningConfiguration"].ObjectValue()["status"].StringValue()
 	if status != "Enabled" {
 		t.Errorf("versioning status = %q, want Enabled", status)
+	}
+}
+
+// testNetwork is the scope network a declaration test places its
+// resources in. It stands in for what lookupScopeNetwork returns after
+// the Engine has provisioned the scope (RFC 016 §2.2).
+func testNetwork() scopeNetwork {
+	return scopeNetwork{
+		vpcID:        "vpc-test",
+		cidr:         "10.42.0.0/20",
+		subnetIDs:    []string{"subnet-a", "subnet-b"},
+		dbSubnetName: "cloudsdd-dev-eu-central-1",
 	}
 }

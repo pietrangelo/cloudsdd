@@ -85,6 +85,7 @@ func declareComputeInstance(
 	id string,
 	p compute.Properties,
 	zone string,
+	net scopeNetwork,
 	invokeOpts []pulumi.InvokeOption,
 	opts ...pulumi.ResourceOption,
 ) (*ec2.Instance, error) {
@@ -107,6 +108,7 @@ func declareComputeInstance(
 	// requires VPC interface endpoints, which needs a VPC this schema does
 	// not yet model.
 	sg, err := ec2.NewSecurityGroup(ctx, id+"-sg", &ec2.SecurityGroupArgs{
+		VpcId:       pulumi.String(net.vpcID),
 		Description: pulumi.String(fmt.Sprintf("CloudSDD %s: no inbound access", id)),
 		Egress: ec2.SecurityGroupEgressArray{
 			ec2.SecurityGroupEgressArgs{
@@ -127,8 +129,11 @@ func declareComputeInstance(
 	}
 
 	args := &ec2.InstanceArgs{
-		Ami:                 pulumi.String(ami),
-		InstanceType:        pulumi.String(instanceType),
+		Ami:          pulumi.String(ami),
+		InstanceType: pulumi.String(instanceType),
+		// A private subnet in the scope's own VPC, not whatever the
+		// account's default VPC would have supplied (RFC 016).
+		SubnetId:            pulumi.String(net.subnet(zone)),
 		VpcSecurityGroupIds: pulumi.StringArray{sg.ID()},
 		IamInstanceProfile:  profile.Name,
 		// Set explicitly rather than inherited from the subnet's

@@ -30,7 +30,7 @@ const (
 func declareVM(t *testing.T, p compute.Properties, zone string) []recordedResource {
 	t.Helper()
 	return runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareComputeInstance(ctx, "build-agent", p, zone, nil)
+		_, err := declareComputeInstance(ctx, "build-agent", p, zone, testNetwork(), nil)
 		return err
 	})
 }
@@ -242,7 +242,7 @@ func TestComputeScheduleTargetsTheInstance(t *testing.T) {
 	}
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		instance, err := declareComputeInstance(ctx, "build-agent", defaultVMProperties(), "", nil)
+		instance, err := declareComputeInstance(ctx, "build-agent", defaultVMProperties(), "", testNetwork(), nil)
 		if err != nil {
 			return err
 		}
@@ -322,7 +322,7 @@ func TestDeclareComputeInstanceRefusesUnmappedValues(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var declareErr error
 			_ = runProgram(t, func(ctx *pulumi.Context) error {
-				_, declareErr = declareComputeInstance(ctx, "build-agent", tt.props, "", nil)
+				_, declareErr = declareComputeInstance(ctx, "build-agent", tt.props, "", testNetwork(), nil)
 				return nil
 			})
 			if !errors.Is(declareErr, tt.wantErr) {

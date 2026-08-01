@@ -105,7 +105,9 @@ prod::live::eu-central-1              # network stack, new
 
 The name is what `stackNameFor` already produces for an empty
 `Resource.ID` — the network is the scope itself rather than something in
-it. Resource programs read its outputs through a Pulumi `StackReference`.
+it. Resource programs discover it by **tag**, not through a Pulumi
+`StackReference`: see §7.2, which records why the mechanism this section
+originally proposed was replaced during implementation.
 
 Ordering is the hard part, and it belongs to the Engine rather than to the
 providers. `CloudProvider` gains one method:
@@ -441,12 +443,31 @@ Sequence:
    whose other headline feature is switching things off at night.
    Proposed: no NAT initially, revisited by RFC 017, which is the RFC that
    genuinely needs it.
-2. **`StackReference` against the DIY file backend.** Pulumi supports it,
-   with stack names unqualified by org/project. This needs verifying
-   against the pinned SDK before implementation, since the whole design
-   rests on it. If it proves unusable, the fallback is for `EnsureNetwork`
-   to return the network's identifiers to the Engine, which passes them to
-   the provider's resource programs — more plumbing, same architecture.
+2. ~~**`StackReference` against the DIY file backend.**~~ **Settled during
+   step 3, and not the way this section expected.** Neither `StackReference`
+   nor the fallback was used: resource programs find their network by
+   **tag** (`ManagedBy=cloudsdd`, `CloudSDDScope=<scope>`) through the
+   provider's own lookup — `ec2.LookupVpc` and `ec2.GetSubnets` on AWS.
+
+   The reason is not that `StackReference` was proven unusable; it could
+   not be proven either way, because verifying it needs the `pulumi` CLI
+   against a real backend and an unverified assumption whose failure
+   surfaces only on a user's first real deploy is the wrong thing to build
+   on. The reason is that a `StackReference` couples a resource stack to
+   the *state backend* — to another stack's name, in a local directory a
+   user can move, share, or lose independently of the cloud. A tag lives
+   in the account, next to the thing it describes, and answers the same
+   question from whichever machine happens to be asking.
+
+   It also keeps §2.2's interface honest: `EnsureNetwork` still returns
+   only an error, so no cloud-specific identifier has to travel through
+   the cloud-agnostic Engine, which is what the fallback would have
+   required.
+
+   The cost is one extra invoke per resource program and a naming
+   contract — the tag keys, and the derived DB subnet group name — that
+   both halves must agree on. That agreement is tested from both
+   directions rather than assumed.
 3. **Slot size.** §2.4.1 proposes a `/20` per scope, giving 4096 slots in
    a `/8`. A `/16` per scope would be roomier per network and leave only
    256 slots, which a hash would collide in far too readily; a `/24`

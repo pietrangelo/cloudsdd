@@ -46,7 +46,7 @@ func declareScheduledDatabase(t *testing.T, sch *schedule.Schedule) []recordedRe
 
 	return runProgram(t, func(ctx *pulumi.Context) error {
 		instance, err := declareRelationalDatabase(ctx, "app-db",
-			relationalDatabaseProperties{Engine: "postgres", Version: "15"})
+			relationalDatabaseProperties{Engine: "postgres", Version: "15"}, testNetwork())
 		if err != nil {
 			return err
 		}
@@ -253,7 +253,7 @@ func TestDeclareDatabaseScheduleBoundsWindowRules(t *testing.T) {
 func TestDeclareDatabaseScheduleDeclaresNothingWhenUnscheduled(t *testing.T) {
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
 		instance, err := declareRelationalDatabase(ctx, "app-db",
-			relationalDatabaseProperties{Engine: "postgres", Version: "15"})
+			relationalDatabaseProperties{Engine: "postgres", Version: "15"}, testNetwork())
 		if err != nil {
 			return err
 		}

@@ -4,6 +4,9 @@
 package aws
 
 import (
+	"fmt"
+
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/rds"
 	"github.com/pulumi/pulumi-random/sdk/v4/go/random"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -61,7 +64,7 @@ func decodeRelationalDatabaseProperties(props map[string]any) (*relationalDataba
 // declareRelationalDatabase registers the RDS instance and returns it, so
 // that resources referring to it — the power schedules of RFC 012 §4.1 —
 // can be declared against its ARN and identifier.
-func declareRelationalDatabase(ctx *pulumi.Context, id string, p relationalDatabaseProperties, opts ...pulumi.ResourceOption) (*rds.Instance, error) {
+func declareRelationalDatabase(ctx *pulumi.Context, id string, p relationalDatabaseProperties, net scopeNetwork, opts ...pulumi.ResourceOption) (*rds.Instance, error) {
 	// 1. Generate a secure random password for the master user.
 	pwd, err := random.NewRandomPassword(ctx, id+"-pwd", &random.RandomPasswordArgs{
 		Length:  pulumi.Int(32),
@@ -77,7 +80,35 @@ func declareRelationalDatabase(ctx *pulumi.Context, id string, p relationalDatab
 		instanceClass = "db.t3.small" // HA generally requires non-micro
 	}
 
+	// 2a. A security group admitting the engine's port from the scope's
+	// own range, and from nothing else.
+	//
+	// Before RFC 016 the instance had no security group of its own and
+	// lived in the account's default VPC, which meant "private" was
+	// "reachable by everything else in the account". Scoping ingress to
+	// the VPC's CIDR is what makes an application in this environment able
+	// to connect while an application in another one cannot.
+	sg, err := ec2.NewSecurityGroup(ctx, id+"-sg", &ec2.SecurityGroupArgs{
+		VpcId:       pulumi.String(net.vpcID),
+		Description: pulumi.String(fmt.Sprintf("CloudSDD %s: database access from this environment only", id)),
+		Ingress: ec2.SecurityGroupIngressArray{
+			ec2.SecurityGroupIngressArgs{
+				Protocol:   pulumi.String("tcp"),
+				FromPort:   pulumi.Int(enginePort(p.Engine)),
+				ToPort:     pulumi.Int(enginePort(p.Engine)),
+				CidrBlocks: pulumi.StringArray{pulumi.String(net.cidr)},
+			},
+		},
+	}, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("aws: failed to declare the security group for %q: %w", id, err)
+	}
+
 	args := &rds.InstanceArgs{
+		// The scope's network, not the account's default VPC (RFC 016).
+		DbSubnetGroupName:   pulumi.String(net.dbSubnetName),
+		VpcSecurityGroupIds: pulumi.StringArray{sg.ID()},
+
 		Engine:                           pulumi.String(p.Engine),
 		EngineVersion:                    pulumi.String(p.Version),
 		InstanceClass:                    pulumi.String(instanceClass),
@@ -102,4 +133,21 @@ func declareRelationalDatabase(ctx *pulumi.Context, id string, p relationalDatab
 	}
 
 	return rds.NewInstance(ctx, id, args, opts...)
+}
+
+// enginePort is the port a database engine listens on.
+//
+// A table rather than opening the whole range: the security group admits
+// exactly the port the engine uses, so a second service accidentally
+// started inside the same VPC is not reachable through the database's
+// rule.
+func enginePort(engine string) int {
+	switch engine {
+	case "postgres":
+		return 5432
+	default:
+		// mysql and mariadb both speak the MySQL protocol on 3306, and
+		// the validator tag admits no other engine.
+		return 3306
+	}
 }
