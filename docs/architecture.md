@@ -479,8 +479,15 @@ the machine, but invokes it itself).
   it, and RFC 016 §7.1's cost argument is unchanged.
 - **Power scheduling (RFC 012 §4.1)**: EventBridge Scheduler with
   *universal targets* — `arn:aws:scheduler:::aws-sdk:rds:{start,stop}DBInstance`
-  for a database, `…:aws-sdk:ec2:{start,stop}Instances` for a VM (RFC 013)
-  — so a schedule is pure configuration. The obvious alternative, a Lambda
+  for a database, `…:aws-sdk:ec2:{start,stop}Instances` for a VM (RFC 013),
+  and `…:aws-sdk:ecs:updateService` for a container service (RFC 017 §2.5)
+  — so a schedule is pure configuration.
+
+  The container service is the one target whose two rules call the **same
+  API**: it has no power state, only a replica count, so "off" is a desired
+  count of zero rather than a stopped task. `scheduleTarget` therefore
+  carries a payload per action rather than one shared payload — "off" is
+  not always the absence of an argument. The obvious alternative, a Lambda
   calling the RDS API, would mean shipping, versioning and patching a code
   artifact for something that changes no logic. The schedules are declared
   inside the same Pulumi program as the instance, so they share its stack
@@ -558,6 +565,15 @@ The service joins the scope's own subnet through direct VPC egress with
 database just as well and lets internet-bound traffic leave from Google's
 shared pool; routing everything through the scope's Cloud NAT is what
 makes the scope leave from one address an account-level control can see.
+
+*A power schedule does not apply here* (RFC 017 §2.5). Cloud Run bills per
+request and idles to zero between them, so there is no running state to
+switch off and no saving left to deliver. An explicit schedule on a Cloud
+Run service is refused (`ErrCloudRunNotSchedulable`); one inherited from
+`policies.schedule` is accepted, declares nothing, and is reported in the
+plan as inapplicable. §2.5 originally proposed setting max instances to
+zero — step 2 found Cloud Run reads a zero ceiling as *unset* and applies
+its own default, which would uncap the service rather than stop it.
 
 *A `domain` is optional here and required on AWS*, which is worth stating
 rather than papering over (RFC 017 §2.3.1). Cloud Run serves the service on
@@ -658,6 +674,15 @@ the two engine subnets. Declared with the network rather than with the
 first container service, for the reason the engine subnets already are:
 the network is built before the resources in it and cannot know what the
 scope will hold.
+
+*A power schedule uses the app's own `start` and `stop` actions.* RFC 017
+§2.5 proposed setting min and max replicas to zero, which would need a
+PATCH with a body — and the RFC 012 §4.3 runbook deliberately cannot do
+that, because it POSTs an action and interpolates nothing from the
+Specification into script text. Container Apps offers `start` and `stop`
+verbs of its own, so the schedule reuses the machinery the databases
+already have: a stopped app runs no replicas and bills for none, with no
+`deallocate` distinction to get wrong.
 
 The identity is **user-assigned** rather than system-assigned, with no role
 assignments, so the absence of permissions is a property of a resource a
@@ -914,13 +939,13 @@ artifact it archives.
 
 Not yet implemented:
 
-- **Power-schedule composition for `container_service`** (RFC 017 step 5).
-  `ResourceType.SupportsSchedule()` returns true for the type and the
-  Engine compiles a schedule for it, but no provider translates that into
-  a replica change yet, so a scheduled container service runs regardless.
-  Steps 1 to 4 have landed: **all three providers implement the type**, so
-  as of RFC 017 step 4 no `ResourceType` in the schema is advertised and
-  unimplemented — the first time that has been true.
+- **The system prompt and the last documentation pass** (RFC 017 step 6).
+  `internal/nlp/prompt.go` lists `container_service` as a valid type but
+  describes none of its properties, so the translator has to guess at
+  `image`, `port` and the rest. Steps 1 to 5 have landed: all three
+  providers implement the type and compose with RFC 012, so no
+  `ResourceType` in the schema is advertised and unimplemented — the first
+  time that has been true.
 - References/dependencies between resources in the same Specification —
   which is also why `Destroy` walks the resource list in reverse rather
   than in dependency order.

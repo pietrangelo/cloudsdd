@@ -18,6 +18,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider/container"
+	"cloudsdd/internal/schedule"
 	"cloudsdd/internal/spec"
 )
 
@@ -167,6 +168,7 @@ func declareContainerService(
 	r spec.Resource,
 	net scopeNetwork,
 	p container.Properties,
+	rules []schedule.Rule,
 	opts ...pulumi.ResourceOption,
 ) (*ecs.Service, error) {
 	id := r.ID
@@ -225,6 +227,13 @@ func declareContainerService(
 	}, append(opts, pulumi.DependsOn([]pulumi.Resource{balancer}))...)
 	if err != nil {
 		return nil, fmt.Errorf("aws: failed to declare the container service %q: %w", id, err)
+	}
+
+	// The schedule shares the service's Pulumi program, and so its stack,
+	// which is what makes the existing Destroy path tear both down
+	// (RFC 012 §4.1).
+	if err := declareContainerSchedule(ctx, id, cluster, service, p.EffectiveReplicas(), rules, opts...); err != nil {
+		return nil, err
 	}
 	return service, nil
 }

@@ -14,6 +14,7 @@ import (
 
 	"cloudsdd/internal/provider"
 	"cloudsdd/internal/provider/container"
+	"cloudsdd/internal/schedule"
 	"cloudsdd/internal/spec"
 )
 
@@ -22,7 +23,6 @@ const (
 	containerEnvToken     = "azure:containerapp/environment:Environment"
 	customDomainToken     = "azure:containerapp/customDomain:CustomDomain"
 	userAssignedIDToken   = "azure:authorization/userAssignedIdentity:UserAssignedIdentity"
-	roleAssignmentToken   = "azure:authorization/assignment:Assignment"
 	dnsCNameRecordToken   = "azure:dns/cNameRecord:CNameRecord"
 	dnsTxtRecordToken     = "azure:dns/txtRecord:TxtRecord"
 	containerAppsSubnetID = "/subscriptions/sub-id/resourceGroups/rg/providers/" +
@@ -79,7 +79,7 @@ func declaredContainer(t *testing.T, mutate func(map[string]any)) []recordedReso
 	net := scopeNetwork{subnetID: containerAppsSubnetID, addressSpace: "10.42.3.0/24"}
 
 	return runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareContainerService(ctx, "api", "westeurope", containerTestScope(), net, *props)
+		_, err := declareContainerService(ctx, "api", "westeurope", containerTestScope(), net, *props, nil)
 		return err
 	})
 }
@@ -153,7 +153,7 @@ func TestDeclareContainerServiceIdentityHasNothingAssigned(t *testing.T) {
 	if !hasResource(recorded, userAssignedIDToken) {
 		t.Fatal("no user-assigned identity; the app would run as whatever Azure attaches")
 	}
-	if hasResource(recorded, roleAssignmentToken) {
+	if hasResource(recorded, assignmentToken) {
 		t.Error("a role assignment was declared; the service identity must carry none")
 	}
 
@@ -446,5 +446,99 @@ func TestValidateContainerServiceRejectsZones(t *testing.T) {
 
 	if err := p.Validate(context.Background(), r, spec.Policies{}); !errors.Is(err, ErrZonesNotSupported) {
 		t.Fatalf("Validate() = %v, want ErrZonesNotSupported", err)
+	}
+}
+
+// declaredScheduledContainer runs a program declaring a container service
+// and its power schedule.
+func declaredScheduledContainer(t *testing.T) []recordedResource {
+	t.Helper()
+
+	rules, err := schedule.Compile(workWeekSchedule())
+	if err != nil {
+		t.Fatalf("Compile() = %v", err)
+	}
+	props, err := decodeContainerServiceProperties(containerProps(nil), nil)
+	if err != nil {
+		t.Fatalf("decodeContainerServiceProperties() = %v", err)
+	}
+	net := scopeNetwork{subnetID: containerAppsSubnetID, addressSpace: "10.42.3.0/24"}
+
+	return runProgram(t, func(ctx *pulumi.Context) error {
+		_, err := declareContainerService(ctx, "api", "westeurope", containerTestScope(), net, *props, rules)
+		return err
+	})
+}
+
+// TestDeclareContainerSchedule covers RFC 017 §2.5 on Azure.
+//
+// §2.5 proposed expressing "off" as min and max replicas both zero, which
+// would have needed a PATCH with a body — something the runbook
+// deliberately cannot do, since it POSTs an action and interpolates
+// nothing from the Specification. Container Apps has `start` and `stop`
+// actions of its own, so the same mechanism the databases use expresses
+// the same intent.
+func TestDeclareContainerSchedule(t *testing.T) {
+	recorded := declaredScheduledContainer(t)
+
+	schedules := resourcesOfType(recorded, automationScheduleToken)
+	if len(schedules) != 2 {
+		t.Fatalf("declared %d schedules, want 2 (one start, one stop)", len(schedules))
+	}
+	if n := len(resourcesOfType(recorded, jobScheduleToken)); n != 2 {
+		t.Errorf("declared %d job schedules, want one per schedule — an unbound schedule runs nothing", n)
+	}
+
+	// The action reaches the runbook as a parameter, never as script text
+	// (RFC 012 §4.3). Both verbs must appear, or the app is powered one
+	// way and never the other.
+	actions := map[string]bool{}
+	for _, js := range resourcesOfType(recorded, jobScheduleToken) {
+		params := js.Inputs["parameters"].ObjectValue()
+		actions[params["action"].StringValue()] = true
+		if got := params["apiversion"].StringValue(); got != containerAppAPIVersion {
+			t.Errorf("api version = %q, want the pinned %q", got, containerAppAPIVersion)
+		}
+	}
+	for _, want := range []string{"start", "stop"} {
+		if !actions[want] {
+			t.Errorf("no schedule invokes %q; got %v", want, actions)
+		}
+	}
+
+	// The role the schedule acts through may power this one app and do
+	// nothing else (RFC 012 §7).
+	role := findResource(t, recorded, roleDefinitionToken)
+	permissions := role.Inputs["permissions"].ArrayValue()
+	if len(permissions) != 1 {
+		t.Fatalf("role has %d permission blocks, want 1", len(permissions))
+	}
+	granted := map[string]bool{}
+	for _, a := range permissions[0].ObjectValue()["actions"].ArrayValue() {
+		granted[a.StringValue()] = true
+	}
+	for _, want := range []string{
+		"Microsoft.App/containerApps/read",
+		"Microsoft.App/containerApps/start/action",
+		"Microsoft.App/containerApps/stop/action",
+	} {
+		if !granted[want] {
+			t.Errorf("role does not grant %q; got %v", want, granted)
+		}
+	}
+	if granted["*"] {
+		t.Error("the schedule role grants *, want the three container app actions")
+	}
+}
+
+// TestDeclareContainerServiceWithoutScheduleDeclaresNoScheduleResources:
+// an unscheduled service carries no automation machinery at all.
+func TestDeclareContainerServiceWithoutScheduleDeclaresNoScheduleResources(t *testing.T) {
+	recorded := declaredContainer(t, nil)
+
+	for _, token := range []string{automationAccountToken, automationScheduleToken, runbookToken} {
+		if hasResource(recorded, token) {
+			t.Errorf("%s was declared for an unscheduled service", token)
+		}
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider/container"
+	"cloudsdd/internal/schedule"
 	"cloudsdd/internal/spec"
 )
 
@@ -71,7 +72,7 @@ func declaredContainer(t *testing.T, mutate func(map[string]any)) []recordedReso
 		t.Fatalf("decodeContainerServiceProperties() = %v", err)
 	}
 	return runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareContainerService(ctx, containerResource(nil), testNetwork(), *props)
+		_, err := declareContainerService(ctx, containerResource(nil), testNetwork(), *props, nil)
 		return err
 	})
 }
@@ -572,7 +573,7 @@ func TestDeclareContainerServiceRefusesANetworkWithoutAPublicTier(t *testing.T) 
 	net.publicSubnetIDs = []string{"subnet-pub-a"} // one zone, not two
 
 	err = pulumi.RunErr(func(ctx *pulumi.Context) error {
-		_, err := declareContainerService(ctx, containerResource(nil), net, *props)
+		_, err := declareContainerService(ctx, containerResource(nil), net, *props, nil)
 		return err
 	}, pulumi.WithMocks("cloudsdd-aws", "test", mockMonitor{rec: &recorder{}}))
 
@@ -605,5 +606,121 @@ func TestValidateContainerServiceRejectsZones(t *testing.T) {
 
 	if err := p.Validate(context.Background(), r, spec.Policies{}); !errors.Is(err, ErrZonesNotSupported) {
 		t.Fatalf("Validate() = %v, want ErrZonesNotSupported", err)
+	}
+}
+
+// declaredScheduledContainer runs a program declaring a container service
+// and its power schedule.
+func declaredScheduledContainer(t *testing.T, replicas int) []recordedResource {
+	t.Helper()
+
+	rules, err := schedule.Compile(workWeekSchedule())
+	if err != nil {
+		t.Fatalf("Compile() = %v", err)
+	}
+	props, err := decodeContainerServiceProperties(containerProps(func(p map[string]any) {
+		p["replicas"] = replicas
+	}), nil)
+	if err != nil {
+		t.Fatalf("decodeContainerServiceProperties() = %v", err)
+	}
+
+	return runProgram(t, func(ctx *pulumi.Context) error {
+		_, err := declareContainerService(ctx, containerResource(nil), testNetwork(), *props, rules)
+		return err
+	})
+}
+
+// TestDeclareContainerSchedule covers RFC 017 §2.5 on AWS: "off" is zero
+// replicas, not a stopped task.
+//
+// A container service has no power state, so unlike a database or a VM
+// both rules call the same API — ecs:UpdateService — and differ only in
+// the desired count they send. That is the assertion worth having: a
+// schedule that called a start/stop API here would be calling one that
+// does not exist for this resource type.
+func TestDeclareContainerSchedule(t *testing.T) {
+	recorded := declaredScheduledContainer(t, 3)
+
+	schedules := resourcesOfType(recorded, scheduleToken)
+	if len(schedules) != 2 {
+		t.Fatalf("declared %d schedules, want 2 (one start, one stop)", len(schedules))
+	}
+
+	counts := map[float64]bool{}
+	for _, s := range schedules {
+		target := s.Inputs["target"].ObjectValue()
+		if got := target["arn"].StringValue(); got != updateServiceTarget {
+			t.Errorf("schedule target = %q, want %q — ECS has no start/stop API", got, updateServiceTarget)
+		}
+
+		var payload struct {
+			Cluster      string
+			Service      string
+			DesiredCount float64
+		}
+		if err := json.Unmarshal([]byte(target["input"].StringValue()), &payload); err != nil {
+			t.Fatalf("schedule input is not valid JSON: %v", err)
+		}
+		if payload.Service == "" || payload.Cluster == "" {
+			t.Errorf("schedule input names no service or cluster: %+v", payload)
+		}
+		counts[payload.DesiredCount] = true
+	}
+
+	// One rule restores the requested replicas, the other takes them to
+	// zero. Both sending the same count would be a schedule that runs and
+	// changes nothing.
+	if !counts[3] {
+		t.Errorf("no schedule restores the requested 3 replicas; got counts %v", counts)
+	}
+	if !counts[0] {
+		t.Errorf("no schedule scales to zero; got counts %v", counts)
+	}
+}
+
+// TestDeclareContainerScheduleGrantsOnlyUpdateService: the schedule's role
+// may scale this one service and do nothing else.
+func TestDeclareContainerScheduleGrantsOnlyUpdateService(t *testing.T) {
+	recorded := declaredScheduledContainer(t, 1)
+
+	policies := resourcesOfType(recorded, iamRolePolicyToken)
+	if len(policies) != 1 {
+		t.Fatalf("declared %d role policies, want 1", len(policies))
+	}
+
+	var document struct {
+		Statement []struct {
+			Action   []string
+			Resource []string
+		}
+	}
+	if err := json.Unmarshal([]byte(policies[0].Inputs["policy"].StringValue()), &document); err != nil {
+		t.Fatalf("permission policy is not valid JSON: %v", err)
+	}
+	if len(document.Statement) != 1 {
+		t.Fatalf("permission policy has %d statements, want 1", len(document.Statement))
+	}
+	if got := document.Statement[0].Action; len(got) != 1 || got[0] != "ecs:UpdateService" {
+		t.Errorf("granted actions = %v, want exactly [ecs:UpdateService]", got)
+	}
+	for _, arn := range document.Statement[0].Resource {
+		if arn == "*" {
+			t.Error("the schedule role is granted on *, want the one service")
+		}
+		if !strings.Contains(arn, ":service/") {
+			t.Errorf("granted on %q, want the container service's own ARN", arn)
+		}
+	}
+}
+
+// TestDeclareContainerServiceWithoutScheduleDeclaresNoScheduleResources:
+// an unscheduled service must carry no scheduling machinery at all, not
+// a disabled one.
+func TestDeclareContainerServiceWithoutScheduleDeclaresNoScheduleResources(t *testing.T) {
+	recorded := declaredContainer(t, nil)
+
+	if hasResource(recorded, scheduleToken) {
+		t.Error("a schedule was declared for an unscheduled service")
 	}
 }

@@ -36,10 +36,8 @@ const (
 //
 // This is a property of the type, not of the cloud: an object store cannot
 // be switched off on any provider, and an IAM role costs nothing to leave
-// in place. compute_instance has since been implemented on all three
-// providers (RFC 013); container_service is still declared by the schema
-// and implemented by none, and stays listed here so that the day a
-// provider implements it, scheduling is not silently rejected.
+// in place. Where a *particular cloud* cannot honour a schedule for a type
+// that otherwise supports one, that is SupportsScheduleOn's business.
 func (t ResourceType) SupportsSchedule() bool {
 	switch t {
 	case ResourceTypeRelationalDatabase, ResourceTypeComputeInstance, ResourceTypeContainerService:
@@ -47,6 +45,32 @@ func (t ResourceType) SupportsSchedule() bool {
 	default:
 		return false
 	}
+}
+
+// SupportsScheduleOn narrows SupportsSchedule to one cloud (RFC 017 §2.5).
+//
+// There is exactly one exception today, and it is not an implementation
+// gap. **Cloud Run** bills per request and idles to zero between them, so
+// there is no running state for a schedule to switch off — and no saving
+// for it to deliver, because the saving is already unconditional. RFC 017
+// §2.5 proposed honouring a schedule by setting max instances to zero;
+// step 2 found that Cloud Run reads a zero ceiling as *unset* and applies
+// its own default, so that would uncap the service rather than stop it.
+//
+// The fact lives here, next to SupportsSchedule, rather than only inside
+// the GCP provider, because two places have to agree on it: the Engine
+// refuses an explicit schedule and reports an inherited one as
+// inapplicable, and the provider refuses again as defence in depth. Two
+// copies of this answer would drift (RFC 011 §1.1H).
+//
+// An unresolved "agnostic" provider is treated as supporting the schedule:
+// resolution runs before anything consults this, and answering for a cloud
+// that has not been chosen would report a limitation that may not apply.
+func (t ResourceType) SupportsScheduleOn(p Provider) bool {
+	if !t.SupportsSchedule() {
+		return false
+	}
+	return !(p == ProviderGCP && t == ResourceTypeContainerService)
 }
 
 // Provider identifies the target cloud provider of a resource, or

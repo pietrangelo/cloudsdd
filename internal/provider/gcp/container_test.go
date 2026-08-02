@@ -13,6 +13,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider/container"
+	"cloudsdd/internal/schedule"
 	"cloudsdd/internal/spec"
 )
 
@@ -452,5 +453,68 @@ func TestDecodeContainerServiceRejectsADomainWithoutPublic(t *testing.T) {
 
 	if !errors.Is(err, container.ErrDomainWithoutPublic) {
 		t.Fatalf("decodeContainerServiceProperties() = %v, want ErrDomainWithoutPublic", err)
+	}
+}
+
+// TestCloudRunRefusesAnExplicitSchedule covers RFC 017 §2.5 on GCP.
+//
+// Not an implementation gap. Cloud Run bills per request and idles to zero
+// between them, so there is no running state to switch off and no saving
+// left to deliver. §2.5 proposed setting max instances to zero; step 2
+// found that Cloud Run reads a zero ceiling as unset, which would uncap
+// the service rather than stop it.
+//
+// The explicit/inherited distinction is the point. A schedule the user
+// wrote on this resource is a request they will not get, and is refused.
+// One inherited from policies is merely inapplicable — refusing it would
+// break every Specification that sets an environment-wide schedule and
+// happens to include a Cloud Run service.
+func TestCloudRunRefusesAnExplicitSchedule(t *testing.T) {
+	sch := &schedule.Schedule{
+		Enabled:  boolPtr(true),
+		Timezone: "Europe/Rome",
+		Start:    "08:00",
+		Stop:     "19:00",
+	}
+
+	t.Run("explicit is refused", func(t *testing.T) {
+		r := containerResource(func(r *spec.Resource) { r.Schedule = sch })
+
+		_, err := resourceSchedule(r, spec.Policies{})
+		if !errors.Is(err, ErrCloudRunNotSchedulable) {
+			t.Fatalf("resourceSchedule() = %v, want ErrCloudRunNotSchedulable", err)
+		}
+	})
+
+	t.Run("inherited is dropped without error", func(t *testing.T) {
+		rules, err := resourceSchedule(containerResource(nil), spec.Policies{Schedule: sch})
+		if err != nil {
+			t.Fatalf("resourceSchedule() = %v, want an inherited schedule to be tolerated", err)
+		}
+		if len(rules) != 0 {
+			t.Errorf("compiled %d rules, want none — Cloud Run has nothing to schedule", len(rules))
+		}
+	})
+
+	t.Run("Validate refuses an explicit schedule too", func(t *testing.T) {
+		p := &GCPProvider{stateDir: t.TempDir(), passphrase: "test"}
+		r := containerResource(func(r *spec.Resource) { r.Schedule = sch })
+
+		if err := p.Validate(context.Background(), r, spec.Policies{}); !errors.Is(err, ErrCloudRunNotSchedulable) {
+			t.Fatalf("Validate() = %v, want ErrCloudRunNotSchedulable", err)
+		}
+	})
+}
+
+// TestDeclareContainerServiceDeclaresNoScheduleResources: Cloud Run
+// carries no scheduling machinery under any circumstances, unlike the
+// Cloud SQL path in this same package.
+func TestDeclareContainerServiceDeclaresNoScheduleResources(t *testing.T) {
+	recorded := declaredContainer(t, nil)
+
+	for _, token := range []string{schedulerJobToken, customRoleToken, iamMemberToken} {
+		if hasResource(recorded, token) {
+			t.Errorf("%s was declared for a Cloud Run service", token)
+		}
 	}
 }

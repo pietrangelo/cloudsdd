@@ -23,13 +23,17 @@ func validateSchedule(r spec.Resource, policies spec.Policies) error {
 		return nil
 	}
 
-	if !r.Type.SupportsSchedule() {
+	// Provider-aware since RFC 017 §2.5: container_service is schedulable
+	// as a type, and is not on Cloud Run, which idles to zero on its own
+	// and has no running state to switch off.
+	if !r.Type.SupportsScheduleOn(r.Provider) {
 		// An explicit schedule on a resource that cannot honor it is a
 		// request the user made and will not get. An inherited one is
 		// merely inapplicable: the CLI reports it in the plan output
 		// (see ScheduleStatus) and the resource is left running.
 		if r.Schedule != nil {
-			return fmt.Errorf("%w: resource %q is a %q", ErrResourceNotSchedulable, r.ID, r.Type)
+			return fmt.Errorf("%w: resource %q is a %q on %q",
+				ErrResourceNotSchedulable, r.ID, r.Type, r.Provider)
 		}
 		return nil
 	}
@@ -63,10 +67,14 @@ func ScheduleStatuses(s spec.Specification) []ScheduleStatus {
 		if !sch.IsEnabled() {
 			continue
 		}
-		applied := r.Type.SupportsSchedule()
+		// Provider-aware, and it must be: this runs after RFC 014
+		// resolution, so r.Provider is concrete, and a Cloud Run service
+		// under a Specification-wide schedule would otherwise be listed as
+		// powering down when it will do no such thing.
+		applied := r.Type.SupportsScheduleOn(r.Provider)
 		summary := schedule.Describe(sch)
 		if !applied {
-			summary = fmt.Sprintf("not applicable to %s, this resource stays up", r.Type)
+			summary = fmt.Sprintf("not applicable to %s on %s, this resource stays up", r.Type, r.Provider)
 		}
 		out = append(out, ScheduleStatus{ResourceID: r.ID, Summary: summary, Applied: applied})
 	}

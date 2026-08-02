@@ -204,6 +204,10 @@ func (p *AzureProvider) resourceProgram(r spec.Resource, policies spec.Policies)
 		if err != nil {
 			return nil, "", fmt.Errorf("azure: resource %q: %w", r.ID, err)
 		}
+		rules, err := resourceSchedule(r, policies)
+		if err != nil {
+			return nil, "", err
+		}
 		scope := resourceScope(r)
 		return func(ctx *pulumi.Context) error {
 			// The Engine provisioned the scope's network, including the
@@ -212,7 +216,7 @@ func (p *AzureProvider) resourceProgram(r spec.Resource, policies spec.Policies)
 			if err != nil {
 				return err
 			}
-			_, err = declareContainerService(ctx, r.ID, region, scope, net, *props)
+			_, err = declareContainerService(ctx, r.ID, region, scope, net, *props, rules)
 			return err
 		}, region, nil
 

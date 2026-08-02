@@ -18,6 +18,10 @@
 - **Amended:** 2026-08-02, during step 4 — §2.6 records the Container Apps
   subnet requirement, which the RFC 016 address plan does not satisfy
   without naming a workload profile.
+- **Amended:** 2026-08-02, during step 5 — §2.5 records how "off" is
+  actually spelled on each platform. Neither of the two mechanisms it
+  originally named survived contact: Cloud Run's zero ceiling means
+  *unset*, and the Azure runbook cannot PATCH a body.
 
 ## 1. Problem
 
@@ -225,10 +229,31 @@ it has a replica count, and the equivalent of "off" is zero:
   is a way of spelling "and never scale up", not the saving itself. Step 5
   decides how an *inherited* schedule composes with that, which is a
   different question from an explicit zero in the Specification.
-- **Azure Container Apps** — min and max replicas both to zero.
+- **Azure Container Apps** — ~~min and max replicas both to zero.~~
+  **Settled during step 5, through a better mechanism.** Both bounds to
+  zero would need a PATCH with a body, and the RFC 012 §4.3 runbook
+  deliberately cannot do that: it POSTs an action and interpolates nothing
+  from the Specification into script text. Container Apps turned out to
+  offer `start` and `stop` actions of its own, which express the same
+  intent through the machinery the databases already use — a stopped app
+  runs no replicas and bills for none, with no `deallocate` distinction to
+  get wrong.
 
 The RFC 012 §1.3 rule holds unchanged: a rule a provider cannot express is
-a `Validate` error, never a dropped rule.
+a `Validate` error, never a dropped rule. Cloud Run is where it bites, and
+step 5 drew the line the rule implies:
+
+- an **explicit** schedule on a Cloud Run service is a request the user
+  wrote and will not get, so it is refused (`ErrCloudRunNotSchedulable`);
+- an **inherited** one is merely inapplicable, so it is accepted, nothing
+  is declared, and the plan reports the service as staying up.
+
+That distinction already existed in RFC 012 for types that support no
+schedule at all; what step 5 added is that it is now **provider-aware**.
+`ResourceType.SupportsScheduleOn(Provider)` carries the one exception, and
+it lives beside `SupportsSchedule` rather than only inside the GCP
+provider, because the Engine and the provider both have to agree on it and
+two copies of an answer drift (RFC 011 §1.1H).
 
 ### 2.6 Per-provider mapping
 

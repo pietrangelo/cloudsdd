@@ -10,6 +10,7 @@ import (
 
 	"github.com/pulumi/pulumi-azure/sdk/v5/go/azure/authorization"
 	"github.com/pulumi/pulumi-azure/sdk/v5/go/azure/automation"
+	"github.com/pulumi/pulumi-azure/sdk/v5/go/azure/containerapp"
 	"github.com/pulumi/pulumi-azure/sdk/v5/go/azure/core"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
@@ -54,6 +55,7 @@ const (
 	postgresAPIVersion       = "2022-12-01"
 	mysqlAPIVersion          = "2023-06-30"
 	virtualMachineAPIVersion = "2023-09-01"
+	containerAppAPIVersion   = "2023-05-01"
 )
 
 const (
@@ -399,4 +401,46 @@ func armAction(action schedule.Action, stopAction string) string {
 		return "start"
 	}
 	return stopAction
+}
+
+// containerAppPowerTarget describes a Container App for the scheduler
+// (RFC 017 §2.5).
+//
+// RFC 017 §2.5 proposed expressing "off" as min and max replicas both
+// zero, which would have needed a PATCH with a body — something the
+// runbook above deliberately cannot do, since it POSTs an action and
+// interpolates nothing from the Specification. Container Apps turned out
+// to offer `start` and `stop` actions of its own, which express the same
+// intent through the same mechanism the databases already use: a stopped
+// app runs no replicas and bills for none.
+func containerAppPowerTarget(id pulumi.IDOutput, rg *core.ResourceGroup) powerTarget {
+	return powerTarget{
+		id:            id,
+		resourceGroup: rg,
+		apiVersion:    containerAppAPIVersion,
+		actions: []string{
+			"Microsoft.App/containerApps/read",
+			"Microsoft.App/containerApps/start/action",
+			"Microsoft.App/containerApps/stop/action",
+		},
+		// Unlike a virtual machine, `stop` here releases the replicas
+		// rather than leaving them allocated, so there is no deallocate
+		// distinction to get wrong (RFC 013 §2.5).
+		stopAction: "stop",
+	}
+}
+
+// declareContainerSchedule registers the Automation Account, runbook, role
+// and schedules that power a Container App on and off.
+func declareContainerSchedule(
+	ctx *pulumi.Context,
+	resourceID string,
+	app *containerapp.App,
+	rg *core.ResourceGroup,
+	rules []schedule.Rule,
+) error {
+	if len(rules) == 0 {
+		return nil
+	}
+	return declarePowerSchedule(ctx, resourceID, containerAppPowerTarget(app.ID(), rg), rules)
 }

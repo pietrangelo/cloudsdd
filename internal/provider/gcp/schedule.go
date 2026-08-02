@@ -55,8 +55,14 @@ func resourceSchedule(r spec.Resource, policies spec.Policies) ([]schedule.Rule,
 	if !sch.IsEnabled() {
 		return nil, nil
 	}
-	if !r.Type.SupportsSchedule() {
+	// SupportsScheduleOn rather than SupportsSchedule, so the Cloud Run
+	// exception (RFC 017 §2.5) is applied here too. The Engine already
+	// refuses this; a provider driven directly must be no less honest.
+	if !r.Type.SupportsScheduleOn(spec.ProviderGCP) {
 		if r.Schedule != nil {
+			if r.Type == spec.ResourceTypeContainerService {
+				return nil, fmt.Errorf("gcp: resource %q: %w", r.ID, ErrCloudRunNotSchedulable)
+			}
 			return nil, fmt.Errorf("gcp: resource %q: %w", r.ID, ErrResourceNotSchedulable)
 		}
 		return nil, nil

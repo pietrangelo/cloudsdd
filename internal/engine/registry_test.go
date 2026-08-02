@@ -11,6 +11,7 @@ import (
 
 	"cloudsdd/internal/provider"
 	"cloudsdd/internal/provider/container"
+	"cloudsdd/internal/schedule"
 	"cloudsdd/internal/spec"
 )
 
@@ -159,4 +160,82 @@ func TestImagePolicyIgnoresOtherResourceTypes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestScheduleIsProviderAware covers RFC 017 §2.5 at the Engine.
+//
+// `container_service` is schedulable as a type and is not on Cloud Run,
+// which idles to zero on its own. The Engine has to know that for two
+// reasons: an explicit schedule must be refused before anything is
+// provisioned, and an inherited one must be *reported* as inapplicable
+// rather than listed in the plan as a power-down that will not happen —
+// exactly the surprise RFC 012 §1.2 exists to prevent.
+func TestScheduleIsProviderAware(t *testing.T) {
+	sch := &schedule.Schedule{
+		Enabled:  boolPtr(true),
+		Timezone: "Europe/Rome",
+		Start:    "08:00",
+		Stop:     "19:00",
+	}
+
+	scheduled := func(p spec.Provider, own *schedule.Schedule) spec.Specification {
+		s := containerSpec("ghcr.io/acme/api"+testDigest, nil)
+		s.Resources[0].Provider = p
+		s.Resources[0].Schedule = own
+		s.Policies.Schedule = sch
+		return s
+	}
+
+	t.Run("an explicit schedule on Cloud Run is refused", func(t *testing.T) {
+		e := New(map[spec.Provider]provider.CloudProvider{
+			spec.ProviderGCP: &mockProvider{name: "gcp"},
+		})
+
+		err := e.Validate(context.Background(), scheduled(spec.ProviderGCP, sch))
+		if !errors.Is(err, ErrResourceNotSchedulable) {
+			t.Fatalf("Validate() = %v, want ErrResourceNotSchedulable", err)
+		}
+	})
+
+	t.Run("an explicit schedule on AWS is accepted", func(t *testing.T) {
+		e := New(map[spec.Provider]provider.CloudProvider{
+			spec.ProviderAWS: &mockProvider{name: "aws"},
+		})
+
+		if err := e.Validate(context.Background(), scheduled(spec.ProviderAWS, sch)); err != nil {
+			t.Fatalf("Validate() = %v, want a scheduled ECS service to be accepted", err)
+		}
+	})
+
+	t.Run("an inherited schedule is reported, not refused", func(t *testing.T) {
+		s := scheduled(spec.ProviderGCP, nil)
+
+		e := New(map[spec.Provider]provider.CloudProvider{
+			spec.ProviderGCP: &mockProvider{name: "gcp"},
+		})
+		if err := e.Validate(context.Background(), s); err != nil {
+			t.Fatalf("Validate() = %v, want an inherited schedule to be tolerated", err)
+		}
+
+		statuses := ScheduleStatuses(s)
+		if len(statuses) != 1 {
+			t.Fatalf("got %d schedule statuses, want 1", len(statuses))
+		}
+		if statuses[0].Applied {
+			t.Error("the status says the schedule applies; the Cloud Run service will stay up")
+		}
+		if !strings.Contains(statuses[0].Summary, "stays up") {
+			t.Errorf("summary = %q, want it to say the resource stays up", statuses[0].Summary)
+		}
+	})
+
+	t.Run("the same schedule on AWS is reported as applied", func(t *testing.T) {
+		statuses := ScheduleStatuses(scheduled(spec.ProviderAWS, nil))
+		if len(statuses) != 1 {
+			t.Fatalf("got %d schedule statuses, want 1", len(statuses))
+		}
+		if !statuses[0].Applied {
+			t.Error("the status says the schedule does not apply; ECS can scale to zero")
+		}
+	})
 }

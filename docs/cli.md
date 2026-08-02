@@ -379,11 +379,12 @@ something nothing outside can reach is a request that would not be honoured.
 - Logs retained 30 days on AWS, so a chatty service does not accumulate a bill
   nobody chose.
 
-`replicas: 0` — deployed and running nothing — works on AWS. It is refused on
-GCP: Cloud Run reads a zero ceiling as *unset* and would apply its own default,
-uncapping the service rather than stopping it. Cloud Run already scales to zero
-between requests, so nothing is lost but the ability to say "and never scale
-up".
+`replicas: 0` — deployed and running nothing — works on AWS and Azure. It is
+refused on GCP: Cloud Run reads a zero ceiling as *unset* and would apply its
+own default, uncapping the service rather than stopping it. Cloud Run already
+scales to zero between requests, so nothing is lost but the ability to say "and
+never scale up". The same reasoning is why a power schedule does not apply to a
+Cloud Run service — see [What can be scheduled](#what-can-be-scheduled).
 
 ## Choosing a cloud
 
@@ -540,19 +541,45 @@ Declared once in `policies`, inherited by every schedulable resource:
 
 ### What can be scheduled
 
-Only `relational_database` has a power state today. An **explicit** schedule on
-an object store or an IAM role is an error; one **inherited** from `policies` is
-skipped and reported in the plan, so a Specification can hold both a bucket and
-a database.
+`relational_database`, `compute_instance` and `container_service` can be
+scheduled. An **explicit** schedule on an object store or an IAM role is an
+error; one **inherited** from `policies` is skipped and reported in the plan, so
+a Specification can hold both a bucket and a database.
+
+**One exception is provider-specific**: a `container_service` on **GCP** cannot
+be scheduled, because Cloud Run bills per request and idles to zero between them
+— there is no running state to switch off, and the saving a schedule exists to
+deliver is already unconditional. The same explicit/inherited rule applies:
+
+```
+$ cloudsdd deploy "run api on cloud run, shut it down outside working hours"
+Error: engine: resource "api" is a "container_service" on "gcp":
+resource type does not support a power schedule
+```
+
+while an environment-wide `policies.schedule` alongside a Cloud Run service is
+accepted and reported honestly:
+
+```
+Power schedule:
+- app-db: on Mon-Fri from 08:00 to 19:00 (Europe/Rome)
+- api: not applicable to container_service on gcp, this resource stays up
+```
 
 ### Provider differences
 
 | Provider | Mechanism | Exception windows |
 |---|---|---|
-| AWS | EventBridge Scheduler, universal RDS and EC2 targets | Supported |
+| AWS | EventBridge Scheduler, universal RDS, EC2 and ECS targets | Supported |
 | Azure | Automation account, runbook and schedules | Supported |
 | GCP, `relational_database` | Cloud Scheduler against the Cloud SQL Admin API | **Rejected** — a Cloud Scheduler job has no validity period |
 | GCP, `compute_instance` | Native Compute Engine instance schedule | **Rejected** — an instance accepts one policy, with one validity interval |
+| GCP, `container_service` | — | **Not scheduled at all**, see above |
+
+A container service has no power state, only a replica count, so "off" is zero
+replicas rather than a stopped task: on AWS both rules call `ecs:UpdateService`
+with different desired counts, and on Azure the app's own `start` and `stop`
+actions release the replicas rather than leaving them allocated.
 
 The GCP refusal is deliberate. Silently dropping a window would leave an
 environment running through a shutdown you believed you had scheduled, and the

@@ -342,6 +342,10 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		if err != nil {
 			return nil, "", fmt.Errorf("aws: resource %q: %w", r.ID, err)
 		}
+		rules, err := resourceSchedule(r, policies)
+		if err != nil {
+			return nil, "", err
+		}
 		region := r.Scope.Region
 		program := func(ctx *pulumi.Context) error {
 			opts, _, err := p.providerOpts(ctx, region)
@@ -352,7 +356,7 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 			if err != nil {
 				return err
 			}
-			_, err = declareContainerService(ctx, r, net, *cp, opts...)
+			_, err = declareContainerService(ctx, r, net, *cp, rules, opts...)
 			return err
 		}
 		return program, region, nil

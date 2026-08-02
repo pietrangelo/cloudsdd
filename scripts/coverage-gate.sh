@@ -43,6 +43,16 @@
 #   can be reached without the `pulumi` binary is tested (the region-less
 #   no-op and the address-plan refusal); what remains is stack.Destroy
 #   and its error wrap.
+#
+#   2026-08-02, RFC 017 step 5: the Container Apps power schedule.
+#   azure 70 -> 69. The exception is used here rather than in step 4,
+#   where the shortfall was closed by writing the test resourceScope had
+#   always been missing — coverage that was owed, not padding. Nothing of
+#   that kind is left: every uncovered statement the schedule adds is an
+#   `if err != nil` branch after a Pulumi resource declaration, which a
+#   WithMocks monitor never fails, and the logic around them
+#   (containerAppPowerTarget's actions, the API version, both verbs
+#   reaching the runbook as parameters) is asserted.
 
 set -euo pipefail
 
@@ -65,7 +75,7 @@ FLOORS=(
   "cloudsdd/internal/state:91"
   # Pulumi-bound: see the note above.
   "cloudsdd/internal/provider/aws:65"
-  "cloudsdd/internal/provider/azure:70"
+  "cloudsdd/internal/provider/azure:69"
   "cloudsdd/internal/provider/gcp:69"
 )
 

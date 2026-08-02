@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ecs"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/iam"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/rds"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/scheduler"
@@ -38,6 +39,10 @@ const (
 	stopDBInstanceTarget  = "arn:aws:scheduler:::aws-sdk:rds:stopDBInstance"
 	startInstancesTarget  = "arn:aws:scheduler:::aws-sdk:ec2:startInstances"
 	stopInstancesTarget   = "arn:aws:scheduler:::aws-sdk:ec2:stopInstances"
+
+	// A container service has no power state, only a replica count, so
+	// both rules call the same API with different payloads (RFC 017 §2.5).
+	updateServiceTarget = "arn:aws:scheduler:::aws-sdk:ecs:updateService"
 
 	// defaultScheduleGroup is the schedule group new schedules land in.
 	// It appears in the ARN the trust policy constrains.
@@ -99,12 +104,13 @@ func declareDatabaseSchedule(
 	}).(pulumi.StringOutput)
 
 	return declareSchedule(ctx, resourceID, scheduleTarget{
-		arn:       instance.Arn,
-		startAPI:  startDBInstanceTarget,
-		stopAPI:   stopDBInstanceTarget,
-		input:     input,
-		actions:   []string{"rds:StartDBInstance", "rds:StopDBInstance"},
-		scopedARN: instance.Arn,
+		arn:        instance.Arn,
+		startAPI:   startDBInstanceTarget,
+		stopAPI:    stopDBInstanceTarget,
+		startInput: input,
+		stopInput:  input,
+		actions:    []string{"rds:StartDBInstance", "rds:StopDBInstance"},
+		scopedARN:  instance.Arn,
 	}, rules, opts...)
 }
 
@@ -124,12 +130,13 @@ func declareComputeSchedule(
 	}).(pulumi.StringOutput)
 
 	return declareSchedule(ctx, resourceID, scheduleTarget{
-		arn:       instance.Arn,
-		startAPI:  startInstancesTarget,
-		stopAPI:   stopInstancesTarget,
-		input:     input,
-		actions:   []string{"ec2:StartInstances", "ec2:StopInstances"},
-		scopedARN: instance.Arn,
+		arn:        instance.Arn,
+		startAPI:   startInstancesTarget,
+		stopAPI:    stopInstancesTarget,
+		startInput: input,
+		stopInput:  input,
+		actions:    []string{"ec2:StartInstances", "ec2:StopInstances"},
+		scopedARN:  instance.Arn,
 	}, rules, opts...)
 }
 
@@ -142,10 +149,15 @@ type scheduleTarget struct {
 	// arn is any ARN of the target resource; its partition, region and
 	// account fields are what the trust policy is built from.
 	arn pulumi.StringOutput
-	// startAPI and stopAPI are the universal target ARNs.
+	// startAPI and stopAPI are the universal target ARNs. They are the
+	// same ARN for a target whose two states differ by payload rather than
+	// by API — an ECS service is scaled, not started.
 	startAPI, stopAPI string
-	// input is the request payload the universal target forwards.
-	input pulumi.StringOutput
+	// startInput and stopInput are the request payloads the universal
+	// target forwards. Separate rather than one field because "off" is not
+	// always the absence of an argument: for a container service it is a
+	// desired count of zero, which has to be sent.
+	startInput, stopInput pulumi.StringOutput
 	// actions are the IAM actions the execution role is granted.
 	actions []string
 	// scopedARN is the single resource those actions are granted on.
@@ -237,7 +249,10 @@ func declareScheduleRule(
 	if rule.Action == schedule.ActionStart {
 		targetARN = target.startAPI
 	}
-	input := target.input
+	input := target.stopInput
+	if rule.Action == schedule.ActionStart {
+		input = target.startInput
+	}
 
 	args := &scheduler.ScheduleArgs{
 		Name:                       pulumi.String(prefix + rule.Name),
@@ -401,4 +416,53 @@ func parseARN(arn string) (partition, region, account string, err error) {
 		return "", "", "", fmt.Errorf("aws: %w: %q", ErrMalformedARN, arn)
 	}
 	return parts[1], parts[3], parts[4], nil
+}
+
+// declareContainerSchedule registers the schedules that scale an ECS
+// service between its replica count and zero (RFC 017 §2.5).
+//
+// A container service has no power state, so unlike a database or a VM
+// there is no start and stop API to call: both rules invoke
+// ecs:UpdateService and differ only in the desired count they send. "Off"
+// is zero replicas rather than a stopped task, which is the RFC 013 §2.5
+// lesson restated — a stopped Fargate task would not exist to bill, but a
+// service left at its replica count with the tasks stopped would simply
+// start them again.
+func declareContainerSchedule(
+	ctx *pulumi.Context,
+	resourceID string,
+	cluster *ecs.Cluster,
+	service *ecs.Service,
+	replicas int,
+	rules []schedule.Rule,
+	opts ...pulumi.ResourceOption,
+) error {
+	if len(rules) == 0 {
+		return nil
+	}
+
+	payload := func(count int) pulumi.StringOutput {
+		return pulumi.All(cluster.Arn, service.Name).ApplyT(func(v []any) (string, error) {
+			return schedulePayload(map[string]any{
+				"Cluster":      v[0],
+				"Service":      v[1],
+				"DesiredCount": count,
+			})
+		}).(pulumi.StringOutput)
+	}
+
+	// An ECS service's Pulumi ID *is* its ARN — the resource exposes no
+	// separate Arn output — which is what the trust and permission
+	// policies are built from.
+	arn := service.ID().ToStringOutput()
+
+	return declareSchedule(ctx, resourceID, scheduleTarget{
+		arn:        arn,
+		startAPI:   updateServiceTarget,
+		stopAPI:    updateServiceTarget,
+		startInput: payload(replicas),
+		stopInput:  payload(0),
+		actions:    []string{"ecs:UpdateService"},
+		scopedARN:  arn,
+	}, rules, opts...)
 }

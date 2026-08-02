@@ -15,6 +15,7 @@ import (
 
 	"cloudsdd/internal/provider"
 	"cloudsdd/internal/provider/container"
+	"cloudsdd/internal/schedule"
 )
 
 // Container Apps configuration (RFC 017 §2.6).
@@ -101,6 +102,7 @@ func declareContainerService(
 	s provider.NetworkScope,
 	net scopeNetwork,
 	p container.Properties,
+	rules []schedule.Rule,
 ) (*containerapp.App, error) {
 	cpu, memory, err := containerResources(p.Size)
 	if err != nil {
@@ -206,6 +208,13 @@ func declareContainerService(
 		if err := declareContainerDomain(ctx, id, p.Domain, app); err != nil {
 			return nil, err
 		}
+	}
+
+	// The schedule shares the app's Pulumi program, and so its stack,
+	// which is what makes the existing Destroy path tear both down
+	// (RFC 012 §4.3).
+	if err := declareContainerSchedule(ctx, id, app, rg, rules); err != nil {
+		return nil, err
 	}
 	return app, nil
 }

@@ -29,6 +29,24 @@ var ErrUnsupportedSize = errors.New("gcp: unsupported compute size")
 // Engine image family mapping (RFC 013 §2.1).
 var ErrUnsupportedOS = errors.New("gcp: unsupported operating system")
 
+// ErrCloudRunNotSchedulable indicates an explicit power schedule on a
+// container_service deployed to Cloud Run (RFC 017 §2.5).
+//
+// Not an implementation gap. Cloud Run bills per request and idles to zero
+// between them, so there is no running state to switch off and no saving
+// left for a schedule to deliver — the saving is already unconditional.
+// RFC 017 §2.5 proposed honouring a schedule by setting max instances to
+// zero; step 2 found that Cloud Run reads a zero ceiling as *unset* and
+// applies its own default, which would uncap the service rather than stop
+// it.
+//
+// Refused rather than accepted-and-ignored, per RFC 012 §1.3: a schedule
+// silently doing nothing is the failure mode that surfaces as an invoice.
+// A schedule *inherited* from policies is not an error — it is reported as
+// inapplicable in the plan and the service is left as it is.
+var ErrCloudRunNotSchedulable = errors.New(
+	"gcp: Cloud Run has no power state to schedule; it bills per request and idles to zero between them")
+
 // ErrZonesNotSupported indicates that Scope.Zones was set on a
 // ResourceType with no zone-aware placement (RFC 005 §2.5).
 //

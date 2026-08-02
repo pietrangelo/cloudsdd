@@ -86,6 +86,16 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 		outputs["certificateArn"] = args.Inputs["certificateArn"]
 	case route53RecordToken:
 		outputs["fqdn"] = args.Inputs["name"]
+	case ecsClusterToken:
+		outputs["arn"] = resource.NewStringProperty(
+			"arn:aws:ecs:eu-central-1:" + testAccountID + ":cluster/" + args.Name)
+	case ecsServiceToken:
+		// An ECS service exposes no separate Arn output: its *ID* is the
+		// ARN, which is what the schedule's trust and permission policies
+		// are built from (RFC 017 §2.5). Returning a bare name here would
+		// pass the test and misrepresent the resource.
+		outputs["name"] = resource.NewStringProperty(args.Name)
+		return "arn:aws:ecs:eu-central-1:" + testAccountID + ":service/" + args.Name, outputs, nil
 	}
 	return args.Name + "-id", outputs, nil
 }
