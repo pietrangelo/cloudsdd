@@ -19,6 +19,8 @@ func TestSystemPromptDocumentsTheSchema(t *testing.T) {
 		// Resource types
 		"object_storage",
 		"relational_database",
+		"compute_instance",
+		"container_service",
 		"cross_account_role",
 		// Providers
 		"agnostic", "aws", "gcp", "azure",
@@ -29,8 +31,11 @@ func TestSystemPromptDocumentsTheSchema(t *testing.T) {
 		"engine", "version", "high_availability",
 		// RFC 011 §2.5 additions
 		"force_destroy", "deletion_protection", "skip_final_snapshot",
+		// RFC 017: the container service, and the property whose value
+		// decides what code runs.
+		"image", "replicas", "public", "domain",
 		// Policy
-		"allowed_regions",
+		"allowed_regions", "allowed_registries",
 	}
 
 	for _, want := range required {
@@ -113,5 +118,45 @@ func TestWithLedgerContextCapsSize(t *testing.T) {
 	}
 	if !strings.Contains(got, "[truncated]") {
 		t.Error("oversized ledger was not marked as truncated")
+	}
+}
+
+// TestSystemPromptRefusesToInventAnImage is the RFC 017 §3 requirement,
+// and the one prompt instruction worth a test of its own.
+//
+// Every other property the model gets wrong produces infrastructure that
+// differs from what was asked for. A hallucinated image produces a
+// *hallucinated artifact*: the one property in the schema whose value
+// decides what code runs, filled in with something plausible that nobody
+// chose.
+func TestSystemPromptRefusesToInventAnImage(t *testing.T) {
+	for _, want := range []string{
+		"NEVER invent",
+		"hallucinated artifact",
+		"decides what code runs",
+	} {
+		if !strings.Contains(systemPrompt, want) {
+			t.Errorf("systemPrompt does not tell the model %q", want)
+		}
+	}
+}
+
+// TestSystemPromptDocumentsTheImageRules: a model that emits `:latest` or
+// an unpinned image produces a Specification the Engine refuses, so the
+// rules belong in the prompt rather than only in the error.
+func TestSystemPromptDocumentsTheImageRules(t *testing.T) {
+	for _, want := range []string{"sha256", ":latest", "allowed_registries"} {
+		if !strings.Contains(systemPrompt, want) {
+			t.Errorf("systemPrompt does not document the image rule %q", want)
+		}
+	}
+}
+
+// TestSystemPromptDocumentsTheCloudRunScheduleException: the exception is
+// provider-specific, so a model that knows only "container_service can be
+// scheduled" would emit a Specification the Engine refuses (RFC 017 §2.5).
+func TestSystemPromptDocumentsTheCloudRunScheduleException(t *testing.T) {
+	if !strings.Contains(systemPrompt, "Cloud Run bills per request") {
+		t.Error("systemPrompt does not explain why a Cloud Run service cannot be scheduled")
 	}
 }

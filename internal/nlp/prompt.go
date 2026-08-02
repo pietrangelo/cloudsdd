@@ -34,7 +34,8 @@ The JSON schema must exactly match this structure:
       "scope": {
         "environment": "dev", // optional
         "region": "eu-central-1", // optional (or "regions": ["eu-central-1", ...] for multi-region)
-        "zones": ["eu-central-1a"] // optional; compute_instance accepts at most one
+        "zones": ["eu-central-1a"] // optional; compute_instance accepts at most one,
+                                   // container_service and object_storage accept none
       },
       "schedule": { }, // optional, see "Power scheduling" below
       "properties": { }
@@ -42,6 +43,7 @@ The JSON schema must exactly match this structure:
   ],
   "policies": {
     "allowed_regions": ["eu-central-1"], // optional list of strings
+    "allowed_registries": ["ghcr.io"], // optional; only if the user names registries
     "provider_preference": ["aws"], // optional; see "Choosing a provider" below
     "schedule": { } // optional, see "Power scheduling" below
   }
@@ -80,6 +82,28 @@ Properties by resource type:
   through the provider's own session service. A VM occupies one availability
   zone, so scope.zones may hold at most one entry.
 
+- container_service (all providers):
+    image              (string, required. A container image reference.)
+    port               (int, required, 1-65535. The port the container listens on.)
+    size               (string, required, one of: "small", "medium", "large")
+    replicas           (int, optional, default 1, between 0 and 10. Zero means
+                        deployed and running nothing. NOT accepted on GCP.)
+    public             (bool, optional, default false)
+    domain             (string, optional. The hostname a public service is served
+                        on. REQUIRED on AWS when public is true; optional on GCP
+                        and Azure, where the platform provides its own HTTPS
+                        endpoint. Must NOT be set when public is false.)
+  CRITICAL, about "image": NEVER invent one. Carry through exactly what the user
+  named. If they did not name an image, do not guess a plausible one — a
+  hallucinated image is a hallucinated artifact, and it is the only property in
+  this schema whose value decides what code runs.
+  The image must be pinned to a digest ("repo@sha256:...") unless its registry
+  is listed in policies.allowed_registries. A ":latest" tag, or no tag at all,
+  is rejected in every case. If the user names an image with no version, carry
+  it through as written rather than adding one: the error tells them what to fix.
+  There is NO property for environment variables, secrets, volumes, commands, or
+  health checks. Do not invent them.
+
 - cross_account_role (AWS only):
     enabled            (bool)
     trusted_account_id (string)
@@ -108,8 +132,13 @@ exactly {"enabled": true} and nothing else. NEVER invent "start", "stop",
 "timezone", "days", or a date range. The CLI asks the user for what is
 missing. Inventing a stop time causes an outage.
 
-Only "relational_database" and "compute_instance" can be scheduled. Object
-storage and IAM roles have no power state.
+"relational_database", "compute_instance" and "container_service" can be
+scheduled. Object storage and IAM roles have no power state.
+
+One exception depends on the provider: a "container_service" on GCP cannot be
+scheduled, because Cloud Run bills per request and already idles to zero between
+them. If the user asks for a schedule on a containerised service and names a GCP
+region, do not emit a "schedule" on that resource.
 
 Examples:
 - "keep it up during the release weekend, 12 to 14 September" ->

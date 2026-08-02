@@ -1,6 +1,6 @@
 # RFC 017: Container Service
 
-- **Status:** Approved (2026-08-01)
+- **Status:** Implemented (2026-08-02)
 - **Author:** Claude (Senior Staff Cloud Platform Engineer, AI-assisted)
 - **Date:** 2026-08-01
 - **Depends on:** [RFC 012](012-environment-power-scheduling.md),
@@ -430,6 +430,15 @@ field that defaults to absent and constrains nothing when unset.
 
 At step 6 the schema has no unimplemented `ResourceType` left, which is
 the first time that will have been true.
+
+**Status: complete, 2026-08-02.** Four of this RFC's own proposals did not
+survive contact with the platforms, and each is recorded where it was
+made rather than quietly corrected: §2.7 (egress was owed to a resource
+type RFC 016 had already shipped), §2.3.1 (`domain`, because ACM cannot
+certify a load balancer's own name), §2.6 (the Container Apps workload
+profile, an addressing constraint rather than a performance choice), and
+§2.5 twice over (Cloud Run reads a zero ceiling as *unset*; the Azure
+runbook cannot PATCH a body).
 
 ## 7. Open Questions
 
