@@ -60,12 +60,27 @@ const (
 // nothing: an empty subnet is free.
 const subnetCount = 2
 
-// subnetIndexPublic is where the public tier sits in the scope's /20.
+// subnetIndexPublic is where the public tier starts in the scope's /20.
 //
 // It follows the private subnets, so adding it renumbers nothing already
 // deployed: private subnets keep indices 0..subnetCount-1 and the /20 has
 // room for sixteen /24s in total (RFC 016 §2.4).
 const subnetIndexPublic = subnetCount
+
+// publicSubnetCount is how many availability zones the public tier spans.
+//
+// Two, and for a reason that only appeared in RFC 017 step 3: an
+// internet-facing Application Load Balancer requires subnets in at least
+// two availability zones and refuses to be created with one. A single
+// public subnet was enough for the NAT gateway and would have made every
+// public container service fail on apply, after the user approved a plan
+// that looked fine.
+//
+// The NAT still lives in the first subnet alone — this is not one gateway
+// per zone, and the cost argument in RFC 016 §7.1 is unchanged. The second
+// subnet holds nothing until a load balancer needs it, and an empty subnet
+// is free.
+const publicSubnetCount = 2
 
 // defaultRoute is the destination a route table uses for "everything else".
 const defaultRoute = "0.0.0.0/0"
@@ -172,7 +187,7 @@ func declareScopeNetwork(
 		subnetIDs = append(subnetIDs, subnet.ID())
 	}
 
-	if err := declareScopeEgress(ctx, s, vpc, cidr, azs.Names[0], private, opts...); err != nil {
+	if err := declareScopeEgress(ctx, s, vpc, cidr, azs.Names, private, opts...); err != nil {
 		return err
 	}
 
@@ -201,21 +216,27 @@ func declareScopeNetwork(
 // environment CloudSDD creates, on a tool whose other headline feature is
 // switching things off at night (RFC 016 §7.1 priced it).
 //
-// The public subnet exists to hold the gateway and nothing else. No
-// resource is ever placed in it, and it does not assign public addresses
-// on launch either — the NAT gateway carries an elastic IP of its own, so
-// nothing here needs the automatic assignment that would make a stray
-// instance internet-facing.
+// The public subnets exist to hold the gateway and, since RFC 017 §2.3.1,
+// an internet-facing load balancer. Nothing else is ever placed in them,
+// and they do not assign public addresses on launch either — the NAT
+// gateway carries an elastic IP of its own and a load balancer brings its
+// own addresses, so nothing here needs the automatic assignment that would
+// make a stray instance internet-facing.
 func declareScopeEgress(
 	ctx *pulumi.Context,
 	s provider.NetworkScope,
 	vpc *ec2.Vpc,
 	cidr netip.Prefix,
-	zone string,
+	zones []string,
 	private []*ec2.Subnet,
 	opts ...pulumi.ResourceOption,
 ) error {
 	const name = "cloudsdd-net"
+
+	if len(zones) < publicSubnetCount {
+		return fmt.Errorf("aws: region %q has %d availability zones, need %d for a public load balancer",
+			s.Region, len(zones), publicSubnetCount)
+	}
 
 	igw, err := ec2.NewInternetGateway(ctx, name+"-igw", &ec2.InternetGatewayArgs{
 		VpcId: vpc.ID(),
@@ -223,21 +244,6 @@ func declareScopeEgress(
 	}, opts...)
 	if err != nil {
 		return fmt.Errorf("aws: failed to declare the internet gateway for scope %q: %w", scopeTag(s), err)
-	}
-
-	block, err := subnetBlock(cidr, subnetIndexPublic)
-	if err != nil {
-		return fmt.Errorf("aws: scope %q: %w", scopeTag(s), err)
-	}
-	public, err := ec2.NewSubnet(ctx, name+"-public", &ec2.SubnetArgs{
-		VpcId:               vpc.ID(),
-		CidrBlock:           pulumi.String(block.String()),
-		AvailabilityZone:    pulumi.String(zone),
-		MapPublicIpOnLaunch: pulumi.Bool(false),
-		Tags:                scopeTags(s, map[string]string{tagSubnetTier: tierPublic}),
-	}, opts...)
-	if err != nil {
-		return fmt.Errorf("aws: failed to declare the public subnet for scope %q: %w", scopeTag(s), err)
 	}
 
 	publicRoutes, err := ec2.NewRouteTable(ctx, name+"-public-rt", &ec2.RouteTableArgs{
@@ -253,11 +259,34 @@ func declareScopeEgress(
 	if err != nil {
 		return fmt.Errorf("aws: failed to declare the public route table for scope %q: %w", scopeTag(s), err)
 	}
-	if _, err := ec2.NewRouteTableAssociation(ctx, name+"-public-rta", &ec2.RouteTableAssociationArgs{
-		SubnetId:     public.ID(),
-		RouteTableId: publicRoutes.ID(),
-	}, opts...); err != nil {
-		return fmt.Errorf("aws: failed to associate the public route table for scope %q: %w", scopeTag(s), err)
+
+	// The public tier spans two zones because an internet-facing ALB
+	// refuses to exist in one. Only the first holds the NAT gateway.
+	public := make([]*ec2.Subnet, 0, publicSubnetCount)
+	for i := 0; i < publicSubnetCount; i++ {
+		block, err := subnetBlock(cidr, subnetIndexPublic+i)
+		if err != nil {
+			return fmt.Errorf("aws: scope %q: %w", scopeTag(s), err)
+		}
+		subnet, err := ec2.NewSubnet(ctx, fmt.Sprintf("%s-public-%d", name, i), &ec2.SubnetArgs{
+			VpcId:               vpc.ID(),
+			CidrBlock:           pulumi.String(block.String()),
+			AvailabilityZone:    pulumi.String(zones[i]),
+			MapPublicIpOnLaunch: pulumi.Bool(false),
+			Tags:                scopeTags(s, map[string]string{tagSubnetTier: tierPublic}),
+		}, opts...)
+		if err != nil {
+			return fmt.Errorf("aws: failed to declare public subnet %d for scope %q: %w", i, scopeTag(s), err)
+		}
+		if _, err := ec2.NewRouteTableAssociation(ctx, fmt.Sprintf("%s-public-rta-%d", name, i),
+			&ec2.RouteTableAssociationArgs{
+				SubnetId:     subnet.ID(),
+				RouteTableId: publicRoutes.ID(),
+			}, opts...); err != nil {
+			return fmt.Errorf("aws: failed to associate the public route table for subnet %d in scope %q: %w",
+				i, scopeTag(s), err)
+		}
+		public = append(public, subnet)
 	}
 
 	address, err := ec2.NewEip(ctx, name+"-nat-eip", &ec2.EipArgs{
@@ -273,7 +302,7 @@ func declareScopeEgress(
 	// implied by any argument here — the NAT references the subnet and the
 	// address, never the gateway it needs.
 	nat, err := ec2.NewNatGateway(ctx, name+"-nat", &ec2.NatGatewayArgs{
-		SubnetId:     public.ID(),
+		SubnetId:     public[0].ID(),
 		AllocationId: address.ID(),
 		Tags:         scopeTags(s, nil),
 	}, append(opts, pulumi.DependsOn([]pulumi.Resource{igw}))...)

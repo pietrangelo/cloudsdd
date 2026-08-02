@@ -17,10 +17,14 @@ import (
 // scopeNetwork is what a resource program needs to know about the network
 // it is being placed into.
 type scopeNetwork struct {
-	vpcID        string
-	cidr         string
-	subnetIDs    []string
-	dbSubnetName string
+	vpcID     string
+	cidr      string
+	subnetIDs []string
+	// publicSubnetIDs are the tierPublic subnets, which exist to hold the
+	// NAT gateway and an internet-facing load balancer (RFC 017 §2.3.1).
+	// Nothing else is ever placed in them.
+	publicSubnetIDs []string
+	dbSubnetName    string
 }
 
 // lookupScopeNetwork finds the VPC the Engine already provisioned for
@@ -66,10 +70,26 @@ func lookupScopeNetwork(ctx *pulumi.Context, r spec.Resource) (scopeNetwork, err
 		return scopeNetwork{}, fmt.Errorf("aws: the network for scope %q has no private subnets", tag)
 	}
 
+	// The public tier is looked up unconditionally rather than only for a
+	// public service: one invoke on every resource is cheaper to reason
+	// about than a lookup whose presence depends on a property, and an
+	// empty result is a legitimate answer for a network created before
+	// RFC 017 §2.7 added the tier.
+	publicSubnets, err := ec2.GetSubnets(ctx, &ec2.GetSubnetsArgs{
+		Filters: []ec2.GetSubnetsFilter{
+			{Name: "vpc-id", Values: []string{vpc.Id}},
+			{Name: "tag:" + tagSubnetTier, Values: []string{tierPublic}},
+		},
+	}, nil)
+	if err != nil {
+		return scopeNetwork{}, fmt.Errorf("aws: failed to find the public subnets of scope %q: %w", tag, err)
+	}
+
 	return scopeNetwork{
-		vpcID:     vpc.Id,
-		cidr:      vpc.CidrBlock,
-		subnetIDs: subnets.Ids,
+		vpcID:           vpc.Id,
+		cidr:            vpc.CidrBlock,
+		subnetIDs:       subnets.Ids,
+		publicSubnetIDs: publicSubnets.Ids,
 		// Computed, not looked up. The network program gives the subnet
 		// group an explicit physical name derived from the same scope, so
 		// both halves reach it by arithmetic rather than by a third

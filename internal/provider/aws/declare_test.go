@@ -62,6 +62,30 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 		outputs["arn"] = resource.NewStringProperty("arn:aws:iam::" + testAccountID + ":role/" + args.Name)
 	case ec2InstanceToken:
 		outputs["arn"] = resource.NewStringProperty(testEC2ARN)
+	case loadBalancerToken:
+		// The alias record targets these, and a Route 53 alias with an
+		// unknown target is a record that resolves nowhere.
+		outputs["dnsName"] = resource.NewStringProperty(args.Name + ".eu-central-1.elb.amazonaws.com")
+		outputs["zoneId"] = resource.NewStringProperty("Z215JYRZR1TBD5")
+	case certificateToken:
+		outputs["arn"] = resource.NewStringProperty(
+			"arn:aws:acm:eu-central-1:" + testAccountID + ":certificate/" + args.Name)
+		// The DNS challenge ACM computes. The provider indexes the first
+		// entry — safe because CloudSDD requests one domain and no subject
+		// alternative names — so an empty array here would panic rather
+		// than fail an assertion (RFC 017 §2.3.1).
+		outputs["domainValidationOptions"] = resource.NewArrayProperty([]resource.PropertyValue{
+			resource.NewObjectProperty(resource.PropertyMap{
+				"domainName":          args.Inputs["domainName"],
+				"resourceRecordName":  resource.NewStringProperty("_acme-challenge.api.acme.example."),
+				"resourceRecordType":  resource.NewStringProperty("CNAME"),
+				"resourceRecordValue": resource.NewStringProperty("validation.acm-validations.aws."),
+			}),
+		})
+	case certValidationToken:
+		outputs["certificateArn"] = args.Inputs["certificateArn"]
+	case route53RecordToken:
+		outputs["fqdn"] = args.Inputs["name"]
 	}
 	return args.Name + "-id", outputs, nil
 }
@@ -93,6 +117,15 @@ func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error
 				resource.NewStringProperty("subnet-aaa"),
 				resource.NewStringProperty("subnet-bbb"),
 			}),
+		}, nil
+	}
+	// The hosted zone a public container service's certificate is
+	// validated in (RFC 017 §2.3.1).
+	if args.Token == getZoneToken {
+		m.rec.add(recordedResource{Type: args.Token, Name: getZoneToken, Inputs: args.Args})
+		return resource.PropertyMap{
+			"zoneId": resource.NewStringProperty("Z0123456789ABCDEFGHIJ"),
+			"name":   args.Args["name"],
 		}, nil
 	}
 	// The availability zone lookup the network program makes (RFC 016).
@@ -355,9 +388,13 @@ func TestDeclareS3BucketHonoursExplicitOverrides(t *testing.T) {
 // the Engine has provisioned the scope (RFC 016 §2.2).
 func testNetwork() scopeNetwork {
 	return scopeNetwork{
-		vpcID:        "vpc-test",
-		cidr:         "10.42.0.0/20",
-		subnetIDs:    []string{"subnet-a", "subnet-b"},
-		dbSubnetName: "cloudsdd-dev-eu-central-1",
+		vpcID:     "vpc-test",
+		cidr:      "10.42.0.0/20",
+		subnetIDs: []string{"subnet-a", "subnet-b"},
+		// The public tier, which holds the NAT gateway and — since RFC 017
+		// §2.3.1 — an internet-facing load balancer. Two, because an ALB
+		// refuses to exist in a single availability zone.
+		publicSubnetIDs: []string{"subnet-pub-a", "subnet-pub-b"},
+		dbSubnetName:    "cloudsdd-dev-eu-central-1",
 	}
 }

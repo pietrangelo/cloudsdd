@@ -126,6 +126,23 @@ func (p *AWSProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 		}
 		return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
 
+	case spec.ResourceTypeContainerService:
+		if _, err := decodeContainerServiceProperties(r.Properties, policies.AllowedRegistries); err != nil {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
+		}
+		// Fargate places tasks itself across the subnets it is given, so a
+		// pinned zone is a placement the user asked for and will not get.
+		if len(r.Scope.Zones) > 0 {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrZonesNotSupported)
+		}
+		if r.Scope.Region == "" {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrRegionRequired)
+		}
+		if err := validateAWSRegionFormat(r.Scope.Region); err != nil {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
+		}
+		return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
+
 	case spec.ResourceTypeObjectStorage:
 		if _, err := decodeS3Properties(r.Properties); err != nil {
 			return err
@@ -317,6 +334,26 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 				return err
 			}
 			return declareComputeSchedule(ctx, r.ID, instance, rules, opts...)
+		}
+		return program, region, nil
+
+	case spec.ResourceTypeContainerService:
+		cp, err := decodeContainerServiceProperties(r.Properties, policies.AllowedRegistries)
+		if err != nil {
+			return nil, "", fmt.Errorf("aws: resource %q: %w", r.ID, err)
+		}
+		region := r.Scope.Region
+		program := func(ctx *pulumi.Context) error {
+			opts, _, err := p.providerOpts(ctx, region)
+			if err != nil {
+				return err
+			}
+			net, err := lookupScopeNetwork(ctx, r)
+			if err != nil {
+				return err
+			}
+			_, err = declareContainerService(ctx, r, net, *cp, opts...)
+			return err
 		}
 		return program, region, nil
 

@@ -130,12 +130,15 @@ func TestAWSProvider_Validate(t *testing.T) {
 			wantErr: ErrZonesNotSupported,
 		},
 		{
-			// container_service is still advertised by the schema and
-			// implemented by nobody (RFC 013 §7.3). compute_instance used
-			// to sit here and is now supported.
+			// AWS now implements every ResourceType the schema declares —
+			// compute_instance since RFC 013 and container_service since
+			// RFC 017 step 3 — so this case uses a type that is not in the
+			// enum at all. The default branch is defence for the day the
+			// schema grows a type before this provider does, which is
+			// exactly what it was for the two above.
 			name: "unsupported resource type",
 			resource: spec.Resource{
-				ID: "api", Type: spec.ResourceTypeContainerService, Provider: spec.ProviderAWS,
+				ID: "api", Type: spec.ResourceType("message_queue"), Provider: spec.ProviderAWS,
 				Properties: map[string]any{"image": "nginx"},
 			},
 			wantErr: ErrUnsupportedResourceType,
@@ -213,7 +216,7 @@ func TestAWSProvider_resourceProgram(t *testing.T) {
 
 	t.Run("unsupported resource type", func(t *testing.T) {
 		_, _, err := p.resourceProgram(spec.Resource{
-			ID: "api", Type: spec.ResourceTypeContainerService, Provider: spec.ProviderAWS,
+			ID: "api", Type: spec.ResourceType("message_queue"), Provider: spec.ProviderAWS,
 			Properties: map[string]any{"image": "nginx"},
 		}, spec.Policies{})
 		if !errors.Is(err, ErrUnsupportedResourceType) {

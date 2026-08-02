@@ -11,6 +11,10 @@
   had left open and assigned here. It moves to the front of the rollout
   because it repairs `compute_instance`, which RFC 016 shipped without a
   working path to Session Manager.
+- **Amended:** 2026-08-02, during step 3 — §2.3.1 adds the `domain`
+  property. §2.6 promised HTTPS through an ACM certificate with no field
+  to name its subject, and ACM will not issue one for an ALB's own DNS
+  name, so `public: true` on AWS was undeliverable as specified.
 
 ## 1. Problem
 
@@ -71,7 +75,8 @@ providers for the reason RFC 011 §1.1H recorded and RFC 013 followed:
     "port": 8080,
     "size": "small",
     "replicas": 2,
-    "public": true
+    "public": true,
+    "domain": "api.acme.example"
   }
 }
 ```
@@ -83,6 +88,7 @@ providers for the reason RFC 011 §1.1H recorded and RFC 013 followed:
 | `size` | enum | `small` | `small`/`medium`/`large`, reusing RFC 013's vocabulary, mapped to each platform's CPU/memory pairs |
 | `replicas` | int | `1` | 0-10. Zero is legal and means "deployed but not running" |
 | `public` | bool | `false` | §2.3 |
+| `domain` | string | — | The hostname a public service is served on. Required when `public` is true on AWS; see §2.3.1 |
 
 Deliberately absent: environment variables, secrets, volumes, custom
 commands, health-check paths. Each is a feature, and `env` in particular
@@ -112,6 +118,52 @@ The user asks for "public" and gets TLS, because asking for TLS separately
 is the kind of thing the mandate says they should not have to do. When
 `public` is false the service is reachable only from its scope's network
 (RFC 016 §2.4), which is what makes an internal API expressible.
+
+#### 2.3.1 `domain`, added during step 3
+
+This section originally assumed every platform could hand back an HTTPS
+endpoint the way Cloud Run does. Step 2 confirmed that for GCP: a Cloud
+Run service is served on `*.run.app` with a Google-managed certificate,
+so "public means HTTPS" is true with nothing configured.
+
+**AWS cannot do this.** §2.6 says "ALB, HTTPS, ACM certificate" and the
+property table had no field to name a certificate's subject. ACM will not
+issue a certificate for an ALB's own `*.elb.amazonaws.com` name, and there
+is no AWS equivalent of `*.run.app`. So on AWS, `public: true` under the
+original properties could only have been delivered as a plain HTTP
+listener — the one thing §2.3 refuses — or not at all.
+
+So the schema gains **`domain`**: the hostname a public service is served
+on.
+
+- **Required when `public` is true on AWS.** Absent, it is a `Validate`
+  error naming the reason, not a silent downgrade to HTTP.
+- **Refused when `public` is false**, on every provider. A hostname on a
+  service nothing outside can reach is a property the user asked for and
+  will not get, which RFC 011 §2.1 rejects as a class.
+- **Optional on GCP**, where absence means the built-in `*.run.app`
+  endpoint and presence means a Cloud Run domain mapping.
+
+The domain must live in a **Route 53 hosted zone in the target account**
+on AWS. That is a real constraint and it is stated rather than discovered:
+certificate issuance needs DNS validation records, and the alternative —
+emitting the records and asking the user to create them by hand — would
+make `apply` block indefinitely on an action CloudSDD cannot see happen.
+A domain outside Route 53 is an error naming the zone that was looked for.
+
+CloudSDD creates, in the user's zone, the ACM validation records and an
+alias record pointing the domain at the load balancer. Without the second
+the certificate is valid and the hostname resolves nowhere, which is a
+deployment that reports success and serves nothing.
+
+The alternative considered and rejected was CloudFront in front of an
+internal ALB: `*.cloudfront.net` carries a default certificate, so it
+would deliver HTTPS with no domain and no hosted zone, matching Cloud
+Run's ergonomics. It was rejected because it silently changes what the
+user deployed — a CDN with its own caching semantics, its own regional
+behaviour and its own bill, in front of an API they asked to be
+reachable. A property they must supply is more honest than infrastructure
+they did not ask for.
 
 ### 2.4 The image is the supply chain
 
@@ -252,7 +304,8 @@ No new `ResourceType` — it has been in the enum since RFC 001; this makes
 it real. New:
 
 - `ContainerServiceProperties` in `docs/openapi.yaml` (`image`, `port`,
-  `size`, `replicas`, `public`);
+  `size`, `replicas`, `public`, `domain` — the last added during step 3,
+  §2.3.1);
 - `policies.allowed_registries`, a string array, `omitempty`, capped at 10
   entries in line with the RFC 005 §3 bounds on policy lists;
 - `internal/nlp/prompt.go` gains the property list and, importantly, the

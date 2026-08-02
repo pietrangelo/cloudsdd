@@ -256,6 +256,61 @@ components:
           items:
             type: string
             pattern: "^arn:"
+    ContainerServiceProperties:
+      description: >
+        Properties of a resource with type "container_service" (RFC 017
+        §2.2). Shared by every provider; each maps `size` onto its own
+        CPU/memory pairs.
+      type: object
+      additionalProperties: false
+      required: [image, port, size]
+      properties:
+        image:
+          type: string
+          maxLength: 512
+          description: >
+            Registry reference. Must be pinned to a digest
+            (`repo@sha256:...`) unless its registry appears in
+            `policies.allowed_registries`; `:latest`, explicit or implied
+            by an absent tag, is refused in every combination (RFC 017
+            §2.4).
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: >
+            The port the container listens on. Never opened directly:
+            ingress reaches it through the platform's load balancer and
+            nothing else can.
+        size:
+          type: string
+          enum: [small, medium, large]
+        replicas:
+          type: integer
+          minimum: 0
+          maximum: 10
+          default: 1
+          description: >
+            Zero means deployed and running nothing. Refused on GCP, where
+            Cloud Run reads a zero ceiling as unset and would uncap the
+            service instead of stopping it (RFC 017 §2.5).
+        public:
+          type: boolean
+          default: false
+          description: >
+            Puts the service behind a managed HTTPS ingress. It never
+            opens the container's own port (RFC 017 §2.3).
+        domain:
+          type: string
+          maxLength: 253
+          description: >
+            The hostname a public service is served on (RFC 017 §2.3.1).
+            Required when `public` is true on AWS, where ACM cannot issue
+            a certificate for a load balancer's own name; optional on GCP,
+            where absence means the built-in *.run.app endpoint. Refused
+            when `public` is false. On AWS the domain must be served from
+            a Route 53 hosted zone in the target account, since the
+            certificate is validated through DNS.
     Policies:
       type: object
       additionalProperties: false

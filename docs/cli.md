@@ -289,6 +289,97 @@ Two provider notes worth knowing:
   anywhere, and GCP firewall rules are allow-only — so nothing less actually
   closes the machine.
 
+## Container services
+
+```
+$ cloudsdd deploy "run ghcr.io/acme/api@sha256:9f2c… on port 8080 in eu-central-1"
+```
+
+Implemented on AWS (ECS on Fargate) and GCP (Cloud Run); Azure is not yet
+wired up. The service lands in the environment's own network, beside the
+database it was deployed to talk to, and pulls its image through that
+network's NAT gateway.
+
+```json
+{
+  "id": "api",
+  "type": "container_service",
+  "provider": "agnostic",
+  "scope": { "region": "eu-central-1", "environment": "prod" },
+  "properties": {
+    "image": "ghcr.io/acme/api@sha256:9f2c…",
+    "port": 8080,
+    "size": "small",
+    "replicas": 2,
+    "public": true,
+    "domain": "api.acme.example"
+  }
+}
+```
+
+`image` and `port` are required. `size` is `small`/`medium`/`large`, mapped to
+each platform's CPU and memory pairs. `replicas` defaults to 1 and is capped at
+10.
+
+**The image is the only property that decides what code runs**, so it is the
+one this tool is strictest about — see [`allowed_registries`](#allowed_registries).
+
+### Reachability
+
+`public` defaults to **false**, and a private service is reachable only from its
+own environment's network. That is the deliberate choice for the one resource
+type that runs arbitrary code.
+
+`public: true` means HTTPS, never a raw open port. What that takes differs:
+
+| | AWS | GCP |
+|---|---|---|
+| Endpoint | An internet-facing ALB in the environment's public subnets | The built-in `*.run.app` endpoint |
+| Certificate | ACM, validated through DNS | Google-managed |
+| `domain` | **Required** | Optional |
+| Plain HTTP | Redirected (301), never served | Redirected by Cloud Run |
+
+The asymmetry is not an oversight. ACM will not issue a certificate for a load
+balancer's own `*.elb.amazonaws.com` name and AWS has no equivalent of
+`*.run.app`, so a public service on AWS with no hostname could only be served
+over plain HTTP. CloudSDD refuses the Specification instead:
+
+```
+Error: aws: a public container_service requires `domain`; AWS cannot issue a
+certificate for a load balancer's own name
+```
+
+On AWS the domain must be served from a **Route 53 hosted zone in the target
+account** — the certificate is validated through DNS, and CloudSDD creates both
+the validation record and an alias record pointing the domain at the balancer.
+Without the second, the certificate would be valid and the hostname would
+resolve nowhere.
+
+A `domain` without `public: true` is refused on every provider: a hostname on
+something nothing outside can reach is a request that would not be honoured.
+
+### What you get without asking
+
+- A dedicated identity per service with **no permissions attached**. On AWS
+  that is a task role separate from the execution role the ECS agent uses to
+  pull the image; on GCP a service account declared explicitly, because Cloud
+  Run's fallback is the default compute account, which carries Editor on the
+  whole project.
+- The container's port reachable **only from the load balancer**, by security
+  group rather than by address range — anything else in the same subnet is
+  still shut out.
+- TLS 1.2 and above on AWS. The default ALB policy still admits TLS 1.0.
+- No `env` property to paste a credential into. Configuration injection needs a
+  secrets story and will get its own RFC.
+- Logs retained 30 days on AWS, so a chatty service does not accumulate a bill
+  nobody chose.
+
+`replicas: 0` — deployed and running nothing — works on AWS. It is refused on
+GCP: Cloud Run reads a zero ceiling as *unset* and would apply its own default,
+uncapping the service rather than stopping it. Cloud Run already scales to zero
+between requests, so nothing is lost but the ability to say "and never scale
+up".
+
 ## Choosing a cloud
 
 A resource may declare `"provider": "agnostic"` and let CloudSDD decide.
@@ -503,6 +594,10 @@ it in the ledger, so a retry does not re-create resources that already exist.
 | `container image must be pinned to a digest …` | The image carries a tag and its registry is not in `policies.allowed_registries`. Pin it (`@sha256:…`) or allow-list the registry. |
 | `container image must not use the \`latest\` tag` | `:latest`, or no tag at all. Name a version or a digest; there is no policy that permits it. |
 | `container image registry not in allowed_registries` | The image comes from a registry the Specification does not list. A digest does not exempt it. |
+| `a public container_service requires \`domain\`` | AWS only. ACM cannot certify a load balancer's own name, so a hostname is needed to serve HTTPS. |
+| `\`domain\` requires \`public: true\`` | A hostname on a service nothing outside can reach. Drop it, or make the service public. |
+| `no public Route 53 hosted zone … found` | The domain is not served from a Route 53 zone in this account, so the certificate cannot be validated through DNS. |
+| `Cloud Run cannot be pinned to zero replicas` | GCP only. Cloud Run reads a zero ceiling as unset; it already scales to zero between requests. |
 | `unknown or malformed property` | The translator produced a property the provider does not support. Since RFC 011 these are rejected instead of silently dropped, so the message names what would have been ignored. |
 | `property key … looks like a credential` | A credential was placed in the Specification. Credentials come from the local environment only. |
 | `encryption cannot be disabled on …` | GCP and Azure encrypt at rest unconditionally; the request is refused rather than quietly ignored. |

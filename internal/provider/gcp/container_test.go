@@ -19,6 +19,7 @@ import (
 const (
 	cloudRunServiceToken   = "gcp:cloudrunv2/service:Service"
 	cloudRunIamMemberToken = "gcp:cloudrunv2/serviceIamMember:ServiceIamMember"
+	domainMappingToken     = "gcp:cloudrun/domainMapping:DomainMapping"
 )
 
 // testImage is a digest-pinned reference, which is what the image rules
@@ -404,5 +405,52 @@ func TestValidateContainerServiceAcceptsAWellFormedOne(t *testing.T) {
 
 	if err := p.Validate(context.Background(), containerResource(nil), spec.Policies{}); err != nil {
 		t.Fatalf("Validate() = %v, want a well-formed container_service to be accepted", err)
+	}
+}
+
+// TestDeclareContainerServiceDomainIsOptional covers the GCP half of RFC
+// 017 §2.3.1.
+//
+// A domain is optional here and required on AWS, which is a difference
+// worth stating rather than papering over: Cloud Run serves the service on
+// *.run.app with a Google-managed certificate, so absence means "use that
+// endpoint" rather than "there is no HTTPS". ACM has no equivalent, which
+// is why the same absence is an error there.
+func TestDeclareContainerServiceDomainIsOptional(t *testing.T) {
+	withoutDomain := declaredContainer(t, func(p map[string]any) { p["public"] = true })
+	if hasResource(withoutDomain, domainMappingToken) {
+		t.Error("a domain mapping was declared for a service that named no domain")
+	}
+
+	withDomain := declaredContainer(t, func(p map[string]any) {
+		p["public"] = true
+		p["domain"] = "api.acme.example"
+	})
+
+	mapping := findResource(t, withDomain, domainMappingToken)
+	if got := mapping.Inputs["name"].StringValue(); got != "api.acme.example" {
+		t.Errorf("domain mapping name = %q, want the requested domain", got)
+	}
+	// NONE would map the domain and serve no certificate for it, which is
+	// the plain-HTTP outcome §2.3 refuses.
+	spec := mapping.Inputs["spec"].ObjectValue()
+	if got := spec["certificateMode"].StringValue(); got != certificateModeAutomatic {
+		t.Errorf("certificate mode = %q, want %q", got, certificateModeAutomatic)
+	}
+	if !spec["routeName"].HasValue() {
+		t.Error("the mapping names no route; it would point at nothing")
+	}
+}
+
+// TestDecodeContainerServiceRejectsADomainWithoutPublic: a hostname on a
+// service nothing outside can reach is a property the user asked for and
+// will not get, and the rule holds on every provider.
+func TestDecodeContainerServiceRejectsADomainWithoutPublic(t *testing.T) {
+	_, err := decodeContainerServiceProperties(containerProps(func(p map[string]any) {
+		p["domain"] = "api.acme.example"
+	}), nil)
+
+	if !errors.Is(err, container.ErrDomainWithoutPublic) {
+		t.Fatalf("decodeContainerServiceProperties() = %v, want ErrDomainWithoutPublic", err)
 	}
 }

@@ -76,6 +76,19 @@ type Properties struct {
 	// opens the container's own port: the platform terminates TLS and the
 	// container is reachable only from that ingress.
 	Public *bool `json:"public,omitempty"`
+
+	// Domain is the hostname a public service is served on (RFC 017
+	// §2.3.1).
+	//
+	// It exists because not every platform can hand back an HTTPS endpoint
+	// unprompted. Cloud Run serves `*.run.app` with a Google-managed
+	// certificate; AWS has no equivalent, and ACM will not issue a
+	// certificate for an ALB's own `*.elb.amazonaws.com` name. Without a
+	// hostname to name, `public: true` on AWS could only have been
+	// delivered as a plain HTTP listener, which §2.3 refuses.
+	//
+	// Bounded at 253 characters, the maximum length of a DNS name.
+	Domain string `json:"domain,omitempty" validate:"omitempty,hostname_rfc1123,max=253"`
 }
 
 // EffectiveReplicas returns Replicas, or the default when absent.
@@ -95,6 +108,30 @@ func (p Properties) EffectiveReplicas() int {
 // §2.3).
 func (p Properties) EffectivePublic() bool {
 	return p.Public != nil && *p.Public
+}
+
+// ErrDomainWithoutPublic indicates a `domain` on a service nothing outside
+// can reach (RFC 017 §2.3.1).
+//
+// Refused rather than ignored, on the RFC 011 §2.1 principle: a property
+// the provider does not act on is a request the user made and will not
+// get, and it must surface at Validate time rather than as a hostname that
+// resolves nowhere.
+var ErrDomainWithoutPublic = errors.New("container_service: `domain` requires `public: true`")
+
+// ValidateIngress applies the cross-field rules between `public` and
+// `domain` that no struct tag can express (RFC 017 §2.3.1).
+//
+// Only the half that holds on every provider lives here. "A public service
+// needs a domain" is an AWS limitation, not a property of the schema —
+// Cloud Run is public without one — so it belongs in the AWS provider,
+// where RFC 012 §1.3's rule applies: a request a provider cannot express
+// is refused by that provider, and by name.
+func (p Properties) ValidateIngress() error {
+	if p.Domain != "" && !p.EffectivePublic() {
+		return fmt.Errorf("%w: %q", ErrDomainWithoutPublic, p.Domain)
+	}
+	return nil
 }
 
 // Image reference errors (RFC 017 §2.4).

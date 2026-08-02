@@ -75,8 +75,9 @@ func TestDeclareScopeNetwork(t *testing.T) {
 	// that holds for the public tier too, which exists to hold a NAT
 	// gateway rather than anything that launches.
 	all := resourcesOfType(recorded, subnetToken)
-	if len(all) != subnetCount+1 {
-		t.Fatalf("declared %d subnets, want %d private plus one public", len(all), subnetCount)
+	if len(all) != subnetCount+publicSubnetCount {
+		t.Fatalf("declared %d subnets, want %d private plus %d public",
+			len(all), subnetCount, publicSubnetCount)
 	}
 
 	var privateSubnets []recordedResource
@@ -151,18 +152,30 @@ func TestDeclareScopeEgress(t *testing.T) {
 			private = append(private, s)
 		}
 	}
-	if len(public) != 1 {
-		t.Fatalf("declared %d public subnets, want 1 — it holds the nat gateway and nothing else", len(public))
+	// Two, not one: an internet-facing ALB refuses to exist in a single
+	// availability zone (RFC 017 §2.3.1). One NAT gateway all the same —
+	// the extra subnet is empty until a load balancer needs it.
+	if len(public) != publicSubnetCount {
+		t.Fatalf("declared %d public subnets, want %d — an internet-facing ALB needs two zones",
+			len(public), publicSubnetCount)
 	}
-	publicBlock := netip.MustParsePrefix(public[0].Inputs["cidrBlock"].StringValue())
-	if !cidr.Overlaps(publicBlock) {
-		t.Errorf("public subnet %s falls outside the scope range %s", publicBlock, cidr)
-	}
-	for _, s := range private {
-		block := netip.MustParsePrefix(s.Inputs["cidrBlock"].StringValue())
-		if block.Overlaps(publicBlock) {
-			t.Errorf("public subnet %s overlaps private subnet %s", publicBlock, block)
+	publicZones := map[string]bool{}
+	for _, p := range public {
+		publicZones[p.Inputs["availabilityZone"].StringValue()] = true
+
+		publicBlock := netip.MustParsePrefix(p.Inputs["cidrBlock"].StringValue())
+		if !cidr.Overlaps(publicBlock) {
+			t.Errorf("public subnet %s falls outside the scope range %s", publicBlock, cidr)
 		}
+		for _, s := range private {
+			block := netip.MustParsePrefix(s.Inputs["cidrBlock"].StringValue())
+			if block.Overlaps(publicBlock) {
+				t.Errorf("public subnet %s overlaps private subnet %s", publicBlock, block)
+			}
+		}
+	}
+	if len(publicZones) != publicSubnetCount {
+		t.Errorf("public subnets occupy %d zones, want %d: %v", len(publicZones), publicSubnetCount, publicZones)
 	}
 
 	// Two route tables, and each with the right kind of default route:
@@ -188,8 +201,9 @@ func TestDeclareScopeEgress(t *testing.T) {
 	// left unassociated falls back to the VPC's main route table, which
 	// has no default route: silently no egress, which is the bug this
 	// section exists to fix.
-	if n := len(resourcesOfType(recorded, routeTableAssocToken)); n != subnetCount+1 {
-		t.Errorf("declared %d route table associations, want %d — one per subnet", n, subnetCount+1)
+	if n := len(resourcesOfType(recorded, routeTableAssocToken)); n != subnetCount+publicSubnetCount {
+		t.Errorf("declared %d route table associations, want %d — one per subnet",
+			n, subnetCount+publicSubnetCount)
 	}
 }
 

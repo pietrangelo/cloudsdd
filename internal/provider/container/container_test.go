@@ -356,3 +356,60 @@ func FuzzParseImage(f *testing.F) {
 		}
 	})
 }
+
+// TestValidateIngress covers the one cross-field rule that holds on every
+// provider (RFC 017 §2.3.1).
+//
+// Only this half is shared. "A public service needs a domain" is an AWS
+// limitation — Cloud Run is public without one — so it lives in the AWS
+// provider, where RFC 012 §1.3's rule applies: a request a provider cannot
+// express is refused by that provider, and by name.
+func TestValidateIngress(t *testing.T) {
+	yes, no := true, false
+
+	tests := []struct {
+		name    string
+		domain  string
+		public  *bool
+		wantErr error
+	}{
+		{name: "no domain, private", public: nil},
+		{name: "no domain, public", public: &yes},
+		{name: "domain and public", domain: "api.acme.example", public: &yes},
+		{
+			// A hostname on a service nothing outside can reach is a
+			// property the user asked for and will not get.
+			name:    "domain without public",
+			domain:  "api.acme.example",
+			public:  nil,
+			wantErr: ErrDomainWithoutPublic,
+		},
+		{
+			name:    "domain with public explicitly false",
+			domain:  "api.acme.example",
+			public:  &no,
+			wantErr: ErrDomainWithoutPublic,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Properties{Domain: tt.domain, Public: tt.public}.ValidateIngress()
+
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("ValidateIngress() = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ValidateIngress() = %v, want %v", err, tt.wantErr)
+			}
+			// The message has to carry the domain, or an operator with
+			// several services cannot tell which one was refused.
+			if !strings.Contains(err.Error(), tt.domain) {
+				t.Errorf("error %q does not name the domain", err)
+			}
+		})
+	}
+}

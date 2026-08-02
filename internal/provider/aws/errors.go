@@ -69,3 +69,31 @@ var ErrUnsupportedOS = errors.New("aws: unsupported operating system")
 // account or region out of does not have the expected shape (RFC 012
 // §4.1).
 var ErrMalformedARN = errors.New("aws: malformed ARN")
+
+// ErrUnsupportedContainerSize indicates a container_service size with no
+// Fargate CPU/memory pair (RFC 017 §2.2).
+//
+// Separate from ErrUnsupportedSize, which is compute_instance's: the two
+// share a vocabulary and nothing else, and a single error would make a
+// message about machine types appear for a container.
+var ErrUnsupportedContainerSize = errors.New("aws: unsupported container size")
+
+// ErrPublicRequiresDomain indicates a public container_service with no
+// `domain` (RFC 017 §2.3.1).
+//
+// ACM will not issue a certificate for an ALB's own *.elb.amazonaws.com
+// name, and AWS has no equivalent of Cloud Run's *.run.app, so a public
+// service with no hostname could only be served over plain HTTP — which
+// RFC 017 §2.3 refuses. Refusing the Specification instead follows RFC 012
+// §1.3: a request a provider cannot express is an error, never a silent
+// downgrade to something weaker than what was asked for.
+var ErrPublicRequiresDomain = errors.New(
+	"aws: a public container_service requires `domain`; AWS cannot issue a certificate for a load balancer's own name")
+
+// ErrPublicSubnetsMissing indicates a scope network without the public
+// tier an internet-facing load balancer needs (RFC 017 §2.3.1).
+//
+// It means the network predates the tier or was altered out of band. Named
+// rather than left to the ALB API, whose own error for a single-subnet
+// request does not mention CloudSDD's layout at all.
+var ErrPublicSubnetsMissing = errors.New("aws: the scope network has no public subnets")

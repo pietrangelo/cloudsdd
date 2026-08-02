@@ -61,7 +61,7 @@ cloudsdd/
 │   ├── spec/                 # Specification types, strict parsing, domain validation
 │   ├── state/                # Local ledger of deployed resources, fed back to the translator (RFC 009)
 │   ├── provider/             # CloudProvider interface, Diff/Result types, AllowedRegions helper
-│   │   ├── aws/              # AWS implementation (RFC 002/003/004/007/012/013/016)
+│   │   ├── aws/              # AWS implementation (RFC 002/003/004/007/012/013/016/017)
 │   │   ├── gcp/              # GCP implementation (RFC 008/012/013/016/017)
 │   │   ├── azure/            # Azure implementation (RFC 008/012/013/015/016)
 │   │   ├── compute/          # Cloud-agnostic compute_instance shape, shared by all three (RFC 013)
@@ -343,7 +343,7 @@ forgets. It fails closed — a missing or non-string `image` is an error, not
 a skip — because a policy check that passes when it cannot read its input
 passes hardest exactly when something is wrong.
 
-### `internal/provider/aws` (RFC 002, 003, 004, 007, 012, 013)
+### `internal/provider/aws` (RFC 002, 003, 004, 007, 012, 013, 016, 017)
 
 First concrete implementation of `CloudProvider`, based on the Pulumi
 Automation API (inline program in Go; no `pulumi` process is shelled out
@@ -382,15 +382,18 @@ the machine, but invokes it itself).
   availability zones (RDS refuses a subnet group with fewer), and the DB
   subnet group.
 
-  **Egress (RFC 017 §2.7)**: a third subnet tagged `CloudSDDTier=public`
-  holds an internet gateway and **one NAT gateway for the whole scope**,
+  **Egress (RFC 017 §2.7)**: two subnets tagged `CloudSDDTier=public`
+  hold an internet gateway and **one NAT gateway for the whole scope**,
   and the private subnets route `0.0.0.0/0` through it. RFC 016 shipped the
   network with no route out, arguing that a database and a
   Session-Manager-reached VM both work without one. The database does; the
   VM does not, because the SSM agent has to reach the SSM endpoints before
   a session exists — so an instance booted into a subnet where nothing
   could talk to it. One NAT rather than one per zone is the cost trade RFC
-  016 §7.1 priced. No resource is ever placed in the public tier and no
+  016 §7.1 priced. The tier spans two availability zones because an
+  internet-facing load balancer refuses to exist in one (RFC 017 §2.3.1);
+  only the first subnet holds the NAT, so this is not one gateway per zone.
+  Nothing but the gateway and a load balancer is ever placed there, and no
   subnet assigns a public address on launch: a route out is not a route in.
 
   Resource programs find that network by **tag**, not through a Pulumi
@@ -431,6 +434,49 @@ the machine, but invokes it itself).
   `DeploymentTarget` and uses credentials obtained via STS AssumeRole
   (`NewTargetProviderFactory`, RFC 004 §4), passed explicitly to the
   Pulumi AWS provider (never written to disk).
+- **`container_service` is ECS on Fargate** (RFC 017 §2.6), and it is the
+  resource type that needs the most surrounding infrastructure: a cluster,
+  a task definition, two IAM roles, a log group, two security groups, a
+  load balancer, a target group and its listeners.
+
+  *Two roles, not one.* The **execution role** belongs to the ECS agent —
+  it pulls the image and opens the log stream before the container starts
+  — and carries the AWS-managed `AmazonECSTaskExecutionRolePolicy`. The
+  **task role** is what the container itself can do, and nothing is
+  attached to it (RFC 017 §2.6). Conflating them is how a workload ends up
+  able to read every log group in the account.
+
+  *The perimeter is two tiers.* The load balancer's group admits `443`
+  from the internet on a public service, or the VPC's own range on a
+  private one. The service's group admits the container port **from the
+  balancer's security group** — by group, not by CIDR, because a CIDR rule
+  covering the subnet would admit everything else that happens to sit in
+  it. The task runs in a private subnet with `assignPublicIp: false` and
+  pulls its image through the scope's NAT.
+
+  *Public needs a `domain`* (RFC 017 §2.3.1). ACM will not issue a
+  certificate for an ALB's own `*.elb.amazonaws.com` name and AWS has no
+  equivalent of Cloud Run's `*.run.app`, so a public service with no
+  hostname could only be served over plain HTTP — which §2.3 refuses.
+  `ErrPublicRequiresDomain` refuses the Specification instead. Given a
+  domain, CloudSDD looks up its Route 53 hosted zone, issues the
+  certificate, creates the DNS validation record, waits for issuance
+  through `acm.CertificateValidation` (attaching a still-pending
+  certificate to a listener fails), and creates an alias record pointing
+  the domain at the balancer — without which the certificate is valid and
+  the hostname resolves nowhere.
+
+  Port 80 carries a **redirect** listener, never a forward. Leaving it
+  closed would be safe too, and would mean every plain-HTTP client gets a
+  connection refused rather than an upgrade; what must never happen is
+  port 80 serving the application. The HTTPS listener pins
+  `ELBSecurityPolicy-TLS13-1-2-2021-06`, because the AWS default still
+  admits TLS 1.0 and 1.1.
+
+  The public subnet tier gained a **second availability zone** for this:
+  an internet-facing ALB refuses to be created with subnets in one zone.
+  Still one NAT gateway — the extra subnet is empty until a balancer needs
+  it, and RFC 016 §7.1's cost argument is unchanged.
 - **Power scheduling (RFC 012 §4.1)**: EventBridge Scheduler with
   *universal targets* — `arn:aws:scheduler:::aws-sdk:rds:{start,stop}DBInstance`
   for a database, `…:aws-sdk:ec2:{start,stop}Instances` for a VM (RFC 013)
@@ -487,7 +533,7 @@ neutralise the `default` network's `default-allow-ssh`, and the scope
 network ships no rules at all.
 
 **`container_service` is Cloud Run v2** (RFC 017 §2.6), the first provider
-to implement the type. Two things are worth naming.
+to implement the type. Three things are worth naming.
 
 *Public means two gates, not one.* Cloud Run decides reachability with an
 ingress setting and callability with an IAM policy, and they are
@@ -512,6 +558,14 @@ The service joins the scope's own subnet through direct VPC egress with
 database just as well and lets internet-bound traffic leave from Google's
 shared pool; routing everything through the scope's Cloud NAT is what
 makes the scope leave from one address an account-level control can see.
+
+*A `domain` is optional here and required on AWS*, which is worth stating
+rather than papering over (RFC 017 §2.3.1). Cloud Run serves the service on
+`*.run.app` with a Google-managed certificate, so absence means "use that
+endpoint" — not "there is no HTTPS", which is what the same absence would
+mean on an ALB. When a domain is given it becomes a `cloudrun.DomainMapping`
+with `certificateMode: AUTOMATIC`; `NONE` would map the hostname and serve
+no certificate for it, which is the plain-HTTP outcome §2.3 refuses.
 
 `replicas` is a **ceiling** here rather than a fleet size, because Cloud
 Run's floor is zero and that is the point of the platform. An explicit
@@ -821,15 +875,15 @@ artifact it archives.
 
 Not yet implemented:
 
-- **`container_service` on AWS and Azure.** RFC 017 steps 1 and 2 have
-  landed: the cloud-agnostic shape and image rules are in
+- **`container_service` on Azure.** RFC 017 steps 1 to 3 have landed:
+  the cloud-agnostic shape and image rules are in
   `internal/provider/container`, `policies.allowed_registries` is enforced
-  at the Engine, the scope network has a route out, and **GCP implements
-  the type on Cloud Run**. AWS (ECS on Fargate) and Azure (Container Apps)
-  do not yet, so a Specification naming one still fails there with
-  `unsupported resource type` — and an `agnostic` container service
-  resolves to GCP because it is the only candidate. Power-schedule
-  composition (RFC 017 step 5) is not wired on any provider.
+  at the Engine, the scope network has a route out, and **GCP (Cloud Run)
+  and AWS (ECS on Fargate) both implement the type**. Azure (Container
+  Apps) does not yet, so a Specification naming one fails there with
+  `unsupported resource type`, and an `agnostic` container service will
+  never resolve to Azure. Power-schedule composition (RFC 017 step 5) is
+  not wired on any provider.
 - References/dependencies between resources in the same Specification —
   which is also why `Destroy` walks the resource list in reverse rather
   than in dependency order.

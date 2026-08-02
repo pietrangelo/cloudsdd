@@ -6,6 +6,7 @@ package gcp
 import (
 	"fmt"
 
+	"github.com/pulumi/pulumi-gcp/sdk/v7/go/gcp/cloudrun"
 	"github.com/pulumi/pulumi-gcp/sdk/v7/go/gcp/cloudrunv2"
 	"github.com/pulumi/pulumi-gcp/sdk/v7/go/gcp/serviceaccount"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -44,6 +45,12 @@ const (
 	allUsers    = "allUsers"
 )
 
+// certificateModeAutomatic provisions and renews a Google-managed
+// certificate for a mapped domain. The alternative, NONE, maps the domain
+// and serves no certificate for it — the plain-HTTP outcome RFC 017 §2.3
+// refuses.
+const certificateModeAutomatic = "AUTOMATIC"
+
 // runResources maps a cloud-agnostic size onto Cloud Run CPU and memory
 // limits.
 //
@@ -79,6 +86,9 @@ func decodeContainerServiceProperties(props map[string]any, allowedRegistries []
 		return nil, err
 	}
 	if err := container.ValidateImage(p.Image, allowedRegistries); err != nil {
+		return nil, fmt.Errorf("gcp: %w", err)
+	}
+	if err := p.ValidateIngress(); err != nil {
 		return nil, fmt.Errorf("gcp: %w", err)
 	}
 	if p.EffectiveReplicas() == 0 {
@@ -184,6 +194,36 @@ func declareContainerService(
 				Member:   pulumi.String(allUsers),
 			}); err != nil {
 			return nil, fmt.Errorf("gcp: failed to declare the public invoker binding for %q: %w", id, err)
+		}
+	}
+
+	// A domain is optional here, unlike AWS. Cloud Run already serves the
+	// service on *.run.app with a Google-managed certificate, so absence
+	// means "use that endpoint" rather than "there is no HTTPS" (RFC 017
+	// §2.3.1). Present, it adds a mapping — with a managed certificate
+	// too, so the promise is the same either way.
+	if p.Domain != "" {
+		if _, err := cloudrun.NewDomainMapping(ctx, id+"-domain", &cloudrun.DomainMappingArgs{
+			Name:     pulumi.String(p.Domain),
+			Location: pulumi.String(region),
+			// The namespace is the project, taken from the service's own
+			// output rather than from configuration: the provider resolves
+			// the project from the ambient credentials, and reading it back
+			// from the resource is how the two are guaranteed to agree
+			// (the same approach declareDatabaseSchedule takes).
+			Metadata: &cloudrun.DomainMappingMetadataArgs{
+				Namespace: service.Project,
+			},
+			Spec: &cloudrun.DomainMappingSpecArgs{
+				RouteName: service.Name,
+				// AUTOMATIC provisions and renews a Google-managed
+				// certificate. NONE would map the domain and serve no
+				// certificate for it, which is the plain-HTTP outcome
+				// §2.3 refuses.
+				CertificateMode: pulumi.String(certificateModeAutomatic),
+			},
+		}); err != nil {
+			return nil, fmt.Errorf("gcp: failed to map domain %q to %q: %w", p.Domain, id, err)
 		}
 	}
 
