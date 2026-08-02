@@ -15,6 +15,9 @@
   property. §2.6 promised HTTPS through an ACM certificate with no field
   to name its subject, and ACM will not issue one for an ALB's own DNS
   name, so `public: true` on AWS was undeliverable as specified.
+- **Amended:** 2026-08-02, during step 4 — §2.6 records the Container Apps
+  subnet requirement, which the RFC 016 address plan does not satisfy
+  without naming a workload profile.
 
 ## 1. Problem
 
@@ -141,20 +144,27 @@ on.
 - **Refused when `public` is false**, on every provider. A hostname on a
   service nothing outside can reach is a property the user asked for and
   will not get, which RFC 011 §2.1 rejects as a class.
-- **Optional on GCP**, where absence means the built-in `*.run.app`
-  endpoint and presence means a Cloud Run domain mapping.
+- **Optional on GCP and Azure**, where the platform already serves the
+  service on a managed-certificate endpoint of its own — `*.run.app` and
+  `*.azurecontainerapps.io`. Absence means that endpoint; presence means a
+  Cloud Run domain mapping or a Container Apps custom domain, both with
+  managed certificates.
 
-The domain must live in a **Route 53 hosted zone in the target account**
-on AWS. That is a real constraint and it is stated rather than discovered:
+The domain must live in a hosted zone in the target account — **Route 53**
+on AWS, **Azure DNS** on Azure. That is a real constraint and it is stated
+rather than discovered:
 certificate issuance needs DNS validation records, and the alternative —
 emitting the records and asking the user to create them by hand — would
 make `apply` block indefinitely on an action CloudSDD cannot see happen.
-A domain outside Route 53 is an error naming the zone that was looked for.
+A domain outside that zone is an error naming the zone that was looked for.
 
-CloudSDD creates, in the user's zone, the ACM validation records and an
-alias record pointing the domain at the load balancer. Without the second
-the certificate is valid and the hostname resolves nowhere, which is a
-deployment that reports success and serves nothing.
+CloudSDD creates, in the user's zone, the records each platform needs: on
+AWS the ACM validation record and an alias record pointing the domain at
+the load balancer; on Azure a CNAME to the app's ingress FQDN and the
+`asuid.`-prefixed TXT record Azure issues its managed certificate against.
+Without the resolving record the certificate is valid and the hostname
+points nowhere, which is a deployment that reports success and serves
+nothing.
 
 The alternative considered and rejected was CloudFront in front of an
 internal ALB: `*.cloudfront.net` carries a default certificate, so it
@@ -224,11 +234,21 @@ a `Validate` error, never a dropped rule.
 
 | | AWS | GCP | Azure |
 |---|---|---|---|
-| Service | ECS on Fargate | Cloud Run | Container Apps |
+| Service | ECS on Fargate | Cloud Run | Container Apps, consumption workload profile (see below) |
 | Ingress when `public` | ALB, HTTPS, ACM certificate | Built-in HTTPS endpoint | Managed ingress, HTTPS |
 | Ingress when private | Internal ALB in the scope's subnets | Ingress restricted to internal traffic | Internal ingress |
 | Identity | Task role with no policies attached | Dedicated service account, no roles | Managed identity, no assignments |
 | Egress for image pull | NAT gateway, one per scope (§2.7) | Cloud NAT on the scope router (§2.7) | NAT gateway on the scope subnet (§2.7) |
+
+**Azure needs a workload profile, and it is not a performance choice.**
+A Container Apps environment is injected into a delegated subnet, and a
+*consumption-only* environment requires that subnet to be at least a `/23`.
+The RFC 016 address plan gives each scope a `/20` carved into `/24`s, so a
+consumption-only environment does not fit the plan at all. Naming a
+workload profile lowers the requirement to a `/27`, which a `/24` satisfies
+with room to spare. The alternative — widening every scope's subnets to
+`/23` for a resource type most scopes will not hold — would re-address
+every network already deployed to accommodate one that is not.
 
 The identity row is the one to notice: on every provider the service gets
 an identity of its own with **nothing attached**, following RFC 013's

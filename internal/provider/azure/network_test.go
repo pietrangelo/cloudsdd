@@ -62,18 +62,19 @@ func TestDeclareScopeNetwork(t *testing.T) {
 		t.Errorf("vnet address space = %v, want the derived %s", spaces, cidr)
 	}
 
-	// One general subnet plus one per engine: a subnet delegated to a
-	// database service cannot host a VM or the other engine's server.
+	// One general subnet, one per engine, and one for Container Apps: a
+	// delegated subnet names one service and excludes every other
+	// occupant, so none of them can be shared.
 	subnets := resourcesOfType(recorded, subnetToken)
-	if len(subnets) != 3 {
-		t.Fatalf("declared %d subnets, want 3 (general, postgres, mysql)", len(subnets))
+	if len(subnets) != 4 {
+		t.Fatalf("declared %d subnets, want 4 (general, postgres, mysql, containerapps)", len(subnets))
 	}
 
 	byName := map[string]recordedResource{}
 	for _, s := range subnets {
 		byName[s.Inputs["name"].StringValue()] = s
 	}
-	for _, want := range []string{generalSubnetName, "postgres", "mysql"} {
+	for _, want := range []string{generalSubnetName, "postgres", "mysql", containerAppsSubnetName} {
 		if _, ok := byName[want]; !ok {
 			t.Errorf("no %q subnet was declared", want)
 		}
@@ -85,8 +86,9 @@ func TestDeclareScopeNetwork(t *testing.T) {
 	}
 
 	for engine, delegation := range map[string]string{
-		"postgres": "Microsoft.DBforPostgreSQL/flexibleServers",
-		"mysql":    "Microsoft.DBforMySQL/flexibleServers",
+		"postgres":              "Microsoft.DBforPostgreSQL/flexibleServers",
+		"mysql":                 "Microsoft.DBforMySQL/flexibleServers",
+		containerAppsSubnetName: containerAppsDelegation,
 	} {
 		delegations := byName[engine].Inputs["delegations"].ArrayValue()
 		if len(delegations) != 1 {
@@ -357,5 +359,59 @@ func TestDestroyNetworkRefusesAnUnusableAddressPlan(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "RFC 1918") {
 		t.Errorf("error = %q, want it to name the address-plan problem", err)
+	}
+}
+
+// TestResourceScope: the scope a resource's network is looked up by has to
+// be derived from the same three fields the network stack was named for,
+// or a resource looks for a network nobody built.
+//
+// It carries Account as well as Environment and Region because a
+// DeploymentTarget is a separate credential boundary (RFC 004 §2.2): two
+// accounts with the same environment name have different networks.
+func TestResourceScope(t *testing.T) {
+	tests := []struct {
+		name     string
+		resource spec.Resource
+		want     provider.NetworkScope
+	}{
+		{
+			name: "fully scoped",
+			resource: spec.Resource{
+				Account: "prod",
+				Scope:   spec.Scope{Environment: "live", Region: "westeurope"},
+			},
+			want: provider.NetworkScope{
+				Provider:    spec.ProviderAzure,
+				Account:     "prod",
+				Environment: "live",
+				Region:      "westeurope",
+			},
+		},
+		{
+			// Legal, and it means "I have not told CloudSDD where this
+			// belongs" (RFC 016 §7.4). It must still derive a scope rather
+			// than an error.
+			name:     "unscoped",
+			resource: spec.Resource{},
+			want:     provider.NetworkScope{Provider: spec.ProviderAzure},
+		},
+		{
+			// Zones are not part of the network scope: a network spans the
+			// region, not one zone within it.
+			name: "zones do not narrow the network",
+			resource: spec.Resource{
+				Scope: spec.Scope{Region: "westeurope", Zones: []string{"1", "2"}},
+			},
+			want: provider.NetworkScope{Provider: spec.ProviderAzure, Region: "westeurope"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resourceScope(tt.resource); got != tt.want {
+				t.Errorf("resourceScope() = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }

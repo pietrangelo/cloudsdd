@@ -63,7 +63,7 @@ cloudsdd/
 │   ├── provider/             # CloudProvider interface, Diff/Result types, AllowedRegions helper
 │   │   ├── aws/              # AWS implementation (RFC 002/003/004/007/012/013/016/017)
 │   │   ├── gcp/              # GCP implementation (RFC 008/012/013/016/017)
-│   │   ├── azure/            # Azure implementation (RFC 008/012/013/015/016)
+│   │   ├── azure/            # Azure implementation (RFC 008/012/013/015/016/017)
 │   │   ├── compute/          # Cloud-agnostic compute_instance shape, shared by all three (RFC 013)
 │   │   ├── container/        # Cloud-agnostic container_service shape and image rules (RFC 017)
 │   │   ├── decode/           # Shared strict property decoder + credential-name denylist (RFC 011)
@@ -589,7 +589,7 @@ environment running through a shutdown the user believed they had
 scheduled, and the failure would surface as an invoice rather than an
 error.
 
-### `internal/provider/azure` (RFC 008, 012, 013, 015)
+### `internal/provider/azure` (RFC 008, 012, 013, 015, 016, 017)
 
 Blob storage and Flexible Server databases, in a resource group per
 resource since Azure has no ambient container and no default network.
@@ -625,6 +625,45 @@ attach one. Discovery is by derived name through `LookupSubnet` and
 `GetDnsZone`: Azure resource IDs carry the subscription, which a resource
 program cannot compute, so unlike GCP the IDs must be looked up even
 though the names are derived.
+
+**`container_service` is Container Apps** (RFC 017 §2.6), the last of the
+three, and with it no `ResourceType` in the schema is advertised and
+unimplemented.
+
+*Private means two settings, not one.* The environment's
+`internalLoadBalancerEnabled` decides whether an external endpoint exists
+at all; the app's `externalEnabled` decides whether this app uses one.
+Setting only the second would leave an environment a later app could take
+an external endpoint from by accident.
+
+*HTTPS comes from stating a value, not from leaving it alone.* Azure's
+`allowInsecureConnections` defaults to **true**, which serves plain HTTP
+alongside HTTPS rather than redirecting. It is set false explicitly, which
+is the whole of §2.3's "plain HTTP redirects rather than being served" on
+this provider — the built-in `*.azurecontainerapps.io` endpoint carries a
+managed certificate, so a `domain` is optional here as on GCP.
+
+*The workload profile is an addressing constraint, not a performance one.*
+A Container Apps environment is injected into a delegated subnet, and a
+consumption-only environment requires that subnet to be at least a `/23`.
+The RFC 016 address plan carves each scope's `/20` into `/24`s, so a
+consumption-only environment does not fit the plan. Naming a workload
+profile lowers the requirement to a `/27`. The alternative — widening
+every scope's subnets for a resource type most scopes will not hold —
+would re-address every network already deployed.
+
+The scope network therefore gained a fourth subnet, delegated to
+`Microsoft.App/environments` at index 3, alongside the general subnet and
+the two engine subnets. Declared with the network rather than with the
+first container service, for the reason the engine subnets already are:
+the network is built before the resources in it and cannot know what the
+scope will hold.
+
+The identity is **user-assigned** rather than system-assigned, with no role
+assignments, so the absence of permissions is a property of a resource a
+test can point at rather than of one Azure generates. `replicas` sets both
+`minReplicas` and `maxReplicas`: a floor below the requested count would
+mean a Specification asking for three replicas usually running one.
 
 **`deletion_protection` is enforced twice** (RFC 015 §2.1), because
 Flexible Server has no server-side equivalent of the flag AWS and GCP
@@ -875,15 +914,13 @@ artifact it archives.
 
 Not yet implemented:
 
-- **`container_service` on Azure.** RFC 017 steps 1 to 3 have landed:
-  the cloud-agnostic shape and image rules are in
-  `internal/provider/container`, `policies.allowed_registries` is enforced
-  at the Engine, the scope network has a route out, and **GCP (Cloud Run)
-  and AWS (ECS on Fargate) both implement the type**. Azure (Container
-  Apps) does not yet, so a Specification naming one fails there with
-  `unsupported resource type`, and an `agnostic` container service will
-  never resolve to Azure. Power-schedule composition (RFC 017 step 5) is
-  not wired on any provider.
+- **Power-schedule composition for `container_service`** (RFC 017 step 5).
+  `ResourceType.SupportsSchedule()` returns true for the type and the
+  Engine compiles a schedule for it, but no provider translates that into
+  a replica change yet, so a scheduled container service runs regardless.
+  Steps 1 to 4 have landed: **all three providers implement the type**, so
+  as of RFC 017 step 4 no `ResourceType` in the schema is advertised and
+  unimplemented — the first time that has been true.
 - References/dependencies between resources in the same Specification —
   which is also why `Destroy` walks the resource list in reverse rather
   than in dependency order.

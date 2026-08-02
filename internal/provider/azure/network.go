@@ -35,6 +35,12 @@ const (
 	subnetIndexGeneral  = 0
 	subnetIndexPostgres = 1
 	subnetIndexMySQL    = 2
+	// A Container Apps environment needs a subnet of its own, delegated to
+	// Microsoft.App/environments, for the same reason the databases do: a
+	// delegation names one service and excludes every other occupant (RFC
+	// 017 §2.6). Added at index 3, so nothing already deployed is
+	// renumbered.
+	subnetIndexContainerApps = 3
 )
 
 // subnetJoinAction is the only action the delegation needs: it lets the
@@ -180,6 +186,10 @@ func declareScopeNetwork(ctx *pulumi.Context, s provider.NetworkScope, cidr neti
 		return err
 	}
 
+	if err := declareContainerAppsSubnet(ctx, s, rg, vnet, cidr); err != nil {
+		return err
+	}
+
 	// One delegated subnet and one private DNS zone per engine. A subnet
 	// delegated to Microsoft.DBforMySQL cannot host a PostgreSQL server
 	// or a VM, so they cannot be shared.
@@ -246,6 +256,51 @@ func declareScopeEgress(
 			NatGatewayId: gateway.ID(),
 		}); err != nil {
 		return fmt.Errorf("azure: failed to attach the nat gateway to the general subnet for scope %q: %w",
+			scopeName(s), err)
+	}
+	return nil
+}
+
+// declareContainerAppsSubnet carves the subnet a Container Apps
+// environment is injected into (RFC 017 §2.6).
+//
+// Declared with the network rather than with the first container service,
+// for the reason the engine subnets already are: the network is built
+// before the resources in it and cannot know what the scope will hold, and
+// an empty subnet costs nothing.
+//
+// The delegation is what lets the Container Apps service place its
+// infrastructure here, and — as with the database subnets — it is also
+// what keeps anything else out.
+func declareContainerAppsSubnet(
+	ctx *pulumi.Context,
+	s provider.NetworkScope,
+	rg *core.ResourceGroup,
+	vnet *network.VirtualNetwork,
+	cidr netip.Prefix,
+) error {
+	name := scopeNetworkName(s)
+
+	block, err := subnetBlock(cidr, subnetIndexContainerApps)
+	if err != nil {
+		return fmt.Errorf("azure: scope %q: %w", scopeName(s), err)
+	}
+	if _, err := network.NewSubnet(ctx, name+"-containerapps-subnet", &network.SubnetArgs{
+		Name:               pulumi.String(containerAppsSubnetName),
+		ResourceGroupName:  rg.Name,
+		VirtualNetworkName: vnet.Name,
+		AddressPrefixes:    pulumi.StringArray{pulumi.String(block.String())},
+		Delegations: network.SubnetDelegationArray{
+			&network.SubnetDelegationArgs{
+				Name: pulumi.String("containerapps"),
+				ServiceDelegation: &network.SubnetDelegationServiceDelegationArgs{
+					Name:    pulumi.String(containerAppsDelegation),
+					Actions: pulumi.StringArray{pulumi.String(subnetJoinAction)},
+				},
+			},
+		},
+	}); err != nil {
+		return fmt.Errorf("azure: failed to declare the container apps subnet for scope %q: %w",
 			scopeName(s), err)
 	}
 	return nil
@@ -320,6 +375,13 @@ func declareEngineNetwork(
 // are scoped by the VNet they sit in, and a resource program has to name
 // them to find them.
 const generalSubnetName = "general"
+
+// containerAppsSubnetName is the subnet a Container Apps environment is
+// injected into, and containerAppsDelegation is the service it belongs to.
+const (
+	containerAppsSubnetName = "containerapps"
+	containerAppsDelegation = "Microsoft.App/environments"
+)
 
 func engineSubnetName(engine string) string { return engine }
 

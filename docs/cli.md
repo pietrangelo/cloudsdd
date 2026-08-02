@@ -295,10 +295,10 @@ Two provider notes worth knowing:
 $ cloudsdd deploy "run ghcr.io/acme/api@sha256:9f2c… on port 8080 in eu-central-1"
 ```
 
-Implemented on AWS (ECS on Fargate) and GCP (Cloud Run); Azure is not yet
-wired up. The service lands in the environment's own network, beside the
-database it was deployed to talk to, and pulls its image through that
-network's NAT gateway.
+Implemented on all three clouds: AWS (ECS on Fargate), GCP (Cloud Run) and
+Azure (Container Apps). The service lands in the environment's own network,
+beside the database it was deployed to talk to, and pulls its image through
+that network's NAT gateway.
 
 ```json
 {
@@ -332,12 +332,12 @@ type that runs arbitrary code.
 
 `public: true` means HTTPS, never a raw open port. What that takes differs:
 
-| | AWS | GCP |
-|---|---|---|
-| Endpoint | An internet-facing ALB in the environment's public subnets | The built-in `*.run.app` endpoint |
-| Certificate | ACM, validated through DNS | Google-managed |
-| `domain` | **Required** | Optional |
-| Plain HTTP | Redirected (301), never served | Redirected by Cloud Run |
+| | AWS | GCP | Azure |
+|---|---|---|---|
+| Endpoint | An internet-facing ALB in the environment's public subnets | The built-in `*.run.app` endpoint | The built-in `*.azurecontainerapps.io` endpoint |
+| Certificate | ACM, validated through DNS | Google-managed | Azure-managed |
+| `domain` | **Required** | Optional | Optional |
+| Plain HTTP | Redirected (301), never served | Redirected by Cloud Run | Redirected by the managed ingress |
 
 The asymmetry is not an oversight. ACM will not issue a certificate for a load
 balancer's own `*.elb.amazonaws.com` name and AWS has no equivalent of
@@ -349,11 +349,13 @@ Error: aws: a public container_service requires `domain`; AWS cannot issue a
 certificate for a load balancer's own name
 ```
 
-On AWS the domain must be served from a **Route 53 hosted zone in the target
-account** — the certificate is validated through DNS, and CloudSDD creates both
-the validation record and an alias record pointing the domain at the balancer.
-Without the second, the certificate would be valid and the hostname would
-resolve nowhere.
+Where a `domain` is given, it must be served from a hosted zone in the target
+account — **Route 53** on AWS, **Azure DNS** on Azure. The managed certificate
+is issued only once the verification records resolve, so CloudSDD creates them:
+on AWS the ACM validation record plus an alias record pointing the domain at
+the balancer, on Azure a CNAME to the app plus the `asuid.` TXT record. Without
+the resolving record the certificate would be valid and the hostname would
+point nowhere.
 
 A `domain` without `public: true` is refused on every provider: a hostname on
 something nothing outside can reach is a request that would not be honoured.
@@ -364,11 +366,14 @@ something nothing outside can reach is a request that would not be honoured.
   that is a task role separate from the execution role the ECS agent uses to
   pull the image; on GCP a service account declared explicitly, because Cloud
   Run's fallback is the default compute account, which carries Editor on the
-  whole project.
+  whole project; on Azure a user-assigned managed identity with no role
+  assignments.
 - The container's port reachable **only from the load balancer**, by security
   group rather than by address range — anything else in the same subnet is
   still shut out.
 - TLS 1.2 and above on AWS. The default ALB policy still admits TLS 1.0.
+- Plain HTTP refused on Azure. `allowInsecureConnections` defaults to *true*
+  there, which would serve HTTP alongside HTTPS instead of redirecting.
 - No `env` property to paste a credential into. Configuration injection needs a
   secrets story and will get its own RFC.
 - Logs retained 30 days on AWS, so a chatty service does not accumulate a bill

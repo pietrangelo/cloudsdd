@@ -90,6 +90,15 @@ func (p *AzureProvider) Validate(ctx context.Context, r spec.Resource, policies 
 		if _, err := compute.Zone(r.Scope.Zones); err != nil {
 			return fmt.Errorf("azure: resource %q: %w", r.ID, err)
 		}
+	case spec.ResourceTypeContainerService:
+		if _, err := decodeContainerServiceProperties(r.Properties, policies.AllowedRegistries); err != nil {
+			return fmt.Errorf("azure: resource %q: %w", r.ID, err)
+		}
+		// Container Apps places replicas itself across the environment, so
+		// a pinned zone is a placement the user asked for and will not get.
+		if len(r.Scope.Zones) > 0 {
+			return fmt.Errorf("azure: resource %q: %w", r.ID, ErrZonesNotSupported)
+		}
 	default:
 		return fmt.Errorf("azure: resource %q: unsupported resource type: %q", r.ID, r.Type)
 	}
@@ -187,6 +196,23 @@ func (p *AzureProvider) resourceProgram(r spec.Resource, policies spec.Policies)
 		}
 		return func(ctx *pulumi.Context) error {
 			_, err := declareComputeInstance(ctx, r.ID, region, zone, resourceScope(r), *props, rules)
+			return err
+		}, region, nil
+
+	case spec.ResourceTypeContainerService:
+		props, err := decodeContainerServiceProperties(r.Properties, policies.AllowedRegistries)
+		if err != nil {
+			return nil, "", fmt.Errorf("azure: resource %q: %w", r.ID, err)
+		}
+		scope := resourceScope(r)
+		return func(ctx *pulumi.Context) error {
+			// The Engine provisioned the scope's network, including the
+			// delegated Container Apps subnet, before this program runs.
+			net, err := lookupScopeNetwork(ctx, scope, containerAppsSubnetName)
+			if err != nil {
+				return err
+			}
+			_, err = declareContainerService(ctx, r.ID, region, scope, net, *props)
 			return err
 		}, region, nil
 

@@ -115,8 +115,12 @@ func TestValidate(t *testing.T) {
 			wantErr:  "property validation failed",
 		},
 		{
+			// cross_account_role stands in here now. compute_instance held
+			// the role until RFC 013 and container_service until RFC 017
+			// step 4; this one is AWS's own IAM construct and is not going
+			// to acquire an Azure implementation by the same route.
 			name:     "unsupported resource type",
-			resource: bucketResource(func(r *spec.Resource) { r.Type = spec.ResourceTypeContainerService }),
+			resource: bucketResource(func(r *spec.Resource) { r.Type = spec.ResourceTypeCrossAccountRole }),
 			wantErr:  "unsupported resource type",
 		},
 	}

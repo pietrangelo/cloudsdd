@@ -56,6 +56,17 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 	if args.TypeToken == "azure:core/resourceGroup:ResourceGroup" {
 		outputs["name"] = resource.NewStringProperty(args.Name)
 	}
+	// The custom-domain records read these back (RFC 017 §2.3.1): a CNAME
+	// pointing at the app's FQDN, and a TXT record carrying the
+	// verification id Azure issues the managed certificate against.
+	if args.TypeToken == containerAppToken {
+		outputs["customDomainVerificationId"] = resource.NewStringProperty("verification-id")
+		if ingress, ok := args.Inputs["ingress"]; ok && ingress.IsObject() {
+			withFqdn := ingress.ObjectValue().Copy()
+			withFqdn["fqdn"] = resource.NewStringProperty(args.Name + ".westeurope.azurecontainerapps.io")
+			outputs["ingress"] = resource.NewObjectProperty(withFqdn)
+		}
+	}
 	// Outputs the real provider computes and that dependent resources
 	// read back (RFC 012 §4.3): the automation account's managed identity
 	// and the names the job schedules refer to.
@@ -84,6 +95,10 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 const (
 	getSubnetToken  = "azure:network/getSubnet:getSubnet"
 	getDnsZoneToken = "azure:privatedns/getDnsZone:getDnsZone"
+	// The public DNS zone a container service's custom domain is verified
+	// in (RFC 017 §2.3.1). Distinct from the private zones a database
+	// uses.
+	getPublicDNSZoneToken = "azure:dns/getZone:getZone"
 )
 
 const (
@@ -103,6 +118,13 @@ func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error
 		m.rec.add(recordedResource{Type: args.Token, Name: getDnsZoneToken, Inputs: args.Args})
 		return resource.PropertyMap{
 			"id": resource.NewStringProperty(testDNSZoneID),
+		}, nil
+	case getPublicDNSZoneToken:
+		m.rec.add(recordedResource{Type: args.Token, Name: getPublicDNSZoneToken, Inputs: args.Args})
+		return resource.PropertyMap{
+			"id":                resource.NewStringProperty("/subscriptions/sub-id/zones/acme.example"),
+			"name":              args.Args["name"],
+			"resourceGroupName": resource.NewStringProperty("dns-rg"),
 		}, nil
 	}
 	return resource.PropertyMap{}, nil
