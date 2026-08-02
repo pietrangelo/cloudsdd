@@ -62,7 +62,7 @@ cloudsdd/
 │   ├── state/                # Local ledger of deployed resources, fed back to the translator (RFC 009)
 │   ├── provider/             # CloudProvider interface, Diff/Result types, AllowedRegions helper
 │   │   ├── aws/              # AWS implementation (RFC 002/003/004/007/012/013/016)
-│   │   ├── gcp/              # GCP implementation (RFC 008/012/013/016)
+│   │   ├── gcp/              # GCP implementation (RFC 008/012/013/016/017)
 │   │   ├── azure/            # Azure implementation (RFC 008/012/013/015/016)
 │   │   ├── compute/          # Cloud-agnostic compute_instance shape, shared by all three (RFC 013)
 │   │   ├── container/        # Cloud-agnostic container_service shape and image rules (RFC 017)
@@ -449,7 +449,7 @@ the machine, but invokes it itself).
   through an `aws:getCallerIdentity` invoke: the schedules necessarily
   live where the instance does, and the program stays invoke-free.
 
-### `internal/provider/gcp` (RFC 008, 012, 013)
+### `internal/provider/gcp` (RFC 008, 012, 013, 016, 017)
 
 Cloud Storage and Cloud SQL, both private by default; encryption at rest
 is unconditional on GCP, so a Specification asking to disable it is
@@ -485,6 +485,40 @@ The priority-0 deny rule RFC 013 added is kept on `compute_instance` as
 defence in depth, retargeted at the scope network — it existed to
 neutralise the `default` network's `default-allow-ssh`, and the scope
 network ships no rules at all.
+
+**`container_service` is Cloud Run v2** (RFC 017 §2.6), the first provider
+to implement the type. Two things are worth naming.
+
+*Public means two gates, not one.* Cloud Run decides reachability with an
+ingress setting and callability with an IAM policy, and they are
+independent. `public: false` sets `INGRESS_TRAFFIC_INTERNAL_ONLY` and
+declares no binding; `public: true` sets `INGRESS_TRAFFIC_ALL` **and**
+grants `roles/run.invoker` to `allUsers`. Opening only the first produces a
+service that is reachable and answers 403 to everyone — a deployment that
+looks finished and serves nobody. HTTPS needs no configuration: the
+built-in endpoint is TLS with a Google-managed certificate and there is no
+plain-HTTP listener to disable.
+
+*Omitting the identity is not the same as withholding one.* A Compute
+Engine instance with no `service_account` block gets no identity, which is
+why `compute_instance` omits it. Cloud Run with no service account falls
+back to the **default compute service account**, which carries Editor on
+the whole project — a standing credential on the one resource type that
+runs arbitrary code. So a dedicated account is declared explicitly, with
+no role bound to it.
+
+The service joins the scope's own subnet through direct VPC egress with
+`ALL_TRAFFIC`, not `PRIVATE_RANGES_ONLY`. The weaker setting reaches the
+database just as well and lets internet-bound traffic leave from Google's
+shared pool; routing everything through the scope's Cloud NAT is what
+makes the scope leave from one address an account-level control can see.
+
+`replicas` is a **ceiling** here rather than a fleet size, because Cloud
+Run's floor is zero and that is the point of the platform. An explicit
+`replicas: 0` is refused (`ErrZeroReplicasUnsupported`): Cloud Run reads a
+zero `maxInstanceCount` as unset and applies its own default ceiling, so
+honouring the request would uncap the service rather than stop it. Refused
+rather than substituted, per RFC 012 §1.3.
 
 Power scheduling uses a Cloud Scheduler job calling the Cloud SQL Admin
 API (`settings.activationPolicy`: `ALWAYS`/`NEVER`) with an OAuth token
@@ -787,15 +821,15 @@ artifact it archives.
 
 Not yet implemented:
 
-- **`container_service`, on every provider.** RFC 017 step 1 has landed:
-  the cloud-agnostic shape and image rules exist in
+- **`container_service` on AWS and Azure.** RFC 017 steps 1 and 2 have
+  landed: the cloud-agnostic shape and image rules are in
   `internal/provider/container`, `policies.allowed_registries` is enforced
-  at the Engine, and the network it will need has a route out. What does
-  not exist yet is the resource itself — no provider's `Validate` or
-  `declare` handles the type, so a Specification naming one still fails
-  with `unsupported resource type`. GCP (Cloud Run) is next, then AWS
-  (ECS/Fargate) and Azure (Container Apps). It remains the one
-  `ResourceType` in the schema that no provider implements.
+  at the Engine, the scope network has a route out, and **GCP implements
+  the type on Cloud Run**. AWS (ECS on Fargate) and Azure (Container Apps)
+  do not yet, so a Specification naming one still fails there with
+  `unsupported resource type` — and an `agnostic` container service
+  resolves to GCP because it is the only candidate. Power-schedule
+  composition (RFC 017 step 5) is not wired on any provider.
 - References/dependencies between resources in the same Specification —
   which is also why `Destroy` walks the resource list in reverse rather
   than in dependency order.

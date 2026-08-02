@@ -28,3 +28,30 @@ var ErrUnsupportedSize = errors.New("gcp: unsupported compute size")
 // ErrUnsupportedOS indicates a compute_instance image with no Compute
 // Engine image family mapping (RFC 013 §2.1).
 var ErrUnsupportedOS = errors.New("gcp: unsupported operating system")
+
+// ErrZonesNotSupported indicates that Scope.Zones was set on a
+// ResourceType with no zone-aware placement (RFC 005 §2.5).
+//
+// Refused rather than ignored: a zone forwarded and dropped is a placement
+// the user asked for and did not get, and would surface as a surprise
+// invoice for cross-zone traffic rather than as an error.
+var ErrZonesNotSupported = errors.New("gcp: resource type does not support scope.zones")
+
+// ErrZeroReplicasUnsupported indicates a container_service asking for zero
+// replicas on Cloud Run (RFC 017 §2.5).
+//
+// The shared schema allows it — "deployed, running nothing" is a state
+// RFC 017 §2.2 deliberately makes expressible — and Cloud Run cannot
+// express it through scaling. Its maxInstanceCount is an int the API reads
+// as unset when it is zero, so a service asking for no instances would be
+// created with Google's *default* ceiling instead: the opposite of what
+// was written, and the one failure mode an intent-driven system cannot
+// tolerate.
+//
+// Refusing rather than substituting follows RFC 012 §1.3: a rule a
+// provider cannot express is a Validate error, never a dropped rule.
+// Cloud Run already scales to zero on its own between requests, so what
+// this refuses is a way of saying "and never scale up", not the saving
+// itself.
+var ErrZeroReplicasUnsupported = errors.New(
+	"gcp: Cloud Run cannot be pinned to zero replicas; it already scales to zero between requests")

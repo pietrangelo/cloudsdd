@@ -1,0 +1,408 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Pietrangelo Masala
+
+package gcp
+
+import (
+	"context"
+	"errors"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+
+	"cloudsdd/internal/provider/container"
+	"cloudsdd/internal/spec"
+)
+
+const (
+	cloudRunServiceToken   = "gcp:cloudrunv2/service:Service"
+	cloudRunIamMemberToken = "gcp:cloudrunv2/serviceIamMember:ServiceIamMember"
+)
+
+// testImage is a digest-pinned reference, which is what the image rules
+// require when no registry is allow-listed.
+const testImage = "ghcr.io/acme/api@sha256:" +
+	"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func containerProps(mutate func(map[string]any)) map[string]any {
+	props := map[string]any{
+		"image": testImage,
+		"port":  8080,
+		"size":  "small",
+	}
+	if mutate != nil {
+		mutate(props)
+	}
+	return props
+}
+
+func containerResource(mutate func(*spec.Resource)) spec.Resource {
+	r := spec.Resource{
+		ID:         "api",
+		Type:       spec.ResourceTypeContainerService,
+		Provider:   spec.ProviderGCP,
+		Scope:      spec.Scope{Region: "europe-west1"},
+		Properties: containerProps(nil),
+	}
+	if mutate != nil {
+		mutate(&r)
+	}
+	return r
+}
+
+func declaredContainer(t *testing.T, mutate func(map[string]any)) []recordedResource {
+	t.Helper()
+
+	props, err := decodeContainerServiceProperties(containerProps(mutate), []string{"ghcr.io"})
+	if err != nil {
+		t.Fatalf("decodeContainerServiceProperties() = %v", err)
+	}
+	return runProgram(t, func(ctx *pulumi.Context) error {
+		_, err := declareContainerService(ctx, "api", "europe-west1", testNetworkName, *props)
+		return err
+	})
+}
+
+// TestDeclareContainerServiceIsPrivateByDefault covers RFC 017 §2.3: the
+// one resource type that runs arbitrary user code is not the one exposed
+// to the internet by default.
+//
+// Cloud Run has two independent gates, and this asserts both. The ingress
+// setting decides what can reach the service on the network; the IAM
+// policy decides who may invoke it. A service private on one and public on
+// the other is a service whose posture depends on which gate you read.
+func TestDeclareContainerServiceIsPrivateByDefault(t *testing.T) {
+	recorded := declaredContainer(t, nil)
+
+	service := findResource(t, recorded, cloudRunServiceToken)
+	if got := service.Inputs["ingress"].StringValue(); got != ingressInternal {
+		t.Errorf("ingress = %q, want %q", got, ingressInternal)
+	}
+	if hasResource(recorded, cloudRunIamMemberToken) {
+		t.Error("an IAM binding was declared on a private service; nothing outside should be able to invoke it")
+	}
+}
+
+// TestDeclareContainerServicePublicIsHTTPSOnly covers the other half of
+// §2.3. Cloud Run's built-in endpoint is HTTPS with a Google-managed
+// certificate and no plain-HTTP listener exists to disable, so what has to
+// be asserted is that "public" opens *both* gates — a service with
+// INGRESS_TRAFFIC_ALL and no invoker binding is reachable and answers 403
+// to everyone, which is a deployment that looks done and serves nobody.
+func TestDeclareContainerServicePublicIsHTTPSOnly(t *testing.T) {
+	recorded := declaredContainer(t, func(p map[string]any) { p["public"] = true })
+
+	service := findResource(t, recorded, cloudRunServiceToken)
+	if got := service.Inputs["ingress"].StringValue(); got != ingressAll {
+		t.Errorf("ingress = %q, want %q", got, ingressAll)
+	}
+
+	binding := findResource(t, recorded, cloudRunIamMemberToken)
+	if got := binding.Inputs["role"].StringValue(); got != invokerRole {
+		t.Errorf("role = %q, want %q — the binding permits calling the service, nothing more", got, invokerRole)
+	}
+	if got := binding.Inputs["member"].StringValue(); got != allUsers {
+		t.Errorf("member = %q, want %q", got, allUsers)
+	}
+}
+
+// TestDeclareContainerServiceIdentityHasNothingAttached covers RFC 017
+// §2.6's identity row.
+//
+// Omitting the service account block would not be equivalent here to what
+// it is on a Compute Engine instance: Cloud Run falls back to the default
+// compute service account, which carries Editor on the whole project. So
+// the assertion is that an account is declared, that the service runs as
+// it, and that nothing binds a role to it.
+func TestDeclareContainerServiceIdentityHasNothingAttached(t *testing.T) {
+	recorded := declaredContainer(t, nil)
+
+	account := findResource(t, recorded, serviceAccountToken)
+	if got := account.Inputs["accountId"].StringValue(); got != googleAccountID("api", "-run") {
+		t.Errorf("accountId = %q, want the derived %q", got, googleAccountID("api", "-run"))
+	}
+
+	service := findResource(t, recorded, cloudRunServiceToken)
+	runAs := service.Inputs["template"].ObjectValue()["serviceAccount"].StringValue()
+	if !strings.Contains(runAs, googleAccountID("api", "-run")) {
+		t.Errorf("service runs as %q, want the dedicated account", runAs)
+	}
+
+	// No project binding and no custom role. Both exist in this package for
+	// the power scheduler, so a copy-paste that granted the container one
+	// would compile and pass every other test here.
+	for _, token := range []string{iamMemberToken, customRoleToken} {
+		if hasResource(recorded, token) {
+			t.Errorf("%s was declared; the service identity must carry no role", token)
+		}
+	}
+}
+
+// TestDeclareContainerServiceJoinsTheScopeNetwork: the service must sit in
+// the scope's own subnet, beside the database it was deployed to talk to
+// (RFC 016 §2.3), and route everything out through the scope's NAT.
+//
+// ALL_TRAFFIC rather than PRIVATE_RANGES_ONLY is the assertion worth
+// having: the weaker setting still reaches the database and lets
+// internet-bound traffic leave from Google's shared pool, which is the
+// "reaches the internet unnoticed" trade RFC 017 §2.7 refused elsewhere.
+func TestDeclareContainerServiceJoinsTheScopeNetwork(t *testing.T) {
+	recorded := declaredContainer(t, nil)
+
+	vpc := findResource(t, recorded, cloudRunServiceToken).
+		Inputs["template"].ObjectValue()["vpcAccess"].ObjectValue()
+
+	if got := vpc["egress"].StringValue(); got != vpcEgressAll {
+		t.Errorf("vpc egress = %q, want %q so the scope leaves from one address", got, vpcEgressAll)
+	}
+
+	interfaces := vpc["networkInterfaces"].ArrayValue()
+	if len(interfaces) != 1 {
+		t.Fatalf("declared %d network interfaces, want 1", len(interfaces))
+	}
+	iface := interfaces[0].ObjectValue()
+	if got := iface["network"].StringValue(); got != testNetworkName {
+		t.Errorf("network = %q, want the scope network %q", got, testNetworkName)
+	}
+	if got := iface["subnetwork"].StringValue(); got != testNetworkName+"-subnet" {
+		t.Errorf("subnetwork = %q, want the scope's workload subnet", got)
+	}
+}
+
+// TestDeclareContainerServiceScaling: replicas is a ceiling on Cloud Run,
+// and the floor is zero — which is the platform's whole point, and why a
+// power schedule is largely redundant here (RFC 017 §2.5).
+func TestDeclareContainerServiceScaling(t *testing.T) {
+	tests := []struct {
+		name     string
+		replicas any
+		wantMax  float64
+	}{
+		{name: "absent defaults to one", replicas: nil, wantMax: 1},
+		{name: "explicit", replicas: 4, wantMax: 4},
+		{name: "the ceiling", replicas: container.MaxReplicas, wantMax: float64(container.MaxReplicas)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorded := declaredContainer(t, func(p map[string]any) {
+				if tt.replicas != nil {
+					p["replicas"] = tt.replicas
+				}
+			})
+
+			scaling := findResource(t, recorded, cloudRunServiceToken).
+				Inputs["template"].ObjectValue()["scaling"].ObjectValue()
+
+			if got := scaling["maxInstanceCount"].NumberValue(); got != tt.wantMax {
+				t.Errorf("maxInstanceCount = %v, want %v", got, tt.wantMax)
+			}
+			if got := scaling["minInstanceCount"].NumberValue(); got != 0 {
+				t.Errorf("minInstanceCount = %v, want 0 — Cloud Run bills per request", got)
+			}
+		})
+	}
+}
+
+// TestRunResources: the CPU and memory pairs are not free choices. Cloud
+// Run refuses a container asking for more CPU than its memory supports, so
+// a tidier-looking table would produce a service that fails on apply after
+// the user approved the plan.
+func TestRunResources(t *testing.T) {
+	tests := []struct {
+		size       container.Size
+		cpu        string
+		memory     string
+		wantErr    bool
+		minMemory  float64 // GiB Cloud Run requires for that CPU count
+		cpuNumeric float64
+	}{
+		{size: container.SizeSmall, cpu: "1", memory: "512Mi", cpuNumeric: 1, minMemory: 0},
+		{size: container.SizeMedium, cpu: "2", memory: "2Gi", cpuNumeric: 2, minMemory: 1},
+		{size: container.SizeLarge, cpu: "4", memory: "4Gi", cpuNumeric: 4, minMemory: 2},
+		{size: "enormous", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.size), func(t *testing.T) {
+			cpu, memory, err := runResources(tt.size)
+
+			if tt.wantErr {
+				if !errors.Is(err, ErrUnsupportedSize) {
+					t.Fatalf("runResources(%q) = %v, want ErrUnsupportedSize", tt.size, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("runResources(%q) = %v", tt.size, err)
+			}
+			if cpu != tt.cpu || memory != tt.memory {
+				t.Errorf("runResources(%q) = %q/%q, want %q/%q", tt.size, cpu, memory, tt.cpu, tt.memory)
+			}
+			if gib := memoryGiB(t, memory); gib < tt.minMemory {
+				t.Errorf("%s: %s of memory is below the %v Gi Cloud Run requires for %v vCPU",
+					tt.size, memory, tt.minMemory, tt.cpuNumeric)
+			}
+		})
+	}
+}
+
+// memoryGiB parses a Cloud Run memory limit into GiB.
+func memoryGiB(t *testing.T, limit string) float64 {
+	t.Helper()
+
+	var unit string
+	switch {
+	case strings.HasSuffix(limit, "Gi"):
+		unit = "Gi"
+	case strings.HasSuffix(limit, "Mi"):
+		unit = "Mi"
+	default:
+		t.Fatalf("memory limit %q carries no recognised unit", limit)
+	}
+
+	n, err := strconv.ParseFloat(strings.TrimSuffix(limit, unit), 64)
+	if err != nil {
+		t.Fatalf("unparseable memory limit %q: %v", limit, err)
+	}
+	if unit == "Mi" {
+		return n / 1024
+	}
+	return n
+}
+
+// TestDecodeContainerServiceProperties covers the decoding rules RFC 017
+// §5.1 lists, plus the two GCP-specific refusals.
+func TestDecodeContainerServiceProperties(t *testing.T) {
+	tests := []struct {
+		name    string
+		props   map[string]any
+		allowed []string
+		wantErr error
+		wantMsg string
+	}{
+		{
+			name:    "a digest-pinned image with no allowlist",
+			props:   containerProps(nil),
+			allowed: nil,
+		},
+		{
+			name:    "a tag from an allow-listed registry",
+			props:   containerProps(func(p map[string]any) { p["image"] = "ghcr.io/acme/api:2.1" }),
+			allowed: []string{"ghcr.io"},
+		},
+		{
+			// The provider applies the image rules too, so one driven
+			// directly — outside the Engine — is no less safe (RFC 011 §2.3).
+			name:    "a tag with no allowlist is refused by the provider as well",
+			props:   containerProps(func(p map[string]any) { p["image"] = "ghcr.io/acme/api:2.1" }),
+			wantErr: container.ErrImageMutable,
+		},
+		{
+			name:    "latest is refused here too",
+			props:   containerProps(func(p map[string]any) { p["image"] = "ghcr.io/acme/api:latest" }),
+			allowed: []string{"ghcr.io"},
+			wantErr: container.ErrImageLatest,
+		},
+		{
+			// Cloud Run reads a zero maxInstanceCount as unset and applies
+			// its own default ceiling, so honouring the request would
+			// deploy the opposite of what was written (RFC 012 §1.3).
+			name:    "zero replicas is refused rather than silently uncapped",
+			props:   containerProps(func(p map[string]any) { p["replicas"] = 0 }),
+			wantErr: ErrZeroReplicasUnsupported,
+		},
+		{
+			name:    "an unmapped size",
+			props:   containerProps(func(p map[string]any) { p["size"] = "enormous" }),
+			wantMsg: "property validation failed",
+		},
+		{
+			name:    "a missing image",
+			props:   map[string]any{"port": 8080, "size": "small"},
+			wantMsg: "property validation failed",
+		},
+		{
+			name:    "a missing port",
+			props:   map[string]any{"image": testImage, "size": "small"},
+			wantMsg: "property validation failed",
+		},
+		{
+			name:    "a port outside the range",
+			props:   containerProps(func(p map[string]any) { p["port"] = 70000 }),
+			wantMsg: "property validation failed",
+		},
+		{
+			name:    "more replicas than the cap",
+			props:   containerProps(func(p map[string]any) { p["replicas"] = container.MaxReplicas + 1 }),
+			wantMsg: "property validation failed",
+		},
+		{
+			// Mass Assignment: a property the provider does not understand
+			// means the user asked for something they will not get.
+			name:    "an unknown property",
+			props:   containerProps(func(p map[string]any) { p["cpu_architecture"] = "arm64" }),
+			wantMsg: "unknown or malformed property",
+		},
+		{
+			// The credential-name denylist applies independently of any
+			// resource's schema (RFC 002 §2.4). It matters here because a
+			// container is the obvious place to try to paste one.
+			name:    "a credential-shaped property",
+			props:   containerProps(func(p map[string]any) { p["password"] = "hunter2" }),
+			wantMsg: "looks like a credential",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := decodeContainerServiceProperties(tt.props, tt.allowed)
+
+			if tt.wantErr == nil && tt.wantMsg == "" {
+				if err != nil {
+					t.Fatalf("decodeContainerServiceProperties() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("decodeContainerServiceProperties() = nil, want an error")
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("error = %v, want it to wrap %v", err, tt.wantErr)
+			}
+			if tt.wantMsg != "" && !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Fatalf("error = %q, want it to contain %q", err, tt.wantMsg)
+			}
+		})
+	}
+}
+
+// TestValidateContainerServiceRejectsZones: Cloud Run is regional and
+// places instances itself, so a pinned zone is a placement the user asked
+// for and will not get.
+func TestValidateContainerServiceRejectsZones(t *testing.T) {
+	p := &GCPProvider{stateDir: t.TempDir(), passphrase: "test"}
+
+	r := containerResource(func(r *spec.Resource) {
+		r.Scope.Zones = []string{"europe-west1-b"}
+	})
+
+	err := p.Validate(context.Background(), r, spec.Policies{})
+	if !errors.Is(err, ErrZonesNotSupported) {
+		t.Fatalf("Validate() = %v, want ErrZonesNotSupported", err)
+	}
+}
+
+// TestValidateContainerServiceAcceptsAWellFormedOne is the regression test
+// for the defect RFC 017 §1 records: a container_service used to validate
+// as a Specification, compile a schedule, render a plan, and then fail
+// with "unsupported resource type".
+func TestValidateContainerServiceAcceptsAWellFormedOne(t *testing.T) {
+	p := &GCPProvider{stateDir: t.TempDir(), passphrase: "test"}
+
+	if err := p.Validate(context.Background(), containerResource(nil), spec.Policies{}); err != nil {
+		t.Fatalf("Validate() = %v, want a well-formed container_service to be accepted", err)
+	}
+}

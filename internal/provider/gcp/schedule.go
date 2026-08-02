@@ -227,14 +227,21 @@ func unixCronExpression(rule schedule.Rule) (string, error) {
 	return fmt.Sprintf("%d %d * * %s", rule.Min, rule.Hour, dayOfWeek), nil
 }
 
-// serviceAccountID derives a Google-acceptable account id from a resource
-// id: 6 to 30 characters, lowercase letters, digits and hyphens, starting
-// with a letter.
+// serviceAccountID derives the scheduler's account id from a resource id.
 func serviceAccountID(resourceID string) string {
-	const (
-		suffix    = "-sched"
-		maxLength = 30
-	)
+	return googleAccountID(resourceID, "-sched")
+}
+
+// googleAccountID derives a Google-acceptable account id from a resource
+// id and a suffix that says what the identity is for: 6 to 30 characters,
+// lowercase letters, digits and hyphens, starting with a letter.
+//
+// The suffix is a parameter rather than a constant because a resource can
+// need more than one identity — a scheduler's and, since RFC 017, a
+// container service's — and two of these functions would be two chances
+// to get Google's naming rules subtly different.
+func googleAccountID(resourceID, suffix string) string {
+	const maxLength = 30
 
 	sanitized := strings.Map(func(r rune) rune {
 		switch {

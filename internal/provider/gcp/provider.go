@@ -91,6 +91,15 @@ func (p *GCPProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 		if _, err := compute.Zone(r.Scope.Zones); err != nil {
 			return fmt.Errorf("gcp: resource %q: %w", r.ID, err)
 		}
+	case spec.ResourceTypeContainerService:
+		if _, err := decodeContainerServiceProperties(r.Properties, policies.AllowedRegistries); err != nil {
+			return fmt.Errorf("gcp: resource %q: %w", r.ID, err)
+		}
+		// Cloud Run is regional and places instances itself, so a zone
+		// pinned here is a placement the user asked for and will not get.
+		if len(r.Scope.Zones) > 0 {
+			return fmt.Errorf("gcp: resource %q: %w", r.ID, ErrZonesNotSupported)
+		}
 	default:
 		return fmt.Errorf("gcp: resource %q: unsupported resource type: %q", r.ID, r.Type)
 	}
@@ -188,6 +197,17 @@ func (p *GCPProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		netName := scopeNetworkName(resourceScope(r))
 		return func(ctx *pulumi.Context) error {
 			_, err := declareComputeInstance(ctx, r.ID, region, zone, netName, *props, rules)
+			return err
+		}, region, nil
+
+	case spec.ResourceTypeContainerService:
+		props, err := decodeContainerServiceProperties(r.Properties, policies.AllowedRegistries)
+		if err != nil {
+			return nil, "", fmt.Errorf("gcp: resource %q: %w", r.ID, err)
+		}
+		netName := scopeNetworkName(resourceScope(r))
+		return func(ctx *pulumi.Context) error {
+			_, err := declareContainerService(ctx, r.ID, region, netName, *props)
 			return err
 		}, region, nil
 

@@ -148,8 +148,21 @@ it has a replica count, and the equivalent of "off" is zero:
   universal-target mechanism RFC 012 §4.1 uses for RDS and EC2, so no code
   artifact is deployed.
 - **GCP Cloud Run** — scales to zero natively and bills per request, so a
-  schedule is largely redundant. It is honoured by setting max instances
-  to zero, which is the only way to guarantee nothing runs.
+  schedule is largely redundant. ~~It is honoured by setting max instances
+  to zero, which is the only way to guarantee nothing runs.~~ **Settled
+  during step 2, and not the way this line assumed.** Cloud Run's
+  `maxInstanceCount` is an `int32` the API reads as *unset* when it is
+  zero, so a service asking for no instances would be created with
+  Google's own default ceiling instead — the opposite of what was written.
+  Setting it to zero does not stop the service; it uncaps it.
+
+  So `replicas: 0` is a `Validate` error on GCP
+  (`ErrZeroReplicasUnsupported`), per RFC 012 §1.3: a rule a provider
+  cannot express is refused, never dropped. Nothing is lost in practice —
+  Cloud Run's floor is already zero between requests, so what is refused
+  is a way of spelling "and never scale up", not the saving itself. Step 5
+  decides how an *inherited* schedule composes with that, which is a
+  different question from an explicit zero in the Specification.
 - **Azure Container Apps** — min and max replicas both to zero.
 
 The RFC 012 §1.3 rule holds unchanged: a rule a provider cannot express is
