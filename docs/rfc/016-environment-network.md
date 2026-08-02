@@ -436,13 +436,23 @@ Sequence:
 
 ## 7. Open Questions
 
-1. **NAT for egress.** Private subnets with no NAT gateway means no
-   outbound internet: no package updates, no pulling a container image
-   (which RFC 017 will need). A NAT gateway costs roughly $32/month per AZ
-   before traffic, which is a real cost to impose by default on a tool
-   whose other headline feature is switching things off at night.
-   Proposed: no NAT initially, revisited by RFC 017, which is the RFC that
-   genuinely needs it.
+1. ~~**NAT for egress.**~~ **Settled by [RFC 017 §2.7](017-container-service.md),
+   and sooner than this section intended.** The proposal was to ship no
+   NAT and revisit it in RFC 017, on the grounds that pulling a container
+   image is the first thing that truly cannot work without egress. That
+   was wrong about a resource type this RFC had already shipped:
+   `compute_instance` is reached through Session Manager, and the SSM
+   agent is a client that must reach the SSM endpoints before a session
+   exists. With no NAT and no interface VPC endpoints, an instance boots
+   into a subnet where nothing can talk to it.
+
+   So egress is not deferred to the container service — it is the first
+   step of RFC 017's rollout, ahead of the container service itself, and
+   it repairs a defect rather than enabling a feature. The shape is one
+   NAT gateway per scope (not per AZ, for the cost reason this section
+   gave), unconditional, provisioned with the network, in a new public
+   subnet tier that holds the gateway and nothing else. The `/20` layout
+   in §2.4 needs no change to accommodate it.
 2. ~~**`StackReference` against the DIY file backend.**~~ **Settled during
    step 3, and not the way this section expected.** Neither `StackReference`
    nor the fallback was used: resource programs find their network by

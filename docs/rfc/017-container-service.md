@@ -6,7 +6,11 @@
 - **Depends on:** [RFC 012](012-environment-power-scheduling.md),
   [RFC 013](013-compute-instance.md),
   [RFC 014](014-agnostic-provider-resolution.md),
-  [RFC 016](016-environment-network.md) — **blocking**
+  [RFC 016](016-environment-network.md) — landed 2026-08-01, no longer blocking
+- **Amended:** 2026-08-02 — §2.7 adds network egress, which RFC 016 §7.1
+  had left open and assigned here. It moves to the front of the rollout
+  because it repairs `compute_instance`, which RFC 016 shipped without a
+  working path to Session Manager.
 
 ## 1. Problem
 
@@ -46,7 +50,10 @@ Implementing it against today's networking would mean AWS Fargate tasks in
 the account's default VPC — §1's second defect in RFC 016, on a resource
 type whose entire purpose is to serve traffic. This RFC therefore does not
 start until RFC 016 lands, and it settles RFC 016 §7.1's open question
-about NAT, because this is the resource type that actually needs egress.
+about NAT. §2.7 records how that settlement went — not "this is the
+resource type that actually needs egress", as this paragraph first
+claimed, but "a resource type RFC 016 already shipped has needed it all
+along".
 
 ### 2.2 Properties
 
@@ -156,13 +163,75 @@ a `Validate` error, never a dropped rule.
 | Ingress when `public` | ALB, HTTPS, ACM certificate | Built-in HTTPS endpoint | Managed ingress, HTTPS |
 | Ingress when private | Internal ALB in the scope's subnets | Ingress restricted to internal traffic | Internal ingress |
 | Identity | Task role with no policies attached | Dedicated service account, no roles | Managed identity, no assignments |
-| Egress for image pull | NAT or VPC endpoints — RFC 016 §7.1 | Default | Default |
+| Egress for image pull | NAT gateway, one per scope (§2.7) | Cloud NAT on the scope router (§2.7) | NAT gateway on the scope subnet (§2.7) |
 
 The identity row is the one to notice: on every provider the service gets
 an identity of its own with **nothing attached**, following RFC 013's
 choice to give a VM no standing credential. A container that needs to call
 a cloud API will need a way to say so, and that is the same future RFC as
 configuration injection.
+
+### 2.7 Egress, which is already owed to a resource type that exists
+
+RFC 016 §7.1 left NAT open and named this RFC as the one that would settle
+it, on the reasoning that a container image pull is the first thing that
+genuinely cannot work without egress. That reasoning was half right. The
+half it missed is that **`compute_instance` is already broken by its
+absence**, and has been since RFC 016 landed.
+
+`internal/provider/aws/network.go` argues in a comment that "a database
+and a VM reached through Session Manager both work without egress". A
+database does. A VM does not: the SSM agent is a client, and it has to
+*reach* `ssm`, `ssmmessages` and `ec2messages` before any session can be
+opened. Without a NAT gateway that requires interface VPC endpoints, which
+the scope network does not declare either. So today an RFC 013 instance
+lands in a subnet where it can neither update a package nor register with
+Session Manager — it boots, and nothing can talk to it.
+
+That makes egress a defect to repair rather than a feature to add, which
+is why it moves to the front of §6's rollout instead of arriving with AWS.
+
+**The shape, per provider:**
+
+- **AWS.** A new `public` subnet tier holding an internet gateway and a
+  **single NAT gateway for the whole scope**, with the private subnets
+  routing `0.0.0.0/0` through it. §2.4 of RFC 016 carves `/24`s out of the
+  scope's `/20` with room for sixteen and `tagSubnetTier` already exists
+  to tell tiers apart, so this is a new tier in a layout built to receive
+  one — not a renumbering of anything deployed.
+- **GCP.** A Cloud Router with a Cloud NAT on the scope's network. No
+  public subnet: GCP expresses egress as a property of the router rather
+  than of the subnet, so instances keep their private-only addressing.
+- **Azure.** A NAT gateway with a public IP, associated with the scope
+  subnet. Same effect, expressed at the subnet.
+
+**One NAT, not one per availability zone.** RFC 016 §7.1 priced a NAT
+gateway at roughly $32/month per AZ and called that a real cost to impose
+by default on a tool whose other headline feature is switching things off
+at night. Per-AZ NAT buys two things: survival of a single-AZ outage, and
+no cross-AZ data charge on egress. Neither is worth doubling the standing
+cost of every environment CloudSDD creates, for traffic that is dominated
+by package updates and image pulls. A user who needs zonal-failure-proof
+egress is past what this tool decides for them.
+
+**Unconditional, provisioned with the network.** The alternative — create
+the NAT lazily, when a resource that needs egress first appears — is
+cheaper for a scope holding only databases, and is rejected. It makes the
+network's shape depend on the order resources are applied in, it gives
+`ReapNetworks` a second question to answer beyond "is this scope empty",
+and it reintroduces exactly the failure this section exists to fix: a
+network that is quietly missing a route out until something discovers it
+at runtime. RFC 016 §1 argued that a network which is secure but
+unreachable is a defect, not a hardening; a network that cannot reach a
+package mirror is the same argument pointed outward.
+
+**What egress does not become.** A route out is not a route in. The public
+subnet tier exists to hold a NAT gateway and nothing else: no resource is
+ever placed in it, `MapPublicIpOnLaunch` stays false everywhere, and
+ingress remains what §2.3 defines — absent unless `public` is set, and
+HTTPS through a managed load balancer when it is.
+
+This resolves RFC 016 §7.1, which is updated to point here.
 
 ## 3. Impacted JSON Schema
 
@@ -191,6 +260,8 @@ it real. New:
 | Container reachable directly, bypassing ingress | The container port is reachable only from the load balancer's security group / the platform's ingress |
 | Unrestricted resource consumption | `replicas` capped at 10, `size` an enum of three — a Specification cannot request an unbounded fleet |
 | A schedule that saves nothing | "Off" is zero replicas, not a stopped task that still bills (the RFC 013 §2.5 lesson, restated for containers) |
+| Egress turns into ingress | The public tier holds the NAT gateway and nothing else; no resource is placed in it and no subnet assigns a public address on launch (§2.7) |
+| A workload reaches the internet unnoticed | Egress is NAT'd through one gateway per scope, so it leaves from one address that an account-level control can see and constrain |
 
 ## 5. Testing Plan
 
@@ -217,6 +288,14 @@ Table-driven, `pulumi.WithMocks` for declaration, no Docker or cloud.
 7. **Agnostic resolution** (RFC 014): a `container_service` naming a
    region resolves to that region's provider, and resolution does not
    provision anything on the other two.
+8. **Egress** (§2.7), asserted against the declared graph rather than a
+   live cloud: the scope network declares exactly one NAT gateway
+   regardless of `subnetCount`; the private subnets' route table carries
+   a default route through it; the public tier holds the NAT and nothing
+   else; and no subnet on any provider sets a public address on launch.
+   The AWS test also asserts the public subnet's own `/24` comes out of
+   the scope's `/20` and overlaps none of the private ones, since
+   `subnetBlock` is now asked for one more block than before.
 
 ## 6. Rollout
 
@@ -225,12 +304,15 @@ been deployed as a `container_service`. The one behavioural change to
 something that exists is `policies.allowed_registries`, a new optional
 field that defaults to absent and constrains nothing when unset.
 
-1. `internal/provider/container` with the shared properties and image
-   rules, plus the Engine-level `allowed_registries` enforcement.
+1. **Egress on all three providers (§2.7)**, plus
+   `internal/provider/container` with the shared properties and image
+   rules and the Engine-level `allowed_registries` enforcement.
+   Egress leads because it repairs `compute_instance`, which is deployed
+   today, rather than because a container needs it — and shipping it
+   first means the repair is not hostage to the rest of this RFC.
 2. One provider end to end — GCP first, because Cloud Run needs the least
    surrounding infrastructure and will surface design errors soonest.
-3. AWS, which needs the most: ALB, target group, task definition, and the
-   egress decision RFC 016 §7.1 left open.
+3. AWS, which needs the most: ALB, target group, task definition.
 4. Azure.
 5. RFC 012 composition across all three.
 6. `cli.md`, `architecture.md`, `openapi.yaml`, and the system prompt.

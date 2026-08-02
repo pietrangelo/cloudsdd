@@ -264,6 +264,21 @@ components:
           type: array
           items:
             type: string
+        allowed_registries:
+          type: array
+          maxItems: 10
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 253
+          description: >
+            Container registries a container_service may pull from
+            (RFC 017 §2.4). Absent does not mean "anything goes": with no
+            allowlist every image must be pinned to a digest, so the
+            permissive-looking default is the strict one. Naming a
+            registry is how an operator takes responsibility for what its
+            mutable tags point at. The `latest` tag is refused either way.
         provider_preference:
           type: array
           maxItems: 3

@@ -8,9 +8,16 @@
 # provider packages. Those are held lower because their remaining
 # uncovered statements are the Pulumi Automation API surface —
 # upsertStack, Plan, Apply, Destroy — which shells out to the `pulumi`
-# binary and talks to a real cloud control plane. Those paths are covered
-# by the build-tagged integration tests instead
-# (go test -tags=integration ./internal/provider/...).
+# binary and talks to a real cloud control plane.
+#
+# An earlier version of this note claimed those paths were "covered by the
+# build-tagged integration tests instead
+# (go test -tags=integration ./internal/provider/...)". That was true of
+# one package and read as true of three: only internal/provider/aws has an
+# integration test, it exercises object_storage alone, and CI does not run
+# the `integration` tag at all. So the honest statement is that this
+# surface is covered by an integration test on AWS and by nothing on GCP
+# or Azure — which is a gap worth closing, not a justification to cite.
 #
 # What remains uncovered in internal/state is of the same kind, at a
 # smaller scale: I/O failures that can only happen *after* a file handle
@@ -49,6 +56,7 @@ FLOORS=(
   "cloudsdd/internal/nlp:96"
   "cloudsdd/internal/provider:100"
   "cloudsdd/internal/provider/compute:100"
+  "cloudsdd/internal/provider/container:98"
   "cloudsdd/internal/provider/decode:95"
   "cloudsdd/internal/provider/network:93"
   "cloudsdd/internal/provider/pulumiutil:100"

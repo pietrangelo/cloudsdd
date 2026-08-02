@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider"
@@ -22,6 +23,9 @@ const (
 	dbSubnetGroupToken        = "aws:rds/subnetGroup:SubnetGroup"
 	internetGatewayToken      = "aws:ec2/internetGateway:InternetGateway"
 	natGatewayToken           = "aws:ec2/natGateway:NatGateway"
+	eipToken                  = "aws:ec2/eip:Eip"
+	routeTableToken           = "aws:ec2/routeTable:RouteTable"
+	routeTableAssocToken      = "aws:ec2/routeTableAssociation:RouteTableAssociation"
 )
 
 func testScope() provider.NetworkScope {
@@ -66,45 +70,144 @@ func TestDeclareScopeNetwork(t *testing.T) {
 		t.Errorf("%s tag = %q, want the scope label", tagScope, got)
 	}
 
-	subnets := resourcesOfType(recorded, subnetToken)
-	if len(subnets) != subnetCount {
-		t.Fatalf("declared %d subnets, want %d — RDS refuses a subnet group with fewer",
-			len(subnets), subnetCount)
+	// Every subnet, both tiers. A subnet that assigns public addresses on
+	// launch would make "private by default" a property of nothing — and
+	// that holds for the public tier too, which exists to hold a NAT
+	// gateway rather than anything that launches.
+	all := resourcesOfType(recorded, subnetToken)
+	if len(all) != subnetCount+1 {
+		t.Fatalf("declared %d subnets, want %d private plus one public", len(all), subnetCount)
 	}
 
+	var privateSubnets []recordedResource
 	zones := map[string]bool{}
-	for _, s := range subnets {
-		// A subnet that assigns public addresses on launch would make
-		// "private by default" a property of nothing.
+	for _, s := range all {
 		if s.Inputs["mapPublicIpOnLaunch"].BoolValue() {
 			t.Error("mapPublicIpOnLaunch = true; instances would get public addresses")
 		}
-		if got := s.Inputs["tags"].ObjectValue()[tagSubnetTier].StringValue(); got != tierPrivate {
-			t.Errorf("subnet tier tag = %q, want %q", got, tierPrivate)
+		if s.Inputs["tags"].ObjectValue()[tagSubnetTier].StringValue() != tierPrivate {
+			continue
 		}
+		privateSubnets = append(privateSubnets, s)
 		zones[s.Inputs["availabilityZone"].StringValue()] = true
+	}
+	if len(privateSubnets) != subnetCount {
+		t.Fatalf("declared %d private subnets, want %d — RDS refuses a subnet group with fewer",
+			len(privateSubnets), subnetCount)
 	}
 	// Spread, not stacked: a subnet group whose subnets share one zone
 	// is a database that cannot fail over.
 	if len(zones) != subnetCount {
-		t.Errorf("subnets occupy %d availability zones, want %d: %v", len(zones), subnetCount, zones)
+		t.Errorf("private subnets occupy %d availability zones, want %d: %v",
+			len(zones), subnetCount, zones)
 	}
 
 	group := findResource(t, recorded, dbSubnetGroupToken)
 	if got := group.Inputs["name"].StringValue(); got != dbSubnetGroupNameFor(testScope()) {
 		t.Errorf("db subnet group name = %q, want the derived %q", got, dbSubnetGroupNameFor(testScope()))
 	}
+	// The subnet group must span the private tier only. A public subnet in
+	// it would let RDS place a database where the internet gateway route
+	// reaches it.
 	if n := len(group.Inputs["subnetIds"].ArrayValue()); n != subnetCount {
-		t.Errorf("db subnet group spans %d subnets, want %d", n, subnetCount)
+		t.Errorf("db subnet group spans %d subnets, want the %d private ones", n, subnetCount)
+	}
+}
+
+// TestDeclareScopeEgress covers RFC 017 §2.7: the private subnets get a
+// route out, and getting one does not turn into a route in.
+//
+// The assertion that matters most is the count. One NAT gateway per scope
+// is the whole cost argument — a loop that accidentally declared one per
+// availability zone would be correct infrastructure at double the standing
+// bill of every environment CloudSDD creates.
+func TestDeclareScopeEgress(t *testing.T) {
+	cidr := netip.MustParsePrefix("10.42.0.0/20")
+
+	recorded := runProgram(t, func(ctx *pulumi.Context) error {
+		return declareScopeNetwork(ctx, testScope(), cidr)
+	})
+
+	if n := len(resourcesOfType(recorded, natGatewayToken)); n != 1 {
+		t.Fatalf("declared %d nat gateways, want exactly 1 for the scope", n)
+	}
+	if n := len(resourcesOfType(recorded, eipToken)); n != 1 {
+		t.Errorf("declared %d elastic addresses, want 1 — one per nat gateway", n)
+	}
+	if !hasResource(recorded, internetGatewayToken) {
+		t.Error("no internet gateway; the nat gateway has nothing to leave through")
 	}
 
-	// No route out. RFC 016 §7.1 leaves egress open deliberately, and a
-	// gateway appearing here by accident would silently give every
-	// database in the scope a path to the internet.
-	for _, token := range []string{internetGatewayToken, natGatewayToken} {
-		if hasResource(recorded, token) {
-			t.Errorf("%s was declared; the scope network has no egress by design", token)
+	// Exactly one public subnet, carved from the scope's own /20 and
+	// overlapping none of the private blocks. subnetBlock is now asked for
+	// one more index than before, which is where an off-by-one would put
+	// the public tier on top of a private one.
+	var public, private []recordedResource
+	for _, s := range resourcesOfType(recorded, subnetToken) {
+		switch s.Inputs["tags"].ObjectValue()[tagSubnetTier].StringValue() {
+		case tierPublic:
+			public = append(public, s)
+		case tierPrivate:
+			private = append(private, s)
 		}
+	}
+	if len(public) != 1 {
+		t.Fatalf("declared %d public subnets, want 1 — it holds the nat gateway and nothing else", len(public))
+	}
+	publicBlock := netip.MustParsePrefix(public[0].Inputs["cidrBlock"].StringValue())
+	if !cidr.Overlaps(publicBlock) {
+		t.Errorf("public subnet %s falls outside the scope range %s", publicBlock, cidr)
+	}
+	for _, s := range private {
+		block := netip.MustParsePrefix(s.Inputs["cidrBlock"].StringValue())
+		if block.Overlaps(publicBlock) {
+			t.Errorf("public subnet %s overlaps private subnet %s", publicBlock, block)
+		}
+	}
+
+	// Two route tables, and each with the right kind of default route:
+	// the public one through the internet gateway, the private one through
+	// the NAT. A private table pointing at the gateway would be the whole
+	// scope on the internet.
+	var publicRT, privateRT recordedResource
+	for _, rt := range resourcesOfType(recorded, routeTableToken) {
+		switch rt.Inputs["tags"].ObjectValue()[tagSubnetTier].StringValue() {
+		case tierPublic:
+			publicRT = rt
+		case tierPrivate:
+			privateRT = rt
+		}
+	}
+	assertDefaultRoute(t, publicRT, "gatewayId", tierPublic)
+	assertDefaultRoute(t, privateRT, "natGatewayId", tierPrivate)
+	if privateRT.Inputs["routes"].ArrayValue()[0].ObjectValue()["gatewayId"].HasValue() {
+		t.Error("the private route table routes through an internet gateway; the whole scope would be reachable")
+	}
+
+	// Every private subnet is associated, plus the public one. A subnet
+	// left unassociated falls back to the VPC's main route table, which
+	// has no default route: silently no egress, which is the bug this
+	// section exists to fix.
+	if n := len(resourcesOfType(recorded, routeTableAssocToken)); n != subnetCount+1 {
+		t.Errorf("declared %d route table associations, want %d — one per subnet", n, subnetCount+1)
+	}
+}
+
+// assertDefaultRoute checks a route table carries a default route through
+// the expected kind of target.
+func assertDefaultRoute(t *testing.T, rt recordedResource, targetKey, tier string) {
+	t.Helper()
+
+	routes := rt.Inputs["routes"].ArrayValue()
+	if len(routes) != 1 {
+		t.Fatalf("%s route table has %d routes, want 1 default route", tier, len(routes))
+	}
+	route := routes[0].ObjectValue()
+	if got := route["cidrBlock"].StringValue(); got != defaultRoute {
+		t.Errorf("%s route table destination = %q, want %q", tier, got, defaultRoute)
+	}
+	if !route[resource.PropertyKey(targetKey)].HasValue() {
+		t.Errorf("%s route table has no %s; the route goes nowhere", tier, targetKey)
 	}
 }
 

@@ -180,6 +180,11 @@ func (e *DefaultEngine) validated(ctx context.Context, s spec.Specification) (sp
 		if err := validateSchedule(r, s.Policies); err != nil {
 			return spec.Specification{}, err
 		}
+		// Policies.AllowedRegistries and the image pinning rules, for the
+		// same reason and in the same place (RFC 017 §2.4).
+		if err := validateImagePolicy(r, s.Policies); err != nil {
+			return spec.Specification{}, err
+		}
 		for _, region := range effectiveRegions(r.Scope) {
 			// Policies.AllowedRegions is enforced here, centrally, as
 			// well as inside each provider (RFC 011 §2.3). It was

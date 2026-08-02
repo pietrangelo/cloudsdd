@@ -364,3 +364,59 @@ func TestValidateProviderPreference(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateAllowedRegistries covers the shape bounds on the RFC 017
+// §2.4 policy. What a registry name *means* is checked in
+// internal/provider/container, against the image; this checks only that
+// the list itself is well-formed, which is the split every other policy
+// list follows.
+func TestValidateAllowedRegistries(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      []string
+		wantErr bool
+	}{
+		{
+			// Absent is not "anything goes": with no allowlist, every image
+			// must carry a digest. The permissive-looking default is the
+			// strict one.
+			name: "absent",
+			in:   nil,
+		},
+		{name: "single registry", in: []string{"ghcr.io"}},
+		{name: "several", in: []string{"ghcr.io", "docker.io", "europe-docker.pkg.dev"}},
+		{
+			// A duplicate is a typo or a misreading; neither should pass
+			// silently, on the same reasoning as ProviderPreference.
+			name:    "duplicates",
+			in:      []string{"ghcr.io", "ghcr.io"},
+			wantErr: true,
+		},
+		{name: "empty entry", in: []string{"ghcr.io", ""}, wantErr: true},
+		{
+			name:    "longer than a hostname can be",
+			in:      []string{strings.Repeat("a", 254)},
+			wantErr: true,
+		},
+		{
+			name: "more than the cap",
+			in: []string{
+				"a.io", "b.io", "c.io", "d.io", "e.io",
+				"f.io", "g.io", "h.io", "i.io", "j.io", "k.io",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := validSpec()
+			s.Policies.AllowedRegistries = tt.in
+
+			err := Validate(&s)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}

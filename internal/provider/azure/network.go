@@ -41,6 +41,17 @@ const (
 // database service place its resources in our subnet, and nothing else.
 const subnetJoinAction = "Microsoft.Network/virtualNetworks/subnets/join/action"
 
+// NAT gateway configuration (RFC 017 §2.7).
+const (
+	// A NAT gateway accepts only a Standard-SKU, statically allocated
+	// address. Both are stated rather than defaulted: Azure's default
+	// allocation is dynamic, which the gateway rejects at create time.
+	natSkuStandard          = "Standard"
+	natIPAllocationStatic   = "Static"
+	natPublicIPSkuStandard  = "Standard"
+	natIdleTimeoutInMinutes = 4
+)
+
 // engineNetworking carries the two values that differ between engines.
 //
 // A table rather than a branch in each declare function: RFC 015 §2.2
@@ -165,6 +176,10 @@ func declareScopeNetwork(ctx *pulumi.Context, s provider.NetworkScope, cidr neti
 		return fmt.Errorf("azure: failed to attach the security group for scope %q: %w", scopeName(s), err)
 	}
 
+	if err := declareScopeEgress(ctx, s, rg, generalSubnet); err != nil {
+		return err
+	}
+
 	// One delegated subnet and one private DNS zone per engine. A subnet
 	// delegated to Microsoft.DBforMySQL cannot host a PostgreSQL server
 	// or a VM, so they cannot be shared.
@@ -172,6 +187,66 @@ func declareScopeNetwork(ctx *pulumi.Context, s provider.NetworkScope, cidr neti
 		if err := declareEngineNetwork(ctx, s, rg, vnet, cidr, engine); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// declareScopeEgress gives the general subnet a route out (RFC 017 §2.7).
+//
+// One NAT gateway for the scope, attached to the general subnet only. The
+// delegated database subnets are deliberately left without one: a managed
+// flexible server does not pull packages, and an egress path it never uses
+// is a path an exfiltrating query could.
+//
+// Azure needs no public subnet for this — the gateway is a resource in its
+// own right with an address attached, associated with a subnet rather than
+// living in one — so unlike AWS there is nothing here a resource could be
+// placed in by mistake.
+func declareScopeEgress(
+	ctx *pulumi.Context,
+	s provider.NetworkScope,
+	rg *core.ResourceGroup,
+	subnet *network.Subnet,
+) error {
+	name := scopeNetworkName(s)
+
+	address, err := network.NewPublicIp(ctx, name+"-nat-ip", &network.PublicIpArgs{
+		Name:              pulumi.String(name + "-nat-ip"),
+		ResourceGroupName: rg.Name,
+		Location:          rg.Location,
+		AllocationMethod:  pulumi.String(natIPAllocationStatic),
+		Sku:               pulumi.String(natPublicIPSkuStandard),
+	})
+	if err != nil {
+		return fmt.Errorf("azure: failed to declare the nat address for scope %q: %w", scopeName(s), err)
+	}
+
+	gateway, err := network.NewNatGateway(ctx, name+"-nat", &network.NatGatewayArgs{
+		Name:                 pulumi.String(name + "-nat"),
+		ResourceGroupName:    rg.Name,
+		Location:             rg.Location,
+		SkuName:              pulumi.String(natSkuStandard),
+		IdleTimeoutInMinutes: pulumi.Int(natIdleTimeoutInMinutes),
+	})
+	if err != nil {
+		return fmt.Errorf("azure: failed to declare the nat gateway for scope %q: %w", scopeName(s), err)
+	}
+
+	if _, err := network.NewNatGatewayPublicIpAssociation(ctx, name+"-nat-ip-assoc",
+		&network.NatGatewayPublicIpAssociationArgs{
+			NatGatewayId:      gateway.ID(),
+			PublicIpAddressId: address.ID(),
+		}); err != nil {
+		return fmt.Errorf("azure: failed to attach the nat address for scope %q: %w", scopeName(s), err)
+	}
+
+	if _, err := network.NewSubnetNatGatewayAssociation(ctx, name+"-nat-subnet-assoc",
+		&network.SubnetNatGatewayAssociationArgs{
+			SubnetId:     subnet.ID(),
+			NatGatewayId: gateway.ID(),
+		}); err != nil {
+		return fmt.Errorf("azure: failed to attach the nat gateway to the general subnet for scope %q: %w",
+			scopeName(s), err)
 	}
 	return nil
 }

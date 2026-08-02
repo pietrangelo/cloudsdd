@@ -38,6 +38,24 @@ const (
 	peeringAddressType = "INTERNAL"
 )
 
+// Cloud NAT configuration (RFC 017 §2.7).
+const (
+	// natIPAllocateAuto lets Google allocate the external addresses. The
+	// alternative is reserving static ones, which pins the scope's egress
+	// to an address an account-level control could allow-list — worth
+	// having, and worth an RFC of its own rather than a default that
+	// leaves reserved addresses behind on every destroy.
+	natIPAllocateAuto = "AUTO_ONLY"
+
+	// natSubnetworksList restricts NAT to the subnets named below rather
+	// than every subnet in the network. The network has exactly one today,
+	// so the two settings behave identically — the explicit list is what
+	// keeps them identical when a later RFC adds a second subnet that was
+	// never meant to reach the internet.
+	natSubnetworksList = "LIST_OF_SUBNETWORKS"
+	natAllIPRanges     = "ALL_IP_RANGES"
+)
+
 // EnsureNetwork provisions the shared VPC for a scope (RFC 016 §2.2).
 //
 // This is the change that makes a GCP database reachable at all. Before
@@ -97,7 +115,7 @@ func declareScopeNetwork(
 	if err != nil {
 		return fmt.Errorf("gcp: scope %q: %w", scopeName(s), err)
 	}
-	if _, err := gcpcompute.NewSubnetwork(ctx, name+"-subnet", &gcpcompute.SubnetworkArgs{
+	subnet, err := gcpcompute.NewSubnetwork(ctx, name+"-subnet", &gcpcompute.SubnetworkArgs{
 		Name:        pulumi.String(name + "-subnet"),
 		Network:     vpc.ID(),
 		Region:      pulumi.String(s.Region),
@@ -106,8 +124,13 @@ func declareScopeNetwork(
 		// which is how it reaches Cloud SQL's admin API and the OS Login
 		// service without a route to the internet.
 		PrivateIpGoogleAccess: pulumi.Bool(true),
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("gcp: failed to declare the subnet for scope %q: %w", scopeName(s), err)
+	}
+
+	if err := declareScopeEgress(ctx, s, vpc, subnet); err != nil {
+		return err
 	}
 
 	// The peered range Google allocates its managed services out of. It
@@ -150,6 +173,54 @@ func declareScopeNetwork(
 	// default-allow-ssh, and this network ships nothing. compute_instance
 	// still declares its own deny as defence in depth, retargeted at this
 	// network.
+	return nil
+}
+
+// declareScopeEgress gives the scope's subnet a route out (RFC 017 §2.7).
+//
+// GCP expresses egress as a property of a router rather than of a subnet,
+// so there is no public tier here and no address assigned to any instance:
+// PrivateIpGoogleAccess already reaches Google's own APIs, and Cloud NAT
+// adds everything else. An instance keeps a private address only and still
+// pulls a package or an image.
+//
+// One NAT for the scope, which on GCP is what the API expresses anyway —
+// a Cloud NAT is regional and covers every zone the subnet spans, so the
+// per-AZ multiplication the AWS provider has to refuse does not arise.
+func declareScopeEgress(
+	ctx *pulumi.Context,
+	s provider.NetworkScope,
+	vpc *gcpcompute.Network,
+	subnet *gcpcompute.Subnetwork,
+) error {
+	name := scopeNetworkName(s)
+
+	router, err := gcpcompute.NewRouter(ctx, name+"-router", &gcpcompute.RouterArgs{
+		Name:    pulumi.String(name + "-router"),
+		Network: vpc.ID(),
+		Region:  pulumi.String(s.Region),
+		Description: pulumi.String(fmt.Sprintf(
+			"CloudSDD egress router for scope %s", scopeName(s))),
+	})
+	if err != nil {
+		return fmt.Errorf("gcp: failed to declare the router for scope %q: %w", scopeName(s), err)
+	}
+
+	if _, err := gcpcompute.NewRouterNat(ctx, name+"-nat", &gcpcompute.RouterNatArgs{
+		Name:                          pulumi.String(name + "-nat"),
+		Router:                        router.Name,
+		Region:                        pulumi.String(s.Region),
+		NatIpAllocateOption:           pulumi.String(natIPAllocateAuto),
+		SourceSubnetworkIpRangesToNat: pulumi.String(natSubnetworksList),
+		Subnetworks: gcpcompute.RouterNatSubnetworkArray{
+			&gcpcompute.RouterNatSubnetworkArgs{
+				Name:                 subnet.ID(),
+				SourceIpRangesToNats: pulumi.StringArray{pulumi.String(natAllIPRanges)},
+			},
+		},
+	}); err != nil {
+		return fmt.Errorf("gcp: failed to declare the nat for scope %q: %w", scopeName(s), err)
+	}
 	return nil
 }
 

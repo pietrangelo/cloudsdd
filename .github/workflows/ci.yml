@@ -97,6 +97,13 @@ jobs:
       - name: Fuzz the network address derivation
         run: go test -run=X -fuzz=FuzzDerive -fuzztime=60s ./internal/provider/network/
 
+      # The image reference is the one property in the schema whose value
+      # decides what code runs, and it arrives from a natural language
+      # prompt. A parser that reads a registry the user never wrote is a
+      # container pulled from a host they never named (RFC 017 §2.4).
+      - name: Fuzz the container image parser
+        run: go test -run=X -fuzz=FuzzParseImage -fuzztime=60s ./internal/provider/container/
+
   security:
     name: Security
     runs-on: ubuntu-latest

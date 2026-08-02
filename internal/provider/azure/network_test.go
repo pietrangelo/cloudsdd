@@ -22,6 +22,10 @@ const (
 	dnsZoneToken  = "azure:privatedns/zone:Zone"
 	dnsLinkToken  = "azure:privatedns/zoneVirtualNetworkLink:ZoneVirtualNetworkLink"
 	rgToken       = "azure:core/resourceGroup:ResourceGroup"
+
+	natGatewayToken   = "azure:network/natGateway:NatGateway"
+	natIPAssocToken   = "azure:network/natGatewayPublicIpAssociation:NatGatewayPublicIpAssociation"
+	natSubnetAssocTok = "azure:network/subnetNatGatewayAssociation:SubnetNatGatewayAssociation"
 )
 
 func testScope() provider.NetworkScope {
@@ -139,6 +143,62 @@ func TestDeclareScopeNetwork(t *testing.T) {
 	}
 	if n := len(resourcesOfType(recorded, dnsLinkToken)); n != 2 {
 		t.Errorf("declared %d zone links, want one per zone — an unlinked zone resolves for nobody", n)
+	}
+}
+
+// TestDeclareScopeEgress covers RFC 017 §2.7 for Azure.
+//
+// Two assertions carry the design. One NAT gateway for the scope, because
+// the cost argument is the same one AWS makes. And it is attached to the
+// general subnet only: a managed flexible server never pulls a package, so
+// an egress path from its delegated subnet is a path only an exfiltrating
+// query would use.
+func TestDeclareScopeEgress(t *testing.T) {
+	cidr := netip.MustParsePrefix("10.42.0.0/20")
+
+	recorded := runProgram(t, func(ctx *pulumi.Context) error {
+		return declareScopeNetwork(ctx, testScope(), cidr)
+	})
+
+	if n := len(resourcesOfType(recorded, natGatewayToken)); n != 1 {
+		t.Fatalf("declared %d nat gateways, want exactly 1 for the scope", n)
+	}
+
+	// A NAT gateway rejects a dynamically allocated or Basic-SKU address
+	// at create time, and Azure's default allocation is dynamic. Both are
+	// stated in the args; a plan that omits either fails on apply, after
+	// the user approved it.
+	address := findResource(t, recorded, publicIPToken)
+	if got := address.Inputs["allocationMethod"].StringValue(); got != natIPAllocationStatic {
+		t.Errorf("nat address allocation = %q, want %q — the gateway rejects anything else",
+			got, natIPAllocationStatic)
+	}
+	if got := address.Inputs["sku"].StringValue(); got != natPublicIPSkuStandard {
+		t.Errorf("nat address sku = %q, want %q", got, natPublicIPSkuStandard)
+	}
+	if got := findResource(t, recorded, natGatewayToken).Inputs["skuName"].StringValue(); got != natSkuStandard {
+		t.Errorf("nat gateway sku = %q, want %q", got, natSkuStandard)
+	}
+
+	if !hasResource(recorded, natIPAssocToken) {
+		t.Error("the nat address was not attached to the gateway; the gateway translates to nothing")
+	}
+
+	// One subnet association, and it must be the general one. The
+	// delegated database subnets are deliberately left without egress.
+	assocs := resourcesOfType(recorded, natSubnetAssocTok)
+	if len(assocs) != 1 {
+		t.Fatalf("declared %d subnet associations, want 1 (the general subnet only)", len(assocs))
+	}
+
+	var general recordedResource
+	for _, s := range resourcesOfType(recorded, subnetToken) {
+		if s.Inputs["name"].StringValue() == generalSubnetName {
+			general = s
+		}
+	}
+	if got := assocs[0].Inputs["subnetId"].StringValue(); !strings.Contains(got, general.Name) {
+		t.Errorf("nat is attached to subnet %q, want the general subnet %q", got, general.Name)
 	}
 }
 

@@ -38,12 +38,18 @@ const (
 	tagSubnetTier  = "CloudSDDTier"
 	managedByValue = "cloudsdd"
 
-	// tierPrivate marks the subnets resources are placed in. Named now,
-	// with no public tier yet, because the distinction is the point of
-	// the layout: a database must never land in a subnet with a route to
-	// an internet gateway, and the tag is how a resource program tells
-	// them apart.
+	// tierPrivate marks the subnets resources are placed in: everything
+	// CloudSDD creates lands in one. The distinction from tierPublic is
+	// the point of the layout — a database must never sit in a subnet
+	// with a route to an internet gateway, and the tag is how a resource
+	// program tells them apart.
 	tierPrivate = "private"
+
+	// tierPublic marks the one subnet holding the NAT gateway (RFC 017
+	// §2.7). No CloudSDD resource is ever placed in it. It is tagged all
+	// the same, so a resource program that went looking for a subnet by
+	// tier can distinguish it rather than find it untagged and guess.
+	tierPublic = "public"
 )
 
 // subnetCount is how many availability zones the network spans.
@@ -53,6 +59,16 @@ const (
 // whether or not the user asked for high availability, which costs
 // nothing: an empty subnet is free.
 const subnetCount = 2
+
+// subnetIndexPublic is where the public tier sits in the scope's /20.
+//
+// It follows the private subnets, so adding it renumbers nothing already
+// deployed: private subnets keep indices 0..subnetCount-1 and the /20 has
+// room for sixteen /24s in total (RFC 016 §2.4).
+const subnetIndexPublic = subnetCount
+
+// defaultRoute is the destination a route table uses for "everything else".
+const defaultRoute = "0.0.0.0/0"
 
 // EnsureNetwork provisions the shared VPC for a scope (RFC 016 §2.2).
 //
@@ -86,14 +102,15 @@ func (p *AWSProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope
 	return nil
 }
 
-// declareScopeNetwork builds the VPC, its private subnets and the DB
-// subnet group.
+// declareScopeNetwork builds the VPC, its private subnets, the egress
+// path and the DB subnet group.
 //
-// There is no internet gateway and no NAT: nothing here has a route out.
-// That is deliberate for the resource types that exist today — a database
-// and a VM reached through Session Manager both work without egress —
-// and RFC 016 §7.1 leaves the question open for RFC 017, which is where
-// pulling a container image makes it unavoidable.
+// The egress path is the RFC 017 §2.7 repair. RFC 016 shipped this network
+// with no route out, arguing that a database and a VM reached through
+// Session Manager both work without one. The database does; the VM does
+// not, because the SSM agent is a client that has to reach the SSM
+// endpoints before any session exists. An instance therefore booted into a
+// subnet where nothing could talk to it and no package could be fetched.
 func declareScopeNetwork(
 	ctx *pulumi.Context,
 	s provider.NetworkScope,
@@ -130,6 +147,7 @@ func declareScopeNetwork(
 			s.Region, len(azs.Names), subnetCount)
 	}
 
+	private := make([]*ec2.Subnet, 0, subnetCount)
 	subnetIDs := make(pulumi.StringArray, 0, subnetCount)
 	for i := 0; i < subnetCount; i++ {
 		block, err := subnetBlock(cidr, i)
@@ -150,7 +168,12 @@ func declareScopeNetwork(
 		if err != nil {
 			return fmt.Errorf("aws: failed to declare subnet %d for scope %q: %w", i, scopeTag(s), err)
 		}
+		private = append(private, subnet)
 		subnetIDs = append(subnetIDs, subnet.ID())
+	}
+
+	if err := declareScopeEgress(ctx, s, vpc, cidr, azs.Names[0], private, opts...); err != nil {
+		return err
 	}
 
 	// The DB subnet group is what allows an RDS instance into this VPC at
@@ -167,6 +190,123 @@ func declareScopeNetwork(
 		return fmt.Errorf("aws: failed to declare the db subnet group for scope %q: %w", scopeTag(s), err)
 	}
 
+	return nil
+}
+
+// declareScopeEgress gives the private subnets a route out (RFC 017 §2.7).
+//
+// One NAT gateway for the whole scope, not one per availability zone.
+// Per-AZ NAT buys survival of a single-zone outage and avoids a cross-zone
+// data charge; neither is worth doubling the standing cost of every
+// environment CloudSDD creates, on a tool whose other headline feature is
+// switching things off at night (RFC 016 §7.1 priced it).
+//
+// The public subnet exists to hold the gateway and nothing else. No
+// resource is ever placed in it, and it does not assign public addresses
+// on launch either — the NAT gateway carries an elastic IP of its own, so
+// nothing here needs the automatic assignment that would make a stray
+// instance internet-facing.
+func declareScopeEgress(
+	ctx *pulumi.Context,
+	s provider.NetworkScope,
+	vpc *ec2.Vpc,
+	cidr netip.Prefix,
+	zone string,
+	private []*ec2.Subnet,
+	opts ...pulumi.ResourceOption,
+) error {
+	const name = "cloudsdd-net"
+
+	igw, err := ec2.NewInternetGateway(ctx, name+"-igw", &ec2.InternetGatewayArgs{
+		VpcId: vpc.ID(),
+		Tags:  scopeTags(s, nil),
+	}, opts...)
+	if err != nil {
+		return fmt.Errorf("aws: failed to declare the internet gateway for scope %q: %w", scopeTag(s), err)
+	}
+
+	block, err := subnetBlock(cidr, subnetIndexPublic)
+	if err != nil {
+		return fmt.Errorf("aws: scope %q: %w", scopeTag(s), err)
+	}
+	public, err := ec2.NewSubnet(ctx, name+"-public", &ec2.SubnetArgs{
+		VpcId:               vpc.ID(),
+		CidrBlock:           pulumi.String(block.String()),
+		AvailabilityZone:    pulumi.String(zone),
+		MapPublicIpOnLaunch: pulumi.Bool(false),
+		Tags:                scopeTags(s, map[string]string{tagSubnetTier: tierPublic}),
+	}, opts...)
+	if err != nil {
+		return fmt.Errorf("aws: failed to declare the public subnet for scope %q: %w", scopeTag(s), err)
+	}
+
+	publicRoutes, err := ec2.NewRouteTable(ctx, name+"-public-rt", &ec2.RouteTableArgs{
+		VpcId: vpc.ID(),
+		Routes: ec2.RouteTableRouteArray{
+			&ec2.RouteTableRouteArgs{
+				CidrBlock: pulumi.String(defaultRoute),
+				GatewayId: igw.ID(),
+			},
+		},
+		Tags: scopeTags(s, map[string]string{tagSubnetTier: tierPublic}),
+	}, opts...)
+	if err != nil {
+		return fmt.Errorf("aws: failed to declare the public route table for scope %q: %w", scopeTag(s), err)
+	}
+	if _, err := ec2.NewRouteTableAssociation(ctx, name+"-public-rta", &ec2.RouteTableAssociationArgs{
+		SubnetId:     public.ID(),
+		RouteTableId: publicRoutes.ID(),
+	}, opts...); err != nil {
+		return fmt.Errorf("aws: failed to associate the public route table for scope %q: %w", scopeTag(s), err)
+	}
+
+	address, err := ec2.NewEip(ctx, name+"-nat-eip", &ec2.EipArgs{
+		Domain: pulumi.String("vpc"),
+		Tags:   scopeTags(s, nil),
+	}, opts...)
+	if err != nil {
+		return fmt.Errorf("aws: failed to declare the nat address for scope %q: %w", scopeTag(s), err)
+	}
+
+	// DependsOn the gateway explicitly: AWS rejects a NAT gateway created
+	// before the internet gateway is attached, and the dependency is not
+	// implied by any argument here — the NAT references the subnet and the
+	// address, never the gateway it needs.
+	nat, err := ec2.NewNatGateway(ctx, name+"-nat", &ec2.NatGatewayArgs{
+		SubnetId:     public.ID(),
+		AllocationId: address.ID(),
+		Tags:         scopeTags(s, nil),
+	}, append(opts, pulumi.DependsOn([]pulumi.Resource{igw}))...)
+	if err != nil {
+		return fmt.Errorf("aws: failed to declare the nat gateway for scope %q: %w", scopeTag(s), err)
+	}
+
+	// One route table shared by every private subnet: they all leave
+	// through the same gateway, so a table each would be three copies of
+	// one decision.
+	privateRoutes, err := ec2.NewRouteTable(ctx, name+"-private-rt", &ec2.RouteTableArgs{
+		VpcId: vpc.ID(),
+		Routes: ec2.RouteTableRouteArray{
+			&ec2.RouteTableRouteArgs{
+				CidrBlock:    pulumi.String(defaultRoute),
+				NatGatewayId: nat.ID(),
+			},
+		},
+		Tags: scopeTags(s, map[string]string{tagSubnetTier: tierPrivate}),
+	}, opts...)
+	if err != nil {
+		return fmt.Errorf("aws: failed to declare the private route table for scope %q: %w", scopeTag(s), err)
+	}
+	for i, subnet := range private {
+		if _, err := ec2.NewRouteTableAssociation(ctx, fmt.Sprintf("%s-private-rta-%d", name, i),
+			&ec2.RouteTableAssociationArgs{
+				SubnetId:     subnet.ID(),
+				RouteTableId: privateRoutes.ID(),
+			}, opts...); err != nil {
+			return fmt.Errorf("aws: failed to associate the private route table for subnet %d in scope %q: %w",
+				i, scopeTag(s), err)
+		}
+	}
 	return nil
 }
 

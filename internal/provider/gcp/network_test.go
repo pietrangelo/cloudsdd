@@ -24,6 +24,8 @@ const (
 	subnetworkToken    = "gcp:compute/subnetwork:Subnetwork"
 	globalAddressToken = "gcp:compute/globalAddress:GlobalAddress"
 	connectionToken    = "gcp:servicenetworking/connection:Connection"
+	routerToken        = "gcp:compute/router:Router"
+	routerNatToken     = "gcp:compute/routerNat:RouterNat"
 )
 
 func testScope() provider.NetworkScope {
@@ -97,6 +99,55 @@ func TestDeclareScopeNetwork(t *testing.T) {
 	// here; the instance still declares its own deny.
 	if hasResource(recorded, firewallToken) {
 		t.Error("a firewall rule was declared on the scope network; it ships allow-nothing already")
+	}
+}
+
+// TestDeclareScopeEgress covers RFC 017 §2.7 for GCP: Cloud NAT on the
+// scope's router, restricted to the scope's own subnet.
+//
+// The restriction is the assertion worth having. NAT'ing every subnet in
+// the network behaves identically today, because there is one — and stops
+// behaving identically the moment a later RFC adds a subnet that was never
+// meant to reach the internet.
+func TestDeclareScopeEgress(t *testing.T) {
+	cidr := netip.MustParsePrefix("10.42.0.0/20")
+
+	recorded := runProgram(t, func(ctx *pulumi.Context) error {
+		return declareScopeNetwork(ctx, testScope(), cidr)
+	})
+
+	router := findResource(t, recorded, routerToken)
+	if got := router.Inputs["region"].StringValue(); got != "europe-west1" {
+		t.Errorf("router region = %q, want the scope's", got)
+	}
+
+	nat := findResource(t, recorded, routerNatToken)
+	if got := nat.Inputs["sourceSubnetworkIpRangesToNat"].StringValue(); got != natSubnetworksList {
+		t.Errorf("nat source ranges = %q, want %q — every subnet would include ones that should not leave",
+			got, natSubnetworksList)
+	}
+	subnets := nat.Inputs["subnetworks"].ArrayValue()
+	if len(subnets) != 1 {
+		t.Fatalf("nat covers %d subnets, want the scope's one", len(subnets))
+	}
+	ranges := subnets[0].ObjectValue()["sourceIpRangesToNats"].ArrayValue()
+	if len(ranges) != 1 || ranges[0].StringValue() != natAllIPRanges {
+		t.Errorf("nat source ip ranges = %v, want [%s]", ranges, natAllIPRanges)
+	}
+	if got := nat.Inputs["natIpAllocateOption"].StringValue(); got != natIPAllocateAuto {
+		t.Errorf("nat address allocation = %q, want %q", got, natIPAllocateAuto)
+	}
+
+	// Egress is not ingress. The subnet must still hand out no external
+	// addresses, and the network must still ship no allow rule — Cloud NAT
+	// is outbound-only, and nothing here should have quietly made it
+	// otherwise.
+	subnet := findResource(t, recorded, subnetworkToken)
+	if !subnet.Inputs["privateIpGoogleAccess"].BoolValue() {
+		t.Error("privateIpGoogleAccess = false; instances still have no path to Google APIs")
+	}
+	if hasResource(recorded, firewallToken) {
+		t.Error("an allow rule appeared alongside the nat; egress must not become ingress")
 	}
 }
 

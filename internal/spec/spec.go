@@ -162,6 +162,18 @@ func boolOrDefault(p *bool, def bool) bool {
 type Policies struct {
 	AllowedRegions []string `json:"allowed_regions,omitempty"`
 
+	// AllowedRegistries names the container registries a container_service
+	// may pull from (RFC 017 §2.4). Absent means none is allow-listed,
+	// which is not "anything goes": with no allowlist every image must be
+	// pinned to a digest, so the permissive-looking default is the strict
+	// one. Naming a registry is how an operator takes responsibility for
+	// what its mutable tags point at.
+	//
+	// Capped at ten for the reason every other policy list is (RFC 005
+	// §3): an unbounded list in a Specification is an unbounded amount of
+	// work for whatever consumes it.
+	AllowedRegistries []string `json:"allowed_registries,omitempty" validate:"omitempty,max=10,unique,dive,required,max=253"`
+
 	// Schedule declares, once for the whole Specification, when the
 	// schedulable resources are powered on (RFC 012 §2.1). Resource
 	// types with no power state ignore it; a resource that declares its

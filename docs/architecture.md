@@ -65,6 +65,7 @@ cloudsdd/
 │   │   ├── gcp/              # GCP implementation (RFC 008/012/013/016)
 │   │   ├── azure/            # Azure implementation (RFC 008/012/013/015/016)
 │   │   ├── compute/          # Cloud-agnostic compute_instance shape, shared by all three (RFC 013)
+│   │   ├── container/        # Cloud-agnostic container_service shape and image rules (RFC 017)
 │   │   ├── decode/           # Shared strict property decoder + credential-name denylist (RFC 011)
 │   │   ├── network/          # Address derivation and conflict checking for scope networks (RFC 016)
 │   │   └── pulumiutil/       # Diff/Result mapping from Pulumi operation summaries
@@ -292,6 +293,56 @@ onto SKUs and images, which is per-provider by nature.
 occupies exactly one zone, so more than one entry is an error rather than
 a silent pick of the first.
 
+### `internal/provider/container`
+
+Holds the cloud-agnostic shape of a `container_service` — `image`, `port`,
+`size`, `replicas`, `public` — and the image rules every provider applies
+(RFC 017 §2.2, §2.4). Shared for the same reason `compute` is; what stays
+per-provider is the mapping from `size` onto CPU and memory, which Fargate,
+Cloud Run and Container Apps quantise differently.
+
+`Replicas` is `*int` and `Public` is `*bool` so absence activates the
+default rather than the zero value. It matters more here than elsewhere: an
+absent `replicas` means one, an explicit `0` means none — the state a power
+schedule puts the service in outside working hours — and a plain `int`
+could not tell them apart.
+
+There is deliberately no `env` or configuration field. Anything of that
+shape is where credentials get pasted, and offering it without a secrets
+story would be offering the paste.
+
+**The image rules** are two independent axes, and reading them as one is
+the mistake worth naming:
+
+- **Mutability** — what runs must be what was reviewed. With no allowlist,
+  every image must carry a digest; a tag is accepted only from a registry
+  the operator named, because naming it is how they take responsibility for
+  what its tags point at. `latest`, explicit or implied by an absent tag,
+  is refused in every combination.
+- **Origin** — where the artifact came from. When
+  `policies.allowed_registries` is present it constrains *every* image,
+  digest or not.
+
+That last clause is a deliberate reading of RFC 017 §2.4, whose prose ("a
+digest is accepted from anywhere") would otherwise let any digest bypass
+the allowlist — which would make the RFC's own threat-table row about
+attacker-controlled registries name a mitigation that does not mitigate.
+An allowlist something can step around is not a policy.
+
+`ParseImage` is stricter than a registry would be, and is fuzzed
+(`FuzzParseImage`) on a property stronger than "does not panic": a registry
+it reports must appear in the input, and a reference that parses must
+survive being recomposed and parsed again. This is the one property in the
+schema whose value decides what code runs, so a reference that parses two
+ways must not parse at all.
+
+Enforcement lives at the Engine (`validateImagePolicy`), beside
+`AllowedRegions` and schedule compilation, for the RFC 011 §2.3 reason: a
+check that lives only inside providers is a check the next provider
+forgets. It fails closed — a missing or non-string `image` is an error, not
+a skip — because a policy check that passes when it cannot read its input
+passes hardest exactly when something is wrong.
+
 ### `internal/provider/aws` (RFC 002, 003, 004, 007, 012, 013)
 
 First concrete implementation of `CloudProvider`, based on the Pulumi
@@ -329,10 +380,18 @@ the machine, but invokes it itself).
   named for the scope alone — `stackNameFor(account, environment, region, "")`
   — declaring a VPC at the derived range, private subnets in two
   availability zones (RDS refuses a subnet group with fewer), and the DB
-  subnet group. No internet gateway and no NAT: nothing in it has a route
-  out, which is deliberate while a database and a Session-Manager-reached
-  VM are the only occupants, and is the question RFC 016 §7.1 leaves for
-  RFC 017.
+  subnet group.
+
+  **Egress (RFC 017 §2.7)**: a third subnet tagged `CloudSDDTier=public`
+  holds an internet gateway and **one NAT gateway for the whole scope**,
+  and the private subnets route `0.0.0.0/0` through it. RFC 016 shipped the
+  network with no route out, arguing that a database and a
+  Session-Manager-reached VM both work without one. The database does; the
+  VM does not, because the SSM agent has to reach the SSM endpoints before
+  a session exists — so an instance booted into a subnet where nothing
+  could talk to it. One NAT rather than one per zone is the cost trade RFC
+  016 §7.1 priced. No resource is ever placed in the public tier and no
+  subnet assigns a public address on launch: a route out is not a route in.
 
   Resource programs find that network by **tag**, not through a Pulumi
   `StackReference` as RFC 016 §2.2 originally proposed. A StackReference
@@ -402,6 +461,15 @@ overlap the address plan exists to prevent — with a workload subnet
 carrying `PrivateIpGoogleAccess`, a reserved peering range, and a
 `servicenetworking` connection.
 
+**Egress (RFC 017 §2.7)** is a Cloud Router with a Cloud NAT, restricted to
+the scope's own subnet (`LIST_OF_SUBNETWORKS`, not every subnet in the
+network — identical behaviour today with one subnet, and the thing that
+keeps it identical when a later RFC adds one that should not reach the
+internet). No public tier and no external address on any instance: GCP
+expresses egress as a property of a router rather than of a subnet, and a
+Cloud NAT is regional, so the per-zone multiplication AWS has to refuse
+does not arise.
+
 That connection is the whole point. Cloud SQL was previously declared with
 `Ipv4Enabled: false` and no `PrivateNetwork`, which does not make an
 instance private so much as **unaddressable**: a private IP requires a
@@ -452,6 +520,15 @@ This replaced two unsatisfying postures. MySQL exposes no
 `PublicNetworkAccessEnabled` at all, so it had a public endpoint that only
 the absence of a firewall rule kept closed; PostgreSQL had that flag set
 false, which is genuinely private but leaves no path to the server at all.
+
+**Egress (RFC 017 §2.7)** is a NAT gateway with a static Standard-SKU
+address — the gateway rejects a dynamic or Basic one at create time, and
+Azure's default allocation is dynamic — associated with **the general
+subnet only**. The delegated database subnets are deliberately left
+without: a managed flexible server never pulls a package, so an egress
+path from its subnet is one only an exfiltrating query would use. Azure
+needs no public tier for this, since the gateway is a resource associated
+with a subnet rather than one living in it.
 
 The security group is attached to the **subnet**, not to each network
 interface as RFC 013 did — at scope level the perimeter is a property of
@@ -628,6 +705,9 @@ Measures active as of today (see also RFC 001 §3, 002 §2.4-2.5, 003
 | Confused deputy (AWS scheduler service principal) | `aws:SourceAccount` and `ArnLike` `aws:SourceArn` conditions on the execution role's trust policy (RFC 012 §4.1) |
 | SSRF to credential theft (RFC 013 §2.2) | IMDSv2 required on every EC2 instance, with `httpPutResponseHopLimit = 1` so a container on the host cannot reach the metadata service either |
 | Image supply chain (RFC 013 §4) | AMI lookups filter on owner ID as well as name pattern; a name-only filter would let any account publishing a matching public AMI be selected |
+| Container image mutated after review (RFC 017 §2.4) | A digest is required unless the registry is in `policies.allowed_registries`; `latest`, explicit or implied, is refused in every combination. Enforced at the Engine, so no provider can omit it, and fail-closed when the `image` property cannot be read |
+| Container image from an attacker-controlled registry | When `allowed_registries` is set it constrains every image, digest included — an allowlist something can step around is not a policy |
+| Egress becoming ingress (RFC 017 §2.7) | The AWS public subnet tier holds the NAT gateway and nothing else; no subnet on any provider assigns a public address on launch, and Azure's delegated database subnets get no NAT at all |
 | Key material in the Specification | No SSH key property exists on any provider; the one key Azure's API demands is generated in-program and kept in encrypted state, and the credential-name denylist rejects a user-supplied `private_key` independently |
 | Cost control that silently does not control cost | On Azure a scheduled stop **deallocates**: a VM in the `Stopped` state still bills for compute, so the obvious verb would run correctly and save nothing (RFC 013 §2.5) |
 | Non-deterministic target cloud (RFC 014 §4) | Candidate providers are evaluated in sorted order and ties are refused rather than broken implicitly, so a Specification cannot resolve to one cloud in review and another in production |
@@ -655,18 +735,19 @@ Table-driven throughout, per CLAUDE.md. Coverage as measured by
 | `internal/provider` | 100.0% | 100% |
 | `internal/provider/compute` | 100.0% | 100% |
 | `internal/provider/pulumiutil` | 100.0% | 100% |
+| `internal/provider/container` | 98.2% | 98% |
 | `internal/nlp` | 97.0% | 96% |
 | `internal/schedule` | 96.8% | 96% |
-| `internal/engine` | 95.5% | 95% |
 | `internal/provider/decode` | 95.8% | 95% |
+| `internal/engine` | 95.6% | 95% |
 | `internal/provider/network` | 93.7% | 93% |
-| `cmd/cloudsdd` | 93.5% | 93% |
 | `internal/config` | 93.5% | 93% |
-| `internal/state` | 91.3% | 91% |
+| `cmd/cloudsdd` | 93.2% | 93% |
+| `internal/state` | 91.7% | 91% |
 | `internal/spec` | 90.0% | 90% |
-| `internal/provider/azure` | 71.2% | 71% |
-| `internal/provider/gcp` | 71.0% | 70% |
-| `internal/provider/aws` | 65.6% | 65% |
+| `internal/provider/azure` | 70.4% | 70% |
+| `internal/provider/gcp` | 69.8% | 69% |
+| `internal/provider/aws` | 65.5% | 65% |
 
 The floors live in `scripts/coverage-gate.sh` and are enforced by CI. They
 ratchet upward only, and a package with tests but no floor fails the gate,
@@ -683,28 +764,38 @@ artifact it archives.
   schedule rendering, Diff/Result mapping — is covered by table-driven
   tests, including Pulumi resource *declaration* through `pulumi.WithMocks`,
   which needs neither Docker nor the CLI.
-- Native Go fuzz targets, all four run for 60s per CI job: `spec.Parse`
+- Native Go fuzz targets, all five run for 60s per CI job: `spec.Parse`
   (`FuzzParse`), the provider property decoder (`FuzzProperties`), the
-  schedule compiler (`FuzzCompile`), and the network address derivation
-  (`FuzzDerive`). For the first three the invariant is the absence of
-  panics; `FuzzDerive` asserts something stronger, because a malformed
-  range is not a crash but a VPC the cloud rejects after the user approved
-  the plan: every scope must yield an aligned `/20` inside the base block.
+  schedule compiler (`FuzzCompile`), the network address derivation
+  (`FuzzDerive`), and the container image parser (`FuzzParseImage`). For
+  the first three the invariant is the absence of panics; the last two
+  assert something stronger, because their failure mode is not a crash.
+  A malformed range is a VPC the cloud rejects after the user approved the
+  plan, so every scope must yield an aligned `/20` inside the base block.
+  A misparsed image is a container pulled from a host the user never
+  named, so a reported registry must appear in the input and a reference
+  that parses must survive being recomposed and parsed again.
 - Integration tests (`testcontainers-go` + LocalStack) present behind the
   `integration` build tag
   (`go test -tags=integration ./internal/provider/aws/... -run TestIntegration`):
   Plan → Apply → verify via SDK → Destroy cycle for `object_storage`.
-  Require Docker and the `pulumi` CLI; not run by the default suite nor
-  verified in environments lacking these dependencies.
+  Require Docker and the `pulumi` CLI; not run by the default suite, not
+  run by CI at all, and present for AWS only — GCP and Azure have no
+  integration test, which is a gap rather than a decision.
 
 ## Out of scope / next steps
 
 Not yet implemented:
 
-- **`container_service`.** Approved as RFC 017 and blocked on RFC 016
-  finishing: it needs egress to pull an image and an ingress that is
-  deliberate rather than inherited. It remains the one `ResourceType` in
-  the schema that no provider implements.
+- **`container_service`, on every provider.** RFC 017 step 1 has landed:
+  the cloud-agnostic shape and image rules exist in
+  `internal/provider/container`, `policies.allowed_registries` is enforced
+  at the Engine, and the network it will need has a route out. What does
+  not exist yet is the resource itself — no provider's `Validate` or
+  `declare` handles the type, so a Specification naming one still fails
+  with `unsupported resource type`. GCP (Cloud Run) is next, then AWS
+  (ECS/Fargate) and Azure (Container Apps). It remains the one
+  `ResourceType` in the schema that no provider implements.
 - References/dependencies between resources in the same Specification —
   which is also why `Destroy` walks the resource list in reverse rather
   than in dependency order.
@@ -714,8 +805,10 @@ Not yet implemented:
 - Portable region names. `agnostic` today still requires a
   provider-specific region string, which makes it that provider spelled
   indirectly rather than portability (RFC 014 §7.1).
-- Multi-tenant isolation of state; network-layer sealing per `Environment`
-  (VPC/security-group, RFC 005 §5); zone-aware HA placement for any
+- GCP and Azure integration tests. Only AWS has one, and CI runs none of
+  them, which is what the `internal/provider/*` coverage floors are really
+  measuring around.
+- Multi-tenant isolation of state; zone-aware HA placement for any
   `ResourceType` (`compute_instance` consumes `Scope.Zones` but places a
   single machine); and a `DeploymentTarget` keyed by
   `(Account, Environment)` pairs — today `Environment` is a

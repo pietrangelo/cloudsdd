@@ -357,6 +357,32 @@ still fails hard: you asked for it specifically.
 enforced, so it read as a guarantee and provided none. Real cost enforcement
 needs a pricing model and is deferred to its own RFC.
 
+### `allowed_registries`
+
+```json
+"policies": { "allowed_registries": ["ghcr.io"] }
+```
+
+Which container registries a `container_service` may pull from (RFC 017 §2.4).
+It is enforced by the Engine, alongside `allowed_regions`, so no provider can
+omit it.
+
+Leaving it out is not the permissive setting. Two rules apply, on two
+independent axes:
+
+- **Mutability.** With no allowlist, **every image must be pinned to a digest**
+  (`ghcr.io/acme/api@sha256:…`). A tag can be repointed after you reviewed the
+  plan, so what runs would not be what you approved. Naming a registry here is
+  how you take responsibility for what its tags point at — and then a tag is
+  accepted from it.
+- **Origin.** When the list is present it constrains *every* image, digest or
+  not. An allowlist something can step around is not a policy.
+
+`:latest` is refused in every combination, with or without an allowlist, pinned
+or not: nothing that reads "deploy whatever is newest, forever" belongs in a
+reviewed artifact. An image with no tag at all is the same thing spelled
+differently, and is refused the same way.
+
 ## Power scheduling
 
 Ask for it in the prompt, and the environment is powered off outside working
@@ -474,6 +500,9 @@ it in the ledger, so a retry does not re-create resources that already exist.
 | `CLOUDSDD_PULUMI_PASSPHRASE is required` | Unset. Needed by every provider your Specification targets. |
 | `refusing to deploy: … declares intent "destroy"` | The translator read your prompt as a teardown. Rephrase, or use `destroy`. |
 | `region … not in allowed_regions` | The Specification's `policies.allowed_regions` excludes the requested region. |
+| `container image must be pinned to a digest …` | The image carries a tag and its registry is not in `policies.allowed_registries`. Pin it (`@sha256:…`) or allow-list the registry. |
+| `container image must not use the \`latest\` tag` | `:latest`, or no tag at all. Name a version or a digest; there is no policy that permits it. |
+| `container image registry not in allowed_registries` | The image comes from a registry the Specification does not list. A digest does not exempt it. |
 | `unknown or malformed property` | The translator produced a property the provider does not support. Since RFC 011 these are rejected instead of silently dropped, so the message names what would have been ignored. |
 | `property key … looks like a credential` | A credential was placed in the Specification. Credentials come from the local environment only. |
 | `encryption cannot be disabled on …` | GCP and Azure encrypt at rest unconditionally; the request is refused rather than quietly ignored. |
