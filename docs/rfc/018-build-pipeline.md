@@ -144,6 +144,46 @@ CloudSDD *before* review, and what is approved is a commit.
 comes from the registry CloudSDD created, and a user who has allow-listed
 registries has allow-listed that one implicitly, because it is theirs.
 
+### 2.4.1 How the service learns which image to run
+
+§2.4 says a `container_service` "receives the digest the build produced"
+without saying by what mechanism, and the obvious readings do not work.
+CloudSDD runs **one Pulumi stack per `Resource.ID`**, so the service's
+program cannot see the pipeline's outputs; and the reference carries only
+an id, not a registry, a repository or a commit.
+
+**The commit SHA is the mechanism.** It is already the thing §2.4
+resolves and shows, and it is known to both sides before either is
+applied:
+
+1. at plan time CloudSDD resolves `source.revision` to a commit SHA;
+2. the build tags the image with that SHA;
+3. the service asks for `<registry>/<image_name>:<sha>`.
+
+Nothing has to be read back out of a build that has not run yet, and no
+cross-stack reference is needed. What makes the tag as strong as a digest
+is that **the registry is created with immutable tags** (§2.8): a tag that
+cannot be repointed names one artifact forever, which is the property
+§2.4 actually wants — what runs is what was reviewed.
+
+The registry host is assembled by the **provider**, because it is the only
+component that knows it: an ECR host contains the account id, an Artifact
+Registry path contains the project, an ACR login server is named after the
+registry. The Engine supplies what it knows — the resolved commit and the
+pipeline's `image_name` — through a field on `spec.Resource` that carries
+no JSON tag, so it can never be set from a Specification.
+
+Revision resolution speaks Git's smart-HTTP ref advertisement directly,
+rather than shelling out to `git` or taking a Git library as a dependency.
+It is one unauthenticated GET returning every ref and its object name,
+which is exactly the question being asked, and it is host-agnostic where a
+forge REST API would work on one host only.
+
+A revision that is already a full commit SHA is passed through without a
+lookup, so a fully pinned Specification plans with no network access.
+Abbreviated SHAs are not accepted: an abbreviation is a prefix, and
+prefixes collide.
+
 ### 2.5 Retention
 
 Five images by default, configurable, enforced by the registry's own

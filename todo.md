@@ -30,45 +30,29 @@
 - [x] Create `internal/provider/aws/pipeline_test.go`: write the mock test `TestAWSCodeBuildGeneration`, validating the correct structure of the IAM Role and policy (scoped only to the ARN of the ECR repository that was created).
 - [x] Create `internal/provider/aws/pipeline.go`: implement the creation of the ECR Repository and the CodeBuild Project. Wire the lifecycle to the `retain` property.
 - [x] Wire `build_pipeline` into the AWS provider's `Validate` and `resourceProgram` dispatch.
-- [ ] **Blocked on a design decision — see "Open: the digest hand-off" below.** Update `internal/provider/aws/container_test.go`: mock test validating the ECR tag resolution downstream of the run.
-- [ ] **Blocked on the same decision.** Update `internal/provider/aws/container.go`: if `Pipeline` is referenced, resolve the digest to feed the ECS container definition.
+### The digest hand-off — decided
+The mechanism is the **commit SHA** (RFC 018 §2.4.1, added). The revision
+resolves to a SHA at plan time, the build tags with it, and the service
+asks for `<registry>/<image_name>:<sha>`. Immutable registry tags are what
+make that as strong as a digest. No cross-stack reference is needed.
 
-### Open: the digest hand-off
-RFC 018 §2.4 says a `container_service` consuming a pipeline "receives the
-digest the build produced", without saying by what mechanism. It cannot
-read it directly today: CloudSDD runs one Pulumi stack per `Resource.ID`,
-so the service's program cannot see the pipeline's outputs, and the
-service knows only the pipeline's *id* — not the registry, the repository
-or the commit.
-
-Two ways to close it, and they differ in which component learns about
-references:
-
-1. **The Engine substitutes.** `Apply` on a pipeline returns the digest in
-   `provider.Result.Details`; the Engine rewrites the dependent service's
-   `pipeline` property into a pinned `image` before applying it. The
-   ordering that makes this possible already exists. Providers stay
-   unaware that references exist, and the substituted Specification is
-   showable in the plan. Costs a new contract on `Result`.
-2. **The provider resolves.** The AWS provider reads the pipeline's stack
-   outputs through a Pulumi `StackReference`, or queries ECR for the tag.
-   No Engine change, but every provider reimplements reference resolution,
-   and RFC 011 §1.1H is the record of what happens next.
-
-Option 1 is the recommendation. It is an RFC-level decision, so it wants
-sign-off before the three providers are written against it.
+- [x] Amend `docs/rfc/018-build-pipeline.md` with §2.4.1 recording the mechanism.
+- [x] Create `internal/provider/pipeline/revision.go`: resolve a branch/tag to a commit over Git's smart-HTTP ref advertisement, with no new dependency.
+- [x] Create `internal/provider/pipeline/revision_test.go`: branch, tag, annotated tag, ambiguity, unreachable repositories, and a bounded response.
+- [ ] Add `Resolved` to `spec.Resource` (no JSON tag, so a Specification can never set it) carrying the pipeline `image_name` and the resolved commit.
+- [ ] Update `internal/engine/default.go`: resolve each build_pipeline's revision once, and populate `Resolved` on every service that references it.
+- [ ] Update `internal/provider/aws/container.go`: assemble `<ecr-host>/<image_name>:<sha>` when `Pipeline` is referenced.
+- [ ] Update `internal/provider/aws/container_test.go`: assert the assembled reference and that it is never `latest`.
 
 ## GCP Provider
-- [ ] Create `internal/provider/gcp/pipeline_test.go`: write the mock test `TestGCPCloudBuildGeneration`, verifying the absence of *project-wide* permissions on the generated Service Account.
+- [ ] Create `internal/provider/gcp/pipeline_test.go`: write mock test `TestGCPCloudBuildGeneration` verifying the absence of *project-wide* permissions on the generated Service Account.
 - [ ] Create `internal/provider/gcp/pipeline.go`: implement Cloud Build and Artifact Registry. Apply the Cleanup Policy for retention.
-- [ ] Update `internal/provider/gcp/container_test.go`: add the tests for wiring the Artifact Registry digest into Cloud Run.
-- [ ] Update `internal/provider/gcp/container.go`: implement reading the post-build digest in order to instantiate the image in Google Cloud Run.
+- [ ] Update `internal/provider/gcp/container.go` and its test: assemble the Artifact Registry reference from the resolved commit.
 
 ## Azure Provider
 - [ ] Create `internal/provider/azure/pipeline_test.go`: write `TestAzureACRTasks`, verifying that the SKU in ARM switches to `Premium` when `retain` > 0.
 - [ ] Create `internal/provider/azure/pipeline.go`: implement Azure Container Registry and ACR Tasks. Dynamically enable the Premium SKU when a retention spec is present.
-- [ ] Update `internal/provider/azure/container_test.go`: add a mock test for ACR tag resolution.
-- [ ] Update `internal/provider/azure/container.go`: handle reading the digest from the Container Registry to feed the Azure Container App.
+- [ ] Update `internal/provider/azure/container.go` and its test: assemble the ACR reference from the resolved commit.
 
 ## Network File Sharing (Volumes)
 - [ ] Update `internal/spec/spec.go`: add the `Volumes` array to the resource declaration for `container_service` and `build_pipeline`.
@@ -78,3 +62,8 @@ sign-off before the three providers are written against it.
 - [ ] Create `internal/provider/gcp/filesystem.go`: implement the logical provisioning of GCP Filestore NFS.
 - [ ] Create `internal/provider/azure/filesystem_test.go`: test the Azure Files mount setup.
 - [ ] Create `internal/provider/azure/filesystem.go`: implement the logical provisioning of Azure Files, attaching it to Azure Container Apps.
+
+## Documentation (RFC 018 §6 step 7)
+- [ ] Update `docs/architecture.md`: the new resource type, the dependency graph, and the fact that cross-resource references now exist.
+- [ ] Update `docs/cli.md`: what a build_pipeline looks like in a Specification and what the plan shows.
+- [ ] Update the translator system prompt: the type, the runtime enum, and the rule that a repository URL is carried through and never invented.
