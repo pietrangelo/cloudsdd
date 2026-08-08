@@ -100,6 +100,16 @@ func (p *GCPProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 		if len(r.Scope.Zones) > 0 {
 			return fmt.Errorf("gcp: resource %q: %w", r.ID, ErrZonesNotSupported)
 		}
+	case spec.ResourceTypeBuildPipeline:
+		if _, err := decodeBuildPipelineProperties(r.Properties); err != nil {
+			return fmt.Errorf("gcp: resource %q: %w", r.ID, err)
+		}
+		// Cloud Build places the build container itself and Artifact
+		// Registry is regional. A pinned zone is a placement the user asked
+		// for and will not get.
+		if len(r.Scope.Zones) > 0 {
+			return fmt.Errorf("gcp: resource %q: %w", r.ID, ErrZonesNotSupported)
+		}
 	default:
 		return fmt.Errorf("gcp: resource %q: unsupported resource type: %q", r.ID, r.Type)
 	}
@@ -208,6 +218,21 @@ func (p *GCPProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		netName := scopeNetworkName(resourceScope(r))
 		return func(ctx *pulumi.Context) error {
 			_, err := declareContainerService(ctx, r.ID, region, netName, *props)
+			return err
+		}, region, nil
+
+	case spec.ResourceTypeBuildPipeline:
+		props, err := decodeBuildPipelineProperties(r.Properties)
+		if err != nil {
+			return nil, "", fmt.Errorf("gcp: resource %q: %w", r.ID, err)
+		}
+		// The build runs in Cloud Build's own managed pool, not in the
+		// scope's network: it needs the internet to clone a public
+		// repository and to reach the registry, and putting it behind the
+		// scope's egress would mean routing both through Cloud NAT for no
+		// gain. Nothing it produces is reachable from it.
+		return func(ctx *pulumi.Context) error {
+			_, err := declareBuildPipeline(ctx, r.ID, region, *props, r.Resolved)
 			return err
 		}, region, nil
 

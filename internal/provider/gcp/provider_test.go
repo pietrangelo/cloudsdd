@@ -46,6 +46,20 @@ func dbResource(mutate func(*spec.Resource)) spec.Resource {
 	return r
 }
 
+func pipelineResource(mutate func(*spec.Resource)) spec.Resource {
+	r := spec.Resource{
+		ID:         "api-build",
+		Type:       spec.ResourceTypeBuildPipeline,
+		Provider:   spec.ProviderGCP,
+		Scope:      spec.Scope{Region: "europe-west1"},
+		Properties: pipelineProperties(),
+	}
+	if mutate != nil {
+		mutate(&r)
+	}
+	return r
+}
+
 func TestValidate(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -111,6 +125,39 @@ func TestValidate(t *testing.T) {
 			name:     "unsupported database engine rejected",
 			resource: dbResource(func(r *spec.Resource) { r.Properties["engine"] = "oracle" }),
 			wantErr:  "property validation failed",
+		},
+		{
+			// RFC 018 §2.8: without the dispatch case the type decodes and
+			// declares but is unreachable, and Validate refuses it as
+			// unsupported.
+			name:     "valid build pipeline",
+			resource: pipelineResource(nil),
+		},
+		{
+			name:     "build pipeline missing region",
+			resource: pipelineResource(func(r *spec.Resource) { r.Scope.Region = "" }),
+			wantErr:  "region required",
+		},
+		{
+			// Cloud Build places the build container itself and Artifact
+			// Registry is regional, so a pinned zone is a placement the user
+			// asked for and will not get.
+			name:     "build pipeline with zones",
+			resource: pipelineResource(func(r *spec.Resource) { r.Scope.Zones = []string{"europe-west1-b"} }),
+			wantErr:  "does not support scope.zones",
+		},
+		{
+			name: "build pipeline with an unsupported runtime version",
+			resource: pipelineResource(func(r *spec.Resource) {
+				r.Properties["stack"] = map[string]any{"runtime": "go", "version": "0.1"}
+			}),
+			wantErr: "unsupported runtime version",
+		},
+		{
+			name:     "build pipeline outside allowed_regions",
+			resource: pipelineResource(nil),
+			policies: spec.Policies{AllowedRegions: []string{"us-east1"}},
+			wantErr:  "not in allowed_regions",
 		},
 		{
 			// cross_account_role stands in here now. compute_instance held
@@ -306,6 +353,34 @@ func TestResourceProgramPropagatesDecodeErrors(t *testing.T) {
 	if program != nil {
 		t.Error("resourceProgram() returned a non-nil program alongside an error")
 	}
+}
+
+// TestResourceProgramDispatchesBuildPipeline is the other half of the
+// wiring: Validate accepting the type is not enough, because Plan, Apply
+// and Destroy all reach infrastructure through resourceProgram. Without
+// the dispatch case the type validates and then fails as unsupported the
+// moment anything is done with it.
+func TestResourceProgramDispatchesBuildPipeline(t *testing.T) {
+	p := &GCPProvider{stateDir: t.TempDir(), passphrase: "test"}
+
+	r := pipelineResource(func(r *spec.Resource) { r.Resolved = testResolved })
+
+	program, region, err := p.resourceProgram(r, spec.Policies{})
+	if err != nil {
+		t.Fatalf("resourceProgram() error: %v", err)
+	}
+	if program == nil {
+		t.Fatal("resourceProgram() returned a nil program for build_pipeline")
+	}
+	if region != r.Scope.Region {
+		t.Errorf("resourceProgram() region = %q, want the resource's scope region %q", region, r.Scope.Region)
+	}
+
+	// The program is the thing Pulumi runs, so running it is the only way
+	// to know the dispatch reaches declareBuildPipeline rather than a stub.
+	recorded := runProgram(t, program)
+	findResource(t, recorded, cloudBuildTriggerToken)
+	findResource(t, recorded, artifactRepositoryToken)
 }
 
 func TestStackNameFor(t *testing.T) {
