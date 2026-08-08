@@ -60,6 +60,16 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 		outputs["identifier"] = resource.NewStringProperty(args.Name)
 	case iamRoleToken:
 		outputs["arn"] = resource.NewStringProperty("arn:aws:iam::" + testAccountID + ":role/" + args.Name)
+	case ecrRepositoryToken:
+		// The build role's policy is built from the ARN and the buildspec
+		// from the URL, so both have to be knowable here or the
+		// assertions in pipeline_test.go would run against unknowns
+		// (RFC 018 §2.8).
+		name := args.Inputs["name"].StringValue()
+		outputs["arn"] = resource.NewStringProperty(
+			"arn:aws:ecr:eu-central-1:" + testAccountID + ":repository/" + name)
+		outputs["repositoryUrl"] = resource.NewStringProperty(
+			testAccountID + ".dkr.ecr.eu-central-1.amazonaws.com/" + name)
 	case ec2InstanceToken:
 		outputs["arn"] = resource.NewStringProperty(testEC2ARN)
 	case loadBalancerToken:

@@ -27,10 +27,36 @@
 - [x] Add a coverage floor for `internal/provider/pipeline` in `scripts/coverage-gate.sh`, and restore `internal/engine` above its own.
 
 ## AWS Provider
-- [ ] Create `internal/provider/aws/pipeline_test.go`: write the mock test `TestAWSCodeBuildGeneration`, validating the correct structure of the IAM Role and policy (scoped only to the ARN of the ECR repository that was created).
-- [ ] Create `internal/provider/aws/pipeline.go`: implement the creation of the ECR Repository and the CodeBuild Project. Wire the lifecycle to the `retain` property.
-- [ ] Update `internal/provider/aws/container_test.go`: mock test validating the CodeBuild build-id query or the ECR tag resolution downstream of the run.
-- [ ] Update `internal/provider/aws/container.go`: if `Pipeline` is referenced, dynamically retrieve the digest from ECR (via the AWS SDK) to feed the ECS container definition.
+- [x] Create `internal/provider/aws/pipeline_test.go`: write the mock test `TestAWSCodeBuildGeneration`, validating the correct structure of the IAM Role and policy (scoped only to the ARN of the ECR repository that was created).
+- [x] Create `internal/provider/aws/pipeline.go`: implement the creation of the ECR Repository and the CodeBuild Project. Wire the lifecycle to the `retain` property.
+- [x] Wire `build_pipeline` into the AWS provider's `Validate` and `resourceProgram` dispatch.
+- [ ] **Blocked on a design decision — see "Open: the digest hand-off" below.** Update `internal/provider/aws/container_test.go`: mock test validating the ECR tag resolution downstream of the run.
+- [ ] **Blocked on the same decision.** Update `internal/provider/aws/container.go`: if `Pipeline` is referenced, resolve the digest to feed the ECS container definition.
+
+### Open: the digest hand-off
+RFC 018 §2.4 says a `container_service` consuming a pipeline "receives the
+digest the build produced", without saying by what mechanism. It cannot
+read it directly today: CloudSDD runs one Pulumi stack per `Resource.ID`,
+so the service's program cannot see the pipeline's outputs, and the
+service knows only the pipeline's *id* — not the registry, the repository
+or the commit.
+
+Two ways to close it, and they differ in which component learns about
+references:
+
+1. **The Engine substitutes.** `Apply` on a pipeline returns the digest in
+   `provider.Result.Details`; the Engine rewrites the dependent service's
+   `pipeline` property into a pinned `image` before applying it. The
+   ordering that makes this possible already exists. Providers stay
+   unaware that references exist, and the substituted Specification is
+   showable in the plan. Costs a new contract on `Result`.
+2. **The provider resolves.** The AWS provider reads the pipeline's stack
+   outputs through a Pulumi `StackReference`, or queries ECR for the tag.
+   No Engine change, but every provider reimplements reference resolution,
+   and RFC 011 §1.1H is the record of what happens next.
+
+Option 1 is the recommendation. It is an RFC-level decision, so it wants
+sign-off before the three providers are written against it.
 
 ## GCP Provider
 - [ ] Create `internal/provider/gcp/pipeline_test.go`: write the mock test `TestGCPCloudBuildGeneration`, verifying the absence of *project-wide* permissions on the generated Service Account.

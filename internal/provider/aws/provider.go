@@ -143,6 +143,24 @@ func (p *AWSProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 		}
 		return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
 
+	case spec.ResourceTypeBuildPipeline:
+		if _, err := decodeBuildPipelineProperties(r.Properties); err != nil {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
+		}
+		// CodeBuild places the build container itself, and the registry is
+		// regional. A pinned zone is a placement the user asked for and
+		// will not get.
+		if len(r.Scope.Zones) > 0 {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrZonesNotSupported)
+		}
+		if r.Scope.Region == "" {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrRegionRequired)
+		}
+		if err := validateAWSRegionFormat(r.Scope.Region); err != nil {
+			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
+		}
+		return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
+
 	case spec.ResourceTypeObjectStorage:
 		if _, err := decodeS3Properties(r.Properties); err != nil {
 			return err
@@ -373,6 +391,27 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 				return err
 			}
 			return declareS3Bucket(ctx, r.ID, *s3p, opts...)
+		}
+		return program, region, nil
+
+	case spec.ResourceTypeBuildPipeline:
+		bpp, err := decodeBuildPipelineProperties(r.Properties)
+		if err != nil {
+			return nil, "", err
+		}
+		region := r.Scope.Region
+		program := func(ctx *pulumi.Context) error {
+			opts, _, err := p.providerOpts(ctx, region)
+			if err != nil {
+				return err
+			}
+			// The build runs in CodeBuild's own managed network, not in
+			// the scope's: it needs the internet to clone a public
+			// repository and to reach the registry, and putting it in a
+			// private subnet would mean routing both through the scope's
+			// NAT for no gain. Nothing it produces is reachable from it.
+			_, err = declareBuildPipeline(ctx, r.ID, *bpp, opts...)
+			return err
 		}
 		return program, region, nil
 
