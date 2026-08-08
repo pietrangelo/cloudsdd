@@ -413,3 +413,154 @@ func TestValidateIngress(t *testing.T) {
 		})
 	}
 }
+
+// TestContainerServiceValidation covers RFC 018 §3's exactly-one-of rule
+// between `image` and `pipeline`.
+//
+// The case worth being deliberate about is "both set". A precedence rule
+// would let the Specification deploy something no reader could predict from
+// the document, so it is an error instead.
+func TestContainerServiceValidation(t *testing.T) {
+	ref := func(s string) *string { return &s }
+
+	tests := []struct {
+		name     string
+		image    string
+		pipeline *string
+		wantErr  error
+	}{
+		{name: "image only", image: "nginx@sha256:" + strings.Repeat("a", 64)},
+		{name: "pipeline only", pipeline: ref("api-build")},
+		{
+			name:     "both set",
+			image:    "nginx:1.27",
+			pipeline: ref("api-build"),
+			wantErr:  ErrAmbiguousImageSource,
+		},
+		{
+			name:    "neither set",
+			wantErr: ErrNoImageSource,
+		},
+		{
+			// A reference the user wrote and left blank is a different
+			// mistake from omitting it, and gets a different error.
+			name:     "pipeline present but empty",
+			pipeline: ref(""),
+			wantErr:  ErrEmptyPipelineReference,
+		},
+		{
+			// An empty image is not a source either: absent and blank mean
+			// the same thing for a value with no tri-state.
+			name:     "empty image and no pipeline",
+			image:    "",
+			pipeline: nil,
+			wantErr:  ErrNoImageSource,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Properties{Image: tt.image, Pipeline: tt.pipeline}.ValidateSource()
+
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("ValidateSource() = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ValidateSource() = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestValidateImageSource covers what a pipeline-sourced service is exempt
+// from, which is the part of RFC 018 §2.4 most at risk of being read as a
+// weakening of RFC 017 §2.4.
+//
+// It is not one. The digest of a built image does not exist until the build
+// runs, so the pinning guarantee moves to the commit rather than being
+// dropped; and the registry is one CloudSDD created in the user's own
+// account, so an allowlist has nothing to say about it.
+func TestValidateImageSource(t *testing.T) {
+	ref := func(s string) *string { return &s }
+	digest := "registry.example.com/api@sha256:" + strings.Repeat("b", 64)
+
+	tests := []struct {
+		name     string
+		image    string
+		pipeline *string
+		allowed  []string
+		wantErr  error
+	}{
+		{name: "a pinned image with no allowlist", image: digest},
+		{
+			name:    "a tagged image from an unlisted registry",
+			image:   "registry.example.com/api:1.4",
+			wantErr: ErrImageMutable,
+		},
+		{
+			// The exemption: no image to pin, and no registry to allow-list
+			// that is not already the user's own.
+			name:     "a pipeline, with an allowlist that excludes everything",
+			pipeline: ref("api-build"),
+			allowed:  []string{"ghcr.io"},
+		},
+		{
+			// The exemption covers the image rules, not the source rules.
+			name:     "a pipeline and an image",
+			image:    digest,
+			pipeline: ref("api-build"),
+			wantErr:  ErrAmbiguousImageSource,
+		},
+		{
+			name:    "a pinned image from an unlisted registry",
+			image:   digest,
+			allowed: []string{"ghcr.io"},
+			wantErr: ErrRegistryNotAllowed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Properties{Image: tt.image, Pipeline: tt.pipeline}.ValidateImageSource(tt.allowed)
+
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("ValidateImageSource() = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ValidateImageSource() = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestPipelineRef covers the tri-state the pointer exists for.
+func TestPipelineRef(t *testing.T) {
+	ref := func(s string) *string { return &s }
+
+	tests := []struct {
+		name      string
+		pipeline  *string
+		wantRef   string
+		wantNamed bool
+	}{
+		{name: "absent", pipeline: nil},
+		{name: "named", pipeline: ref("api-build"), wantRef: "api-build", wantNamed: true},
+		{name: "present but empty", pipeline: ref(""), wantNamed: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotRef, gotNamed := Properties{Pipeline: tt.pipeline}.PipelineRef()
+			if gotRef != tt.wantRef || gotNamed != tt.wantNamed {
+				t.Errorf("PipelineRef() = (%q, %v), want (%q, %v)",
+					gotRef, gotNamed, tt.wantRef, tt.wantNamed)
+			}
+		})
+	}
+}

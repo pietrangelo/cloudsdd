@@ -23,6 +23,12 @@ type mockProvider struct {
 
 	validateCalls int
 
+	// applied and destroyed record the order resources reached the
+	// provider, so a test can assert that a pipeline is built before the
+	// service that consumes it and torn down after it (RFC 018 §2.9).
+	applied   []string
+	destroyed []string
+
 	// networkScopes records every EnsureNetwork call, so a test can
 	// assert that a scope's network is provisioned once and before
 	// anything in it is applied (RFC 016 §2.2).
@@ -48,6 +54,7 @@ func (m *mockProvider) Plan(ctx context.Context, r spec.Resource, p spec.Policie
 }
 
 func (m *mockProvider) Apply(ctx context.Context, r spec.Resource, p spec.Policies) (provider.Result, error) {
+	m.applied = append(m.applied, r.ID)
 	return m.apply, m.applyErr
 }
 
@@ -62,6 +69,7 @@ func (m *mockProvider) DestroyNetwork(ctx context.Context, s provider.NetworkSco
 }
 
 func (m *mockProvider) Destroy(ctx context.Context, r spec.Resource, p spec.Policies) error {
+	m.destroyed = append(m.destroyed, r.ID)
 	return nil
 }
 
@@ -368,5 +376,125 @@ func TestNew_RegistryIsolation(t *testing.T) {
 	err := e.Validate(context.Background(), specWithProvider(spec.ProviderGCP))
 	if !errors.Is(err, ErrProviderNotFound) {
 		t.Fatalf("expected engine registry to be isolated from caller map mutation, got err = %v", err)
+	}
+}
+
+// TestApplyAndDestroyFollowTheDependencyGraph asserts what RFC 018 §2.9
+// promises about ordering, at the level that actually matters: the order
+// resources reach a CloudProvider.
+//
+// The Specification declares the service first and the pipeline second, so
+// a run that ignored the graph would still pass a test that only checked
+// the happy declaration order.
+func TestApplyAndDestroyFollowTheDependencyGraph(t *testing.T) {
+	resources := []spec.Resource{
+		serviceResource("api", spec.ProviderAWS, 8080, "api-build"),
+		databaseResource("app-db", spec.ProviderAWS),
+		pipelineResource("api-build", spec.ProviderAWS, 8080),
+	}
+
+	tests := []struct {
+		name   string
+		intent spec.Intent
+		run    func(*DefaultEngine, spec.Specification) error
+		got    func(*mockProvider) []string
+		want   []string
+	}{
+		{
+			name:   "apply builds the pipeline first",
+			intent: spec.IntentDeploy,
+			run: func(e *DefaultEngine, s spec.Specification) error {
+				_, err := e.Apply(context.Background(), s)
+				return err
+			},
+			got:  func(m *mockProvider) []string { return m.applied },
+			want: []string{"app-db", "api-build", "api"},
+		},
+		{
+			name:   "destroy removes the service first",
+			intent: spec.IntentDestroy,
+			run: func(e *DefaultEngine, s spec.Specification) error {
+				_, err := e.Destroy(context.Background(), s)
+				return err
+			},
+			got:  func(m *mockProvider) []string { return m.destroyed },
+			want: []string{"api", "api-build", "app-db"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockProvider{name: "aws"}
+			e := New(map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mock})
+			s := spec.Specification{SDDVersion: "1.0", Intent: tt.intent, Resources: resources}
+
+			if err := tt.run(e, s); err != nil {
+				t.Fatalf("%s = %v, want nil", tt.name, err)
+			}
+
+			got := tt.got(mock)
+			if len(got) != len(tt.want) {
+				t.Fatalf("provider saw %v, want %v", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("provider saw %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateRejectsABrokenReference: the graph runs inside the Engine's
+// own Validate, so a reference that does not resolve stops a Specification
+// before any provider is asked about it.
+func TestValidateRejectsABrokenReference(t *testing.T) {
+	tests := []struct {
+		name      string
+		resources []spec.Resource
+		wantErr   error
+	}{
+		{
+			name:      "a pipeline that is not there",
+			resources: []spec.Resource{serviceResource("api", spec.ProviderAWS, 8080, "missing")},
+			wantErr:   ErrReferenceNotFound,
+		},
+		{
+			name: "a port the pipeline does not declare",
+			resources: []spec.Resource{
+				serviceResource("api", spec.ProviderAWS, 3000, "api-build"),
+				pipelineResource("api-build", spec.ProviderAWS, 8080),
+			},
+			wantErr: ErrPortNotDeclared,
+		},
+		{
+			name: "a pipeline on another cloud",
+			resources: []spec.Resource{
+				serviceResource("api", spec.ProviderAWS, 8080, "api-build"),
+				pipelineResource("api-build", spec.ProviderGCP, 8080),
+			},
+			wantErr: ErrCrossProviderReference,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockProvider{name: "aws"}
+			e := New(map[spec.Provider]provider.CloudProvider{
+				spec.ProviderAWS: mock,
+				spec.ProviderGCP: &mockProvider{name: "gcp"},
+			})
+			s := spec.Specification{SDDVersion: "1.0", Intent: spec.IntentDeploy, Resources: tt.resources}
+
+			err := e.Validate(context.Background(), s)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Validate() = %v, want %v", err, tt.wantErr)
+			}
+			// Nothing may have been asked of a provider: a Specification
+			// that cannot be ordered is one no provider should see.
+			if len(mock.applied) != 0 {
+				t.Errorf("provider applied %v despite an invalid reference", mock.applied)
+			}
+		})
 	}
 }

@@ -84,7 +84,7 @@ func decodeContainerServiceProperties(props map[string]any, allowedRegistries []
 	if _, _, err := containerResources(p.Size); err != nil {
 		return nil, err
 	}
-	if err := container.ValidateImage(p.Image, allowedRegistries); err != nil {
+	if err := p.ValidateImageSource(allowedRegistries); err != nil {
 		return nil, fmt.Errorf("azure: %w", err)
 	}
 	if err := p.ValidateIngress(); err != nil {

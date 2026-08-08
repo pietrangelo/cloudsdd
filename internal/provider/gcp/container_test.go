@@ -322,9 +322,13 @@ func TestDecodeContainerServiceProperties(t *testing.T) {
 			wantMsg: "property validation failed",
 		},
 		{
-			name:    "a missing image",
+			// Since RFC 018 §3 `image` is optional in the schema and
+			// required by ValidateSource, because `pipeline` is the other
+			// way to name one. A service that names neither is still
+			// refused, just by a rule rather than by a tag.
+			name:    "neither an image nor a pipeline",
 			props:   map[string]any{"port": 8080, "size": "small"},
-			wantMsg: "property validation failed",
+			wantErr: container.ErrNoImageSource,
 		},
 		{
 			name:    "a missing port",

@@ -61,7 +61,24 @@ type Properties struct {
 	// Image is the container image reference. Constrained by ValidateImage
 	// rather than by a validator tag: the rule depends on
 	// Policies.AllowedRegistries, which a struct tag cannot see.
-	Image string `json:"image" validate:"required,max=512"`
+	//
+	// Optional since RFC 018 §3, because Pipeline is the other way to say
+	// where the image comes from. Exactly one of the two is required;
+	// ValidateSource is what enforces that, since no struct tag can.
+	Image string `json:"image,omitempty" validate:"omitempty,max=512"`
+
+	// Pipeline names a build_pipeline in the same Specification whose
+	// output this service runs (RFC 018 §2.9). It is the schema's first
+	// cross-resource reference, and it is resolved at the Engine — the
+	// provider receives the digest the build produced, never the name.
+	//
+	// A pointer rather than a plain string so that an explicitly empty
+	// `"pipeline": ""` is distinguishable from an absent one: the first is
+	// a reference the user meant to write and got wrong, and it deserves a
+	// better error than "name an image or a pipeline".
+	// Bounded to a resource ID's length; that the name resolves to a
+	// build_pipeline that exists is the Engine's business, not a tag's.
+	Pipeline *string `json:"pipeline,omitempty" validate:"omitempty,max=63"`
 
 	// Port is the port the container listens on. It is never opened to the
 	// internet directly — ingress reaches it through the platform's load
@@ -132,6 +149,77 @@ func (p Properties) ValidateIngress() error {
 		return fmt.Errorf("%w: %q", ErrDomainWithoutPublic, p.Domain)
 	}
 	return nil
+}
+
+// Image source errors (RFC 018 §3).
+var (
+	// ErrNoImageSource indicates a service that names neither an image nor
+	// a pipeline, and so describes no code to run.
+	ErrNoImageSource = errors.New("container_service: exactly one of `image` or `pipeline` is required, and neither is set")
+
+	// ErrAmbiguousImageSource indicates both are set. Refused rather than
+	// resolved by precedence: a rule saying which wins is a rule every
+	// reader has to know before they can tell what a Specification deploys
+	// (RFC 018 §3).
+	ErrAmbiguousImageSource = errors.New("container_service: `image` and `pipeline` are mutually exclusive")
+
+	// ErrEmptyPipelineReference indicates `"pipeline": ""` — a reference
+	// the user wrote and left blank, which is a different mistake from
+	// omitting it.
+	ErrEmptyPipelineReference = errors.New("container_service: `pipeline` is present but empty")
+)
+
+// PipelineRef returns the build_pipeline this service consumes, and
+// whether it names one at all.
+func (p Properties) PipelineRef() (string, bool) {
+	if p.Pipeline == nil {
+		return "", false
+	}
+	return *p.Pipeline, true
+}
+
+// ValidateSource enforces RFC 018 §3's exactly-one-of rule between `image`
+// and `pipeline`.
+//
+// It lives beside ValidateIngress rather than in a struct tag for the same
+// reason: `excluded_with` could express the exclusion but not the
+// requirement that one of them be present, and splitting one rule across
+// two mechanisms is how half of it gets forgotten.
+func (p Properties) ValidateSource() error {
+	ref, named := p.PipelineRef()
+	switch {
+	case named && ref == "":
+		return ErrEmptyPipelineReference
+	case p.Image != "" && named:
+		return fmt.Errorf("%w: image %q and pipeline %q", ErrAmbiguousImageSource, p.Image, ref)
+	case p.Image == "" && !named:
+		return ErrNoImageSource
+	}
+	return nil
+}
+
+// ValidateImageSource is the single check every provider runs over where a
+// service's code comes from: exactly one source is named, and a named
+// *image* satisfies RFC 017 §2.4's pinning and allowlist rules.
+//
+// An image produced by a pipeline is exempt from both, and deliberately so
+// (RFC 018 §2.4). Its digest does not exist until the build runs, so no
+// Specification could pin it; the provenance guarantee is moved rather than
+// dropped — the revision is resolved to a commit at plan time and it is a
+// commit the user approves. The allowlist is likewise satisfied implicitly:
+// the image comes from the registry CloudSDD created in the user's own
+// account.
+//
+// It exists so the three providers call one function rather than three
+// copies of the same conditional (RFC 011 §1.1H).
+func (p Properties) ValidateImageSource(allowedRegistries []string) error {
+	if err := p.ValidateSource(); err != nil {
+		return err
+	}
+	if _, viaPipeline := p.PipelineRef(); viaPipeline {
+		return nil
+	}
+	return ValidateImage(p.Image, allowedRegistries)
 }
 
 // Image reference errors (RFC 017 §2.4).

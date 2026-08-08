@@ -25,6 +25,14 @@ const (
 	ResourceTypeObjectStorage      ResourceType = "object_storage"
 	ResourceTypeComputeInstance    ResourceType = "compute_instance"
 	ResourceTypeContainerService   ResourceType = "container_service"
+	// ResourceTypeBuildPipeline builds a container image from source and
+	// publishes it to a registry CloudSDD owns (RFC 018 §2.1).
+	//
+	// It is a ResourceType rather than a property of container_service
+	// because it has its own lifecycle: it is created, it runs, it is
+	// destroyed. Two services can be fed by one pipeline, and a pipeline can
+	// exist before anything consumes it.
+	ResourceTypeBuildPipeline ResourceType = "build_pipeline"
 	// ResourceTypeCrossAccountRole represents a cross-account IAM role
 	// (RFC 003): grants an external AWS account the ability to assume a
 	// role with restricted permissions toward specific resources.
@@ -101,7 +109,7 @@ type Specification struct {
 // "Security Considerations").
 type Resource struct {
 	ID       string       `json:"id" validate:"required,resourceid"`
-	Type     ResourceType `json:"type" validate:"required,oneof=relational_database object_storage compute_instance container_service cross_account_role"`
+	Type     ResourceType `json:"type" validate:"required,oneof=relational_database object_storage compute_instance container_service build_pipeline cross_account_role"`
 	Provider Provider     `json:"provider" validate:"required,oneof=agnostic aws gcp azure"`
 	// Account references, by name, a DeploymentTarget configured at the
 	// engine level (RFC 004 §2.2), used to apply the resource with

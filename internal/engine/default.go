@@ -30,6 +30,12 @@ type DefaultEngine struct {
 	// shared network is torn down (RFC 016 §2.6). Nil means never reap.
 	occupancy ScopeOccupancy
 
+	// graph validates cross-resource references and decides the order
+	// resources are applied and destroyed in (RFC 018 §2.9). It is a field
+	// rather than a package function so a test can substitute one; it is
+	// never nil, because New installs the default.
+	graph DependencyGraph
+
 	targetCacheMu sync.Mutex
 	targetCache   map[string]provider.CloudProvider
 }
@@ -82,6 +88,7 @@ func New(providers map[spec.Provider]provider.CloudProvider, opts ...Option) *De
 		targets:         map[string]DeploymentTarget{},
 		targetFactories: map[spec.Provider]TargetProviderFactory{},
 		targetCache:     map[string]provider.CloudProvider{},
+		graph:           NewDependencyGraph(),
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -167,6 +174,16 @@ func (e *DefaultEngine) validated(ctx context.Context, s spec.Specification) (sp
 	if err != nil {
 		return spec.Specification{}, err
 	}
+
+	// Cross-resource references are checked after resolution and before
+	// anything else looks at a resource (RFC 018 §2.9). After, because the
+	// rule that a service and its pipeline share a provider can only be
+	// judged once both have one; before, because a reference that does not
+	// resolve makes every later check an answer about the wrong thing.
+	if err := e.graph.Validate(ctx, s); err != nil {
+		return spec.Specification{}, err
+	}
+
 	for _, r := range s.Resources {
 		p, err := e.resolveProvider(ctx, r)
 		if err != nil {
@@ -262,8 +279,17 @@ func (e *DefaultEngine) Apply(ctx context.Context, s spec.Specification) ([]prov
 		return nil, err
 	}
 
-	results := make([]provider.Result, 0, len(s.Resources))
-	for _, r := range s.Resources {
+	// A pipeline is applied, and its build completed, before any service
+	// that consumes it (RFC 018 §2.9). With no references the order is the
+	// declaration order, so this is a no-op for every Specification written
+	// before references existed.
+	ordered, err := e.graph.Ordered(s)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]provider.Result, 0, len(ordered))
+	for _, r := range ordered {
 		p, err := e.resolveProvider(ctx, r)
 		if err != nil {
 			return results, err
@@ -292,10 +318,17 @@ func (e *DefaultEngine) Destroy(ctx context.Context, s spec.Specification) ([]pr
 		return nil, err
 	}
 
-	results := make([]provider.Result, 0, len(s.Resources))
-	// Typically destruction should be in reverse order, but dependencies are not yet implemented (RFC 001).
-	for i := len(s.Resources) - 1; i >= 0; i-- {
-		r := s.Resources[i]
+	// Destruction walks the dependency order backwards: a service is
+	// removed before the pipeline whose image it runs (RFC 018 §2.9). With
+	// no references this is the reverse declaration order, which is what
+	// Destroy did before a graph existed.
+	ordered, err := e.graph.ReverseOrdered(s)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]provider.Result, 0, len(ordered))
+	for _, r := range ordered {
 		p, err := e.resolveProvider(ctx, r)
 		if err != nil {
 			return results, err

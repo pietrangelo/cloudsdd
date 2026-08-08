@@ -11,15 +11,15 @@ import (
 	"cloudsdd/internal/spec"
 )
 
-// ErrImagePropertyMissing indicates a container_service whose `image`
-// property is absent or is not a string.
+// ErrImagePropertyMissing indicates a container_service that names neither
+// an `image` nor a `pipeline`, or whose `image` is not a string.
 //
 // It is an error rather than a skip. The provider's own decoder would
 // reject the same Specification a moment later, but this check is the one
 // that runs for every provider (RFC 011 §2.3), and a check that returns nil
 // when it cannot read its input is a check that passes hardest exactly when
 // something is wrong.
-var ErrImagePropertyMissing = errors.New("container_service declares no `image` property")
+var ErrImagePropertyMissing = errors.New("container_service declares neither an `image` nor a `pipeline` property")
 
 // validateImagePolicy enforces Policies.AllowedRegistries and the image
 // pinning rules for a container_service (RFC 017 §2.4).
@@ -36,6 +36,14 @@ var ErrImagePropertyMissing = errors.New("container_service declares no `image` 
 // rather than on shape.
 func validateImagePolicy(r spec.Resource, policies spec.Policies) error {
 	if r.Type != spec.ResourceTypeContainerService {
+		return nil
+	}
+
+	// A service fed by a pipeline names no image, and the one it will run
+	// does not exist yet (RFC 018 §2.4). The rules that replace these —
+	// exactly one source, and a reference that resolves to a build_pipeline
+	// — are the dependency graph's, which runs beside this check.
+	if _, viaPipeline := r.Properties["pipeline"]; viaPipeline {
 		return nil
 	}
 

@@ -113,3 +113,17 @@ func TestSupportsScheduleOn(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildPipelineNotSchedulable: a pipeline has no power state to switch
+// off. It runs when a deployment runs it and costs nothing in between, so
+// there is no saving a schedule could deliver (RFC 012 §3, RFC 018 §2.1).
+func TestBuildPipelineNotSchedulable(t *testing.T) {
+	if ResourceTypeBuildPipeline.SupportsSchedule() {
+		t.Error("build_pipeline reports a power state it does not have")
+	}
+	for _, p := range []Provider{ProviderAWS, ProviderGCP, ProviderAzure, ProviderAgnostic} {
+		if ResourceTypeBuildPipeline.SupportsScheduleOn(p) {
+			t.Errorf("build_pipeline reports as schedulable on %s", p)
+		}
+	}
+}

@@ -41,7 +41,7 @@ components:
           pattern: "^[a-zA-Z0-9_-]{1,63}$"
         type:
           type: string
-          enum: [relational_database, object_storage, compute_instance, container_service, cross_account_role]
+          enum: [relational_database, object_storage, compute_instance, container_service, build_pipeline, cross_account_role]
         provider:
           type: string
           enum: [agnostic, aws, gcp, azure]
@@ -263,7 +263,10 @@ components:
         CPU/memory pairs.
       type: object
       additionalProperties: false
-      required: [image, port, size]
+      required: [port, size]
+      oneOf:
+        - required: [image]
+        - required: [pipeline]
       properties:
         image:
           type: string
@@ -273,7 +276,21 @@ components:
             (`repo@sha256:...`) unless its registry appears in
             `policies.allowed_registries`; `:latest`, explicit or implied
             by an absent tag, is refused in every combination (RFC 017
-            §2.4).
+            §2.4). Exactly one of `image` or `pipeline` is required, and
+            declaring both is an error rather than a precedence rule (RFC
+            018 §3).
+        pipeline:
+          type: string
+          maxLength: 63
+          description: >
+            The `id` of a build_pipeline in the same Specification whose
+            output this service runs (RFC 018 §2.9). The pipeline is
+            applied, and its build completed, before the service; the
+            service receives the digest the build produced. Neither the
+            pinning rule nor `policies.allowed_registries` applies to it:
+            the digest does not exist until the build runs, and the
+            registry is the one CloudSDD created in the user's own account
+            (RFC 018 §2.4).
         port:
           type: integer
           minimum: 1
@@ -311,6 +328,97 @@ components:
             when `public` is false. On AWS the domain must be served from
             a Route 53 hosted zone in the target account, since the
             certificate is validated through DNS.
+    BuildPipelineProperties:
+      description: >
+        Properties of a resource with type "build_pipeline" (RFC 018 §2.1).
+        Shared by every provider: CodeBuild + ECR on AWS, Cloud Build +
+        Artifact Registry on GCP, ACR Tasks + ACR on Azure.
+
+        There is deliberately no Dockerfile, no build argument and no
+        environment: CloudSDD generates the Dockerfile from `stack` so that
+        a non-root user, a multi-stage build and a digest-pinned base image
+        are properties of every image rather than of the careful ones (RFC
+        018 §2.2). A build argument is where a secret gets baked into a
+        layer, so there is no property to put one in.
+      type: object
+      additionalProperties: false
+      required: [source, stack, image_name]
+      properties:
+        source:
+          type: object
+          additionalProperties: false
+          required: [repository, revision]
+          properties:
+            repository:
+              type: string
+              maxLength: 512
+              pattern: "^https://"
+              description: >
+                HTTPS URL of a public Git repository. Private sources need
+                a long-lived credential and are deferred to the RFC that
+                can pair them with a secrets story (RFC 018 §2.6). A URL
+                carrying userinfo (`https://user:token@host/...`) is
+                refused: it is the one string in the schema that would
+                accept a credential.
+            revision:
+              type: string
+              maxLength: 255
+              description: >
+                A branch, a tag or a commit SHA. Resolved to a commit SHA
+                at plan time and shown, so what is approved is a commit
+                rather than "whatever is newest"; every build is tagged
+                with that SHA and never `latest` (RFC 018 §2.4).
+        stack:
+          type: object
+          additionalProperties: false
+          required: [runtime, version]
+          properties:
+            runtime:
+              type: string
+              enum: [go, node, python, java]
+              description: >
+                Deliberately small, and holding only what all three build
+                services can produce. A runtime supported on one cloud
+                would make `provider: agnostic` silently provider-specific
+                (RFC 018 §2.2).
+            version:
+              type: string
+              maxLength: 32
+        image_name:
+          type: string
+          maxLength: 200
+          pattern: "^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$"
+          description: >
+            Repository name *within* the registry CloudSDD creates, not a
+            full image reference. A leading component that looks like a
+            registry host is refused.
+        ports:
+          type: array
+          maxItems: 10
+          uniqueItems: true
+          items:
+            type: integer
+            minimum: 1
+            maximum: 65535
+          description: >
+            The ports the image declares (`EXPOSE`), and the set a
+            container_service may choose its single ingress port from — a
+            `container_service.port` absent from this list is refused
+            before anything is built. Only that one port is routed; the
+            rest are reachable from the scope's network, which is what
+            makes a metrics or admin port expressible without publishing
+            it (RFC 018 §2.3).
+        retain:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 5
+          description: >
+            How many images the registry keeps, enforced by the registry's
+            own lifecycle mechanism. Counts images rather than tags, and
+            never reaps the digest a live service references (RFC 018
+            §2.5). On Azure a retention policy requires a Premium
+            registry, which CloudSDD selects when this is set.
     Policies:
       type: object
       additionalProperties: false

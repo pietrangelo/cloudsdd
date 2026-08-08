@@ -159,3 +159,33 @@ func TestValidate(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateBuildPipelineType covers the first addition to the
+// ResourceType enum since RFC 001 (RFC 018 §3).
+//
+// The enum lives in two places that have to agree — the constant and the
+// `oneof` tag on Resource.Type — and a new type that is declared but not
+// listed validates nowhere. That is the failure this test exists to catch.
+func TestValidateBuildPipelineType(t *testing.T) {
+	tests := []struct {
+		name    string
+		typ     ResourceType
+		wantErr bool
+	}{
+		{name: "build_pipeline", typ: ResourceTypeBuildPipeline},
+		{name: "container_service", typ: ResourceTypeContainerService},
+		{name: "a type that does not exist", typ: "build_pipelines", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := validSpec()
+			s.Resources[0].Type = tt.typ
+
+			err := Validate(&s)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
