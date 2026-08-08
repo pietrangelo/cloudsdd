@@ -30,7 +30,24 @@
   - **Keep it honest.** If an item turns out to be wrong, blocked, or unnecessary, update or remove it in `todo.md` and state why, instead of silently skipping it.
   - **Report against it.** When reporting progress, do so in terms of the `todo.md` items: what is checked, what is next, what is blocked.
   - **Language:** `todo.md` is subject to `<language_policy>` like every other file — write it in English.
+  - **Refresh the context after each item.** As soon as an item is checked off, run the `<context_freshness_policy>` cycle before touching the next one.
 </todo_policy>
+
+<context_freshness_policy>
+  MANDATORY: `repomix-output.xml` in the repository root is the packed, whole-repository snapshot used to load the codebase into context. It must be read at the start of work and regenerated whenever it is stale.
+
+  - **Read it first.** Before starting or resuming any work — right after reading `todo.md` — read `repomix-output.xml` to load the current state of the codebase. Do not reconstruct the codebase by opening files one at a time when the snapshot already answers the question.
+  - **Check whether it is stale.** The snapshot is stale if any tracked file is newer than it. Verify with:
+    ```bash
+    find . -path ./.git -prune -o -newer repomix-output.xml -type f -print -quit
+    ```
+    Any output means stale. A missing `repomix-output.xml` also counts as stale.
+  - **Regenerate when stale.** Run `repomix` from the repository root (it reads `repomix.config.json` and writes `repomix-output.xml`), then read the regenerated file. Never work from a stale snapshot.
+  - **Refresh after every completed `todo.md` item.** The snapshot must reflect the code you just wrote before the next item begins. A `Stop` hook in `.claude/settings.json` runs the staleness check and regenerates automatically at the end of every turn, so this normally needs no action — but the hook is a safety net, not an excuse: if you have reason to believe it did not run, regenerate by hand.
+  - **The security scan is off on purpose.** `repomix.config.json` sets `security.enableSecurityCheck: false`. Repomix's scanner cannot exclude a single file, and it was quarantining `internal/provider/pipeline/types_test.go` over the fake `ghp_secret` token that test deliberately feeds to the credential-rejection path. Real secrets must be kept out of the repository by the rules in `<testing_and_security>`, not by this scanner.
+  - **Do not commit the snapshot.** `repomix-output.xml` is a generated artifact; it is regenerated on demand and must stay out of commits.
+  - **Start a fresh session after every completed item.** Once the item is checked off and the snapshot is regenerated, stop and tell the user: the item is done, `repomix-output.xml` is up to date, and the next step is to run `/clear` and resume from `todo.md` in a clean session. Do not begin the next item in the same session. You cannot open a session yourself — the user runs `/clear`, so you must explicitly hand off instead of silently continuing.
+</context_freshness_policy>
 
 <language_policy>
   Everything must be written in English: code comments, commit messages, documentation, RFCs, and this file itself. No exceptions, regardless of the language the user writes in during the conversation.

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR:-.}\" && if [ ! -f repomix-output.xml ] || [ -n \"$(find . -path ./.git -prune -o -newer repomix-output.xml -type f -print -quit)\" ]; then repomix --quiet; fi 2>/dev/null || true",
+            "async": true,
+            "statusMessage": "Refreshing repomix snapshot"
+          }
+        ]
+      }
+    ]
+  }
+}

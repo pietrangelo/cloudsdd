@@ -5,3 +5,6 @@
 
 # Test artifacts
 /coverage.out
+
+# Packed repository snapshot (regenerated on demand via `repomix`)
+/repomix-output.xml
