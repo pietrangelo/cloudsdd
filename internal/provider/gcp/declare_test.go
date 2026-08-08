@@ -64,6 +64,8 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 	case serviceAccountToken:
 		outputs["email"] = resource.NewStringProperty(
 			args.Inputs["accountId"].StringValue() + "@" + testProjectID + ".iam.gserviceaccount.com")
+	case artifactRepositoryToken:
+		outputs["project"] = resource.NewStringProperty(testProjectID)
 	case customRoleToken:
 		outputs["name"] = resource.NewStringProperty(
 			"projects/" + testProjectID + "/roles/" + args.Inputs["roleId"].StringValue())
@@ -75,6 +77,16 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 }
 
 func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	// The image repository a container_service fed by a pipeline resolves
+	// its project from (RFC 018 §2.4.1).
+	if args.Token == getArtifactRepositoryToken {
+		m.rec.add(recordedResource{Type: args.Token, Name: getArtifactRepositoryToken, Inputs: args.Args})
+		return resource.PropertyMap{
+			"project":      resource.NewStringProperty(testProjectID),
+			"repositoryId": args.Args["repositoryId"],
+			"location":     args.Args["location"],
+		}, nil
+	}
 	return resource.PropertyMap{}, nil
 }
 

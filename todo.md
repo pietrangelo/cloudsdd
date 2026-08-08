@@ -49,9 +49,11 @@ a runtime provisions a registry and a build, builds the commit the plan
 showed, and runs the resulting image.
 
 ## GCP Provider
-- [ ] Create `internal/provider/gcp/pipeline_test.go`: write mock test `TestGCPCloudBuildGeneration` verifying the absence of *project-wide* permissions on the generated Service Account.
-- [ ] Create `internal/provider/gcp/pipeline.go`: implement Cloud Build and Artifact Registry. Apply the Cleanup Policy for retention.
+- [x] Create `internal/provider/gcp/pipeline_test.go`: write mock test `TestGCPCloudBuildGeneration` verifying the absence of *project-wide* permissions on the generated Service Account.
+- [x] Create `internal/provider/gcp/pipeline.go`: implement Cloud Build and Artifact Registry. Apply the Cleanup Policy for retention. *(Also required teaching `internal/provider/gcp/declare_test.go`'s mock monitor the repository's `project` output and the `getRepository` invoke — the provider computes both, and the two halves of §2.4.1 read them.)*
+- [ ] Wire `build_pipeline` into the GCP provider's `Validate` and `resourceProgram` dispatch. *(Not in the original plan; the AWS section needed the same item and the GCP one omitted it. Without it the type decodes and declares but is unreachable.)*
 - [ ] Update `internal/provider/gcp/container.go` and its test: assemble the Artifact Registry reference from the resolved commit.
+- [ ] Ratchet the `internal/provider/gcp` floor in `scripts/coverage-gate.sh` once the section is complete. *(Not in the original plan; the AWS section carried the same item. The package is at 72.6% against a floor of 69%, and the floors ratchet upward only.)*
 
 ## Azure Provider
 - [ ] Create `internal/provider/azure/pipeline_test.go`: write `TestAzureACRTasks`, verifying that the SKU in ARM switches to `Premium` when `retain` > 0.
