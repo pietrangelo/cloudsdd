@@ -14,9 +14,23 @@
   For every new feature or task, you must rigorously follow this cycle:
   1. **Write an RFC:** Create or update a file in `docs/rfc/` describing the problem, the proposed architecture, the impacted JSON schema, and security considerations.
   2. **Approval:** Explicitly ask the user: "Do you approve this RFC?".
-  3. **Implementation:** Proceed with writing code ONLY after receiving the user's approval.
-  4. **Documentation update:** Before declaring the task complete, update `docs/architecture.md` and `docs/cli.md`.
+  3. **Plan in `todo.md`:** Once the RFC is approved, break it down into an ordered checklist in `todo.md` (see `<todo_policy>`).
+  4. **Implementation:** Proceed with writing code ONLY after receiving the user's approval, working strictly through `todo.md` one item at a time.
+  5. **Documentation update:** Before declaring the task complete, update `docs/architecture.md` and `docs/cli.md`.
 </workflow_rules>
+
+<todo_policy>
+  MANDATORY: `todo.md` in the repository root is the single source of truth for task execution. It is not optional and must never be bypassed.
+
+  - **Always read `todo.md` first.** Before starting or resuming any work, read `todo.md` to know the current plan and the next unchecked item.
+  - **Always plan into `todo.md`.** After an RFC is approved, rewrite `todo.md` as the implementation plan for that RFC: a title referencing the RFC, `##` sections grouping related work, and `- [ ]` items. Each item must be a single, verifiable action naming the exact file it touches (e.g. "- [ ] Update internal/spec/spec.go: add the ResourceTypeBuildPipeline constant.").
+  - **Tests come first.** Order the items so the test file for a unit is written before the implementation that satisfies it, consistent with `<testing_and_security>`.
+  - **Execute in order.** Work through the checklist top to bottom. Do not jump ahead, do not batch unrelated items, and do not perform work that is not on the list — if new work emerges, add it to `todo.md` first.
+  - **Check off immediately.** Mark an item `- [x]` as soon as it is done and its tests pass. Never mark an item complete on the basis of intent; only on verified results.
+  - **Keep it honest.** If an item turns out to be wrong, blocked, or unnecessary, update or remove it in `todo.md` and state why, instead of silently skipping it.
+  - **Report against it.** When reporting progress, do so in terms of the `todo.md` items: what is checked, what is next, what is blocked.
+  - **Language:** `todo.md` is subject to `<language_policy>` like every other file — write it in English.
+</todo_policy>
 
 <language_policy>
   Everything must be written in English: code comments, commit messages, documentation, RFCs, and this file itself. No exceptions, regardless of the language the user writes in during the conversation.
