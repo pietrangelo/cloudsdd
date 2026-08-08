@@ -77,7 +77,7 @@ FLOORS=(
   # Pulumi-bound: see the note above.
   "cloudsdd/internal/provider/aws:65"
   "cloudsdd/internal/provider/azure:69"
-  "cloudsdd/internal/provider/gcp:69"
+  "cloudsdd/internal/provider/gcp:73"
 )
 
 if [[ ! -f "$PROFILE" ]]; then

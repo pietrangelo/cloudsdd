@@ -52,8 +52,13 @@ showed, and runs the resulting image.
 - [x] Create `internal/provider/gcp/pipeline_test.go`: write mock test `TestGCPCloudBuildGeneration` verifying the absence of *project-wide* permissions on the generated Service Account.
 - [x] Create `internal/provider/gcp/pipeline.go`: implement Cloud Build and Artifact Registry. Apply the Cleanup Policy for retention. *(Also required teaching `internal/provider/gcp/declare_test.go`'s mock monitor the repository's `project` output and the `getRepository` invoke — the provider computes both, and the two halves of §2.4.1 read them.)*
 - [x] Wire `build_pipeline` into the GCP provider's `Validate` and `resourceProgram` dispatch. *(Not in the original plan; the AWS section needed the same item and the GCP one omitted it. Without it the type decodes and declares but is unreachable.)*
-- [ ] Update `internal/provider/gcp/container.go` and its test: assemble the Artifact Registry reference from the resolved commit.
-- [ ] Ratchet the `internal/provider/gcp` floor in `scripts/coverage-gate.sh` once the section is complete. *(Not in the original plan; the AWS section carried the same item. The package is at 72.6% against a floor of 69%, and the floors ratchet upward only.)*
+- [x] Update `internal/provider/gcp/container.go` and its test: assemble the Artifact Registry reference from the resolved commit. *(`declareContainerService` now takes the `spec.Resource` — as the AWS twin already does — so it can read `Resolved` and refuse an unresolved reference before registering anything, rather than the dispatch filling `Image` in as on AWS.)*
+- [x] Ratchet the `internal/provider/gcp` floor in `scripts/coverage-gate.sh` once the section is complete. *(Not in the original plan; the AWS section carried the same item. The package is at 73.2% against a floor of 69%, and the floors ratchet upward only.)*
+
+**GCP is now complete end to end**, on the same terms as AWS: a
+Specification naming a repository and a runtime provisions an Artifact
+Registry repository and a Cloud Build trigger, builds the commit the plan
+showed, and runs the resulting image on Cloud Run.
 
 ## Azure Provider
 - [ ] Create `internal/provider/azure/pipeline_test.go`: write `TestAzureACRTasks`, verifying that the SKU in ARM switches to `Premium` when `retain` > 0.

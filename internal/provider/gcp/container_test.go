@@ -57,12 +57,23 @@ func containerResource(mutate func(*spec.Resource)) spec.Resource {
 func declaredContainer(t *testing.T, mutate func(map[string]any)) []recordedResource {
 	t.Helper()
 
-	props, err := decodeContainerServiceProperties(containerProps(mutate), []string{"ghcr.io"})
+	return declaredContainerFor(t, containerResource(func(r *spec.Resource) {
+		r.Properties = containerProps(mutate)
+	}))
+}
+
+// declaredContainerFor declares one specific resource, which is what the
+// pipeline path needs: the image reference is assembled from `Resolved`,
+// and that lives on the resource rather than in its properties.
+func declaredContainerFor(t *testing.T, r spec.Resource) []recordedResource {
+	t.Helper()
+
+	props, err := decodeContainerServiceProperties(r.Properties, []string{"ghcr.io"})
 	if err != nil {
 		t.Fatalf("decodeContainerServiceProperties() = %v", err)
 	}
 	return runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareContainerService(ctx, "api", "europe-west1", testNetworkName, *props)
+		_, err := declareContainerService(ctx, r, testNetworkName, *props)
 		return err
 	})
 }
@@ -458,6 +469,108 @@ func TestDecodeContainerServiceRejectsADomainWithoutPublic(t *testing.T) {
 	if !errors.Is(err, container.ErrDomainWithoutPublic) {
 		t.Fatalf("decodeContainerServiceProperties() = %v, want ErrDomainWithoutPublic", err)
 	}
+}
+
+// TestDeclareContainerServiceRunsThePipelineImage is the service half of
+// RFC 018 §2.4.1: a service that names a `pipeline` instead of an `image`
+// runs the Artifact Registry reference the resolved commit named.
+//
+// Without this the decode succeeds — `image` is optional since RFC 018 §3
+// — and Cloud Run is handed an empty image, which is a service that
+// validates, plans, and then fails on apply for a reason the plan never
+// showed.
+func TestDeclareContainerServiceRunsThePipelineImage(t *testing.T) {
+	r := containerResource(func(r *spec.Resource) {
+		r.Properties = containerProps(func(p map[string]any) {
+			delete(p, "image")
+			p["pipeline"] = "api-build"
+		})
+		r.Resolved = testResolved
+	})
+
+	recorded := declaredContainerFor(t, r)
+
+	got := containerImage(t, findResource(t, recorded, cloudRunServiceToken))
+	want := artifactImageReference(r.Scope.Region, testProjectID, testResolved.ImageName, testResolved.Commit)
+	if got != want {
+		t.Errorf("container image = %q, want the pipeline's own %q", got, want)
+	}
+	// The commit, never a branch and never `latest` — the registry's
+	// immutable tags are what make that as strong as a digest.
+	if !strings.HasSuffix(got, ":"+testCommit) {
+		t.Errorf("container image = %q, want it tagged with the resolved commit", got)
+	}
+
+	// The project comes from the registry rather than from configuration,
+	// so the lookup must actually happen and must name the repository the
+	// pipeline created.
+	lookup := findResource(t, recorded, getArtifactRepositoryToken)
+	if id := lookup.Inputs["repositoryId"].StringValue(); id != artifactRepositoryID(testResolved.ImageName) {
+		t.Errorf("looked up repository %q, want %q", id, artifactRepositoryID(testResolved.ImageName))
+	}
+	if loc := lookup.Inputs["location"].StringValue(); loc != r.Scope.Region {
+		t.Errorf("looked up location %q, want the resource's region %q", loc, r.Scope.Region)
+	}
+}
+
+// TestDeclareContainerServiceWithAnImageAsksTheRegistryNothing: the
+// pipeline path is entered only by a service that has no image of its own.
+// A lookup on every service would fail every deployment that names a
+// public image, since there is no repository to find.
+func TestDeclareContainerServiceWithAnImageAsksTheRegistryNothing(t *testing.T) {
+	recorded := declaredContainer(t, nil)
+
+	if hasResource(recorded, getArtifactRepositoryToken) {
+		t.Error("the registry was queried for a service that named its own image")
+	}
+	if got := containerImage(t, findResource(t, recorded, cloudRunServiceToken)); got != testImage {
+		t.Errorf("container image = %q, want the requested %q", got, testImage)
+	}
+}
+
+// TestDeclareContainerServiceRefusesAnUnresolvedPipeline: reaching the
+// provider without the Engine's answer is refused rather than guessed at.
+// The two plausible inventions — the pipeline's resource id, or `latest` —
+// are respectively wrong and the one thing RFC 017 §2.4 refuses outright.
+func TestDeclareContainerServiceRefusesAnUnresolvedPipeline(t *testing.T) {
+	r := containerResource(func(r *spec.Resource) {
+		r.Properties = containerProps(func(p map[string]any) {
+			delete(p, "image")
+			p["pipeline"] = "api-build"
+		})
+	})
+
+	props, err := decodeContainerServiceProperties(r.Properties, nil)
+	if err != nil {
+		t.Fatalf("decodeContainerServiceProperties() = %v", err)
+	}
+
+	var got error
+	recorded := runProgram(t, func(ctx *pulumi.Context) error {
+		_, got = declareContainerService(ctx, r, testNetworkName, *props)
+		return nil
+	})
+
+	if !errors.Is(got, ErrPipelineNotResolved) {
+		t.Fatalf("declareContainerService() = %v, want %v", got, ErrPipelineNotResolved)
+	}
+	// The refusal has to come before the service is registered, or the
+	// stack holds a Cloud Run service pointed at nothing.
+	if hasResource(recorded, cloudRunServiceToken) {
+		t.Error("a Cloud Run service was declared despite the unresolved pipeline reference")
+	}
+}
+
+// containerImage reads the image off the single container of a declared
+// Cloud Run service.
+func containerImage(t *testing.T, service recordedResource) string {
+	t.Helper()
+
+	containers := service.Inputs["template"].ObjectValue()["containers"].ArrayValue()
+	if len(containers) != 1 {
+		t.Fatalf("declared %d containers, want 1", len(containers))
+	}
+	return containers[0].ObjectValue()["image"].StringValue()
 }
 
 // TestCloudRunRefusesAnExplicitSchedule covers RFC 017 §2.5 on GCP.

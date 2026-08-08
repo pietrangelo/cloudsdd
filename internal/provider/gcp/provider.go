@@ -217,7 +217,7 @@ func (p *GCPProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		}
 		netName := scopeNetworkName(resourceScope(r))
 		return func(ctx *pulumi.Context) error {
-			_, err := declareContainerService(ctx, r.ID, region, netName, *props)
+			_, err := declareContainerService(ctx, r, netName, *props)
 			return err
 		}, region, nil
 

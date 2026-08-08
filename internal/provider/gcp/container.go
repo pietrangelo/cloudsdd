@@ -12,6 +12,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider/container"
+	"cloudsdd/internal/spec"
 )
 
 // Cloud Run ingress settings (RFC 017 §2.3).
@@ -102,12 +103,28 @@ func decodeContainerServiceProperties(props map[string]any, allowedRegistries []
 // internet call it (RFC 017 §2.6).
 func declareContainerService(
 	ctx *pulumi.Context,
-	id, region, networkName string,
+	r spec.Resource,
+	networkName string,
 	p container.Properties,
 ) (*cloudrunv2.Service, error) {
+	id := r.ID
+	region := r.Scope.Region
+
 	cpu, memory, err := runResources(p.Size)
 	if err != nil {
 		return nil, err
+	}
+
+	// A service fed by a pipeline names no image: the reference is turned
+	// into one here, where the registry host and the project are knowable
+	// (RFC 018 §2.4.1). It happens before anything is registered, so an
+	// unresolved reference is refused rather than leaving a stack holding a
+	// service pointed at nothing.
+	image := p.Image
+	if image == "" {
+		if image, err = pipelineImage(ctx, r, region); err != nil {
+			return nil, err
+		}
 	}
 
 	// A dedicated identity with nothing attached, following RFC 013's
@@ -160,7 +177,7 @@ func declareContainerService(
 			},
 			Containers: cloudrunv2.ServiceTemplateContainerArray{
 				&cloudrunv2.ServiceTemplateContainerArgs{
-					Image: pulumi.String(p.Image),
+					Image: pulumi.String(image),
 					Ports: cloudrunv2.ServiceTemplateContainerPortArray{
 						&cloudrunv2.ServiceTemplateContainerPortArgs{
 							ContainerPort: pulumi.Int(p.Port),
