@@ -114,6 +114,19 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 // the only one; it returns a fixed ID and echoes the filters back so a
 // test can assert what was actually asked for.
 func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	// The image repository a container_service fed by a pipeline resolves
+	// its registry host from (RFC 018 §2.4.1).
+	if args.Token == getEcrRepositoryToken {
+		m.rec.add(recordedResource{Type: args.Token, Name: getEcrRepositoryToken, Inputs: args.Args})
+		name := args.Args["name"].StringValue()
+		return resource.PropertyMap{
+			"name": resource.NewStringProperty(name),
+			"arn": resource.NewStringProperty(
+				"arn:aws:ecr:eu-central-1:" + testAccountID + ":repository/" + name),
+			"repositoryUrl": resource.NewStringProperty(
+				testAccountID + ".dkr.ecr.eu-central-1.amazonaws.com/" + name),
+		}, nil
+	}
 	if args.Token == getAmiToken {
 		m.rec.add(recordedResource{Type: args.Token, Name: getAmiToken, Inputs: args.Args})
 		return resource.PropertyMap{

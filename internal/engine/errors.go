@@ -60,3 +60,15 @@ var ErrIntentMismatch = errors.New("engine: specification intent does not permit
 // could contain both an object store and a database — which is most of
 // them.
 var ErrResourceNotSchedulable = errors.New("engine: resource type does not support a power schedule")
+
+// ErrIncompleteBuildSource indicates a build_pipeline missing one of the
+// properties the Engine needs to resolve what will be built (RFC 018
+// §2.4.1).
+//
+// An error rather than a skip, for the reason ErrImagePropertyMissing is:
+// resolving nothing would mean building whatever the branch points at when
+// the build eventually runs, which is the "deploy whatever is newest"
+// §2.4 exists to refuse. The provider's decoder would reject the same
+// Specification a moment later with a better message; this check is the
+// one that runs for every provider.
+var ErrIncompleteBuildSource = errors.New("build_pipeline declares no `source.repository`, `source.revision` or `image_name`")

@@ -366,7 +366,7 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		}
 		region := r.Scope.Region
 		program := func(ctx *pulumi.Context) error {
-			opts, _, err := p.providerOpts(ctx, region)
+			opts, invokeOpts, err := p.providerOpts(ctx, region)
 			if err != nil {
 				return err
 			}
@@ -374,7 +374,18 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 			if err != nil {
 				return err
 			}
-			_, err = declareContainerService(ctx, r, net, *cp, rules, opts...)
+			// A service fed by a pipeline names no image: the reference is
+			// turned into one here, where the registry host is knowable
+			// (RFC 018 §2.4.1).
+			properties := *cp
+			if properties.Image == "" {
+				image, err := pipelineImage(ctx, r, invokeOpts...)
+				if err != nil {
+					return err
+				}
+				properties.Image = image
+			}
+			_, err = declareContainerService(ctx, r, net, properties, rules, opts...)
 			return err
 		}
 		return program, region, nil
@@ -410,7 +421,7 @@ func (p *AWSProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 			// repository and to reach the registry, and putting it in a
 			// private subnet would mean routing both through the scope's
 			// NAT for no gain. Nothing it produces is reachable from it.
-			_, err = declareBuildPipeline(ctx, r.ID, *bpp, opts...)
+			_, err = declareBuildPipeline(ctx, r.ID, *bpp, r.Resolved, opts...)
 			return err
 		}
 		return program, region, nil

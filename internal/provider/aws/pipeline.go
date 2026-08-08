@@ -17,6 +17,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider/pipeline"
+	"cloudsdd/internal/spec"
 )
 
 // build_pipeline on AWS is CodeBuild pushing to ECR (RFC 018 §2.8).
@@ -115,6 +116,7 @@ func declareBuildPipeline(
 	ctx *pulumi.Context,
 	id string,
 	p pipeline.BuildPipelineProperties,
+	resolved *spec.Resolved,
 	opts ...pulumi.ResourceOption,
 ) (*codebuild.Project, error) {
 	repository, err := declarePipelineRepository(ctx, id, p, opts...)
@@ -153,7 +155,11 @@ func declareBuildPipeline(
 			GitCloneDepth: pulumi.Int(1),
 			Buildspec:     repository.RepositoryUrl.ApplyT(func(registry string) string { return buildspec(registry, dockerfile) }).(pulumi.StringOutput),
 		},
-		SourceVersion: pulumi.String(p.Source.Revision),
+		// The commit the Engine resolved and showed, not the branch that
+		// was written (RFC 018 §2.4.1). Building the branch would build
+		// whatever it points at when CodeBuild gets there, which may not be
+		// what the plan displayed.
+		SourceVersion: pulumi.String(buildRevision(p, resolved)),
 		Environment: &codebuild.ProjectEnvironmentArgs{
 			ComputeType: pulumi.String(buildComputeType),
 			Image:       pulumi.String(buildImage),
@@ -173,6 +179,20 @@ func declareBuildPipeline(
 		return nil, fmt.Errorf("aws: failed to declare the build project for %q: %w", id, err)
 	}
 	return project, nil
+}
+
+// buildRevision is the revision CodeBuild checks out: the resolved commit
+// when the Engine supplied one, and otherwise the revision as written.
+//
+// The fallback exists because a provider can be driven directly, outside
+// the Engine, and refusing there would make the AWS provider unusable on
+// its own. Driven through the Engine — every path a user takes — a commit
+// is always present.
+func buildRevision(p pipeline.BuildPipelineProperties, resolved *spec.Resolved) string {
+	if resolved != nil && resolved.Commit != "" {
+		return resolved.Commit
+	}
+	return p.Source.Revision
 }
 
 // declarePipelineRepository registers the ECR repository and its retention
@@ -408,4 +428,46 @@ func buildspec(registry, dockerfile string) string {
 		`      - echo "pushed ` + registry + `:$COMMIT"`,
 		``,
 	}, "\n")
+}
+
+// ErrPipelineNotResolved indicates a container_service whose `pipeline`
+// reference reached the provider without the Engine's answer.
+//
+// It is refused rather than guessed at. Guessing would mean inventing a
+// repository name and a tag, and the two plausible inventions — the
+// pipeline's resource id, or `latest` — are respectively wrong and the one
+// thing RFC 017 §2.4 refuses outright.
+var ErrPipelineNotResolved = errors.New("aws: `pipeline` reached the provider unresolved")
+
+// pipelineImage turns a resolved `pipeline` reference into the image
+// reference the task definition runs (RFC 018 §2.4.1).
+//
+// The registry host is looked up rather than assembled from an account id.
+// An ECR host is "<account>.dkr.ecr.<region>.amazonaws.com", and the
+// account is only obtainable through an aws:getCallerIdentity invoke —
+// which internal/provider/aws/schedule.go already went out of its way to
+// avoid, because it has to be threaded through assumed-credential
+// providers. Looking the repository up asks the question that actually
+// matters instead, and answers it in one call.
+//
+// It also fails usefully. The repository exists by the time this runs —
+// the Engine applies a pipeline before anything that consumes it (RFC 018
+// §2.9) — so a lookup that misses means the two disagree, and saying so
+// beats deploying a service pointed at a registry path that holds nothing.
+func pipelineImage(ctx *pulumi.Context, r spec.Resource, opts ...pulumi.InvokeOption) (string, error) {
+	if r.Resolved == nil || r.Resolved.ImageName == "" || r.Resolved.Commit == "" {
+		return "", fmt.Errorf("%w: resource %q", ErrPipelineNotResolved, r.ID)
+	}
+
+	repository, err := ecr.LookupRepository(ctx, &ecr.LookupRepositoryArgs{
+		Name: r.Resolved.ImageName,
+	}, opts...)
+	if err != nil {
+		return "", fmt.Errorf("aws: resource %q: failed to look up the image repository %q: %w",
+			r.ID, r.Resolved.ImageName, err)
+	}
+
+	// The commit, never a branch and never `latest`. The repository is
+	// created with immutable tags, so this names one artifact forever.
+	return repository.RepositoryUrl + ":" + r.Resolved.Commit, nil
 }

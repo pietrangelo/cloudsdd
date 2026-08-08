@@ -39,10 +39,14 @@ make that as strong as a digest. No cross-stack reference is needed.
 - [x] Amend `docs/rfc/018-build-pipeline.md` with §2.4.1 recording the mechanism.
 - [x] Create `internal/provider/pipeline/revision.go`: resolve a branch/tag to a commit over Git's smart-HTTP ref advertisement, with no new dependency.
 - [x] Create `internal/provider/pipeline/revision_test.go`: branch, tag, annotated tag, ambiguity, unreachable repositories, and a bounded response.
-- [ ] Add `Resolved` to `spec.Resource` (no JSON tag, so a Specification can never set it) carrying the pipeline `image_name` and the resolved commit.
-- [ ] Update `internal/engine/default.go`: resolve each build_pipeline's revision once, and populate `Resolved` on every service that references it.
-- [ ] Update `internal/provider/aws/container.go`: assemble `<ecr-host>/<image_name>:<sha>` when `Pipeline` is referenced.
-- [ ] Update `internal/provider/aws/container_test.go`: assert the assembled reference and that it is never `latest`.
+- [x] Add `Resolved` to `spec.Resource` (no JSON tag, so a Specification can never set it) carrying the pipeline `image_name` and the resolved commit.
+- [x] Create `internal/engine/build.go`: resolve each build_pipeline's revision once, and populate `Resolved` on every service that references it.
+- [x] Update `internal/provider/aws/pipeline.go`: build the resolved commit rather than the branch, and assemble `<ecr-host>/<image_name>:<sha>` for a service that references a pipeline.
+- [x] Update `internal/provider/aws/pipeline_test.go`: assert the assembled reference parses under RFC 017 §2.4's own grammar and is never `latest`.
+
+**AWS is now complete end to end**: a Specification naming a repository and
+a runtime provisions a registry and a build, builds the commit the plan
+showed, and runs the resulting image.
 
 ## GCP Provider
 - [ ] Create `internal/provider/gcp/pipeline_test.go`: write mock test `TestGCPCloudBuildGeneration` verifying the absence of *project-wide* permissions on the generated Service Account.

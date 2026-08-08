@@ -133,6 +133,37 @@ type Resource struct {
 	Schedule *schedule.Schedule `json:"schedule,omitempty"`
 
 	Properties map[string]any `json:"properties" validate:"required"`
+
+	// Resolved carries what the Engine worked out about this resource that
+	// is not in the document (RFC 018 §2.4.1).
+	//
+	// It has **no JSON tag**, deliberately. Everything else here is
+	// user-supplied and treated as hostile; this is the opposite, and a
+	// field a Specification could set would be a way to name an image
+	// without going through the pinning rules — the mass-assignment
+	// problem the whole two-tier decoding exists to prevent.
+	Resolved *Resolved `json:"-"`
+}
+
+// Resolved is the Engine's answer about a resource's build (RFC 018
+// §2.4.1).
+//
+// One shape serves both sides of a `pipeline` reference, because both need
+// the same two facts. On a build_pipeline it is what that pipeline builds
+// and publishes; on a container_service it is what the pipeline it
+// references will have published by the time the service is applied.
+//
+// The registry host is absent on purpose: only a provider knows it. An ECR
+// host carries the account id, an Artifact Registry path the project, an
+// ACR login server the registry's own name.
+type Resolved struct {
+	// ImageName is the repository within the registry CloudSDD creates.
+	ImageName string
+
+	// Commit is the commit `source.revision` resolved to. It is the tag
+	// the build publishes under, and so the tag the service asks for —
+	// never `latest`, and never a branch (RFC 018 §2.4).
+	Commit string
 }
 
 // Scope describes where a resource is deployed within its Account (RFC

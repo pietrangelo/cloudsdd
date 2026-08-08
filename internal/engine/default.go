@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"cloudsdd/internal/provider"
+	"cloudsdd/internal/provider/pipeline"
 	"cloudsdd/internal/spec"
 )
 
@@ -36,6 +37,11 @@ type DefaultEngine struct {
 	// never nil, because New installs the default.
 	graph DependencyGraph
 
+	// revisions turns a build_pipeline's branch or tag into the commit it
+	// names (RFC 018 §2.4.1). A field so a test can resolve without a
+	// network; never nil, because New installs the default.
+	revisions pipeline.RevisionResolver
+
 	targetCacheMu sync.Mutex
 	targetCache   map[string]provider.CloudProvider
 }
@@ -56,6 +62,13 @@ func WithDeploymentTargets(targets map[string]DeploymentTarget) Option {
 		}
 		e.targets = registry
 	}
+}
+
+// WithRevisionResolver replaces the resolver that turns a build_pipeline's
+// revision into a commit (RFC 018 §2.4.1). Its reason to exist is testing:
+// the default one makes a network request.
+func WithRevisionResolver(r pipeline.RevisionResolver) Option {
+	return func(e *DefaultEngine) { e.revisions = r }
 }
 
 // WithDefaultProvider sets the machine-wide tie-break for resources
@@ -89,6 +102,7 @@ func New(providers map[spec.Provider]provider.CloudProvider, opts ...Option) *De
 		targetFactories: map[spec.Provider]TargetProviderFactory{},
 		targetCache:     map[string]provider.CloudProvider{},
 		graph:           NewDependencyGraph(),
+		revisions:       pipeline.NewRevisionResolver(),
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -181,6 +195,16 @@ func (e *DefaultEngine) validated(ctx context.Context, s spec.Specification) (sp
 	// judged once both have one; before, because a reference that does not
 	// resolve makes every later check an answer about the wrong thing.
 	if err := e.graph.Validate(ctx, s); err != nil {
+		return spec.Specification{}, err
+	}
+
+	// With the references known good, every build_pipeline's revision is
+	// resolved to a commit and handed to the resources that need it —
+	// including the services that will run what it publishes (RFC 018
+	// §2.4.1). It happens before the providers are consulted so that what
+	// a plan shows is a commit, not a branch.
+	s, err = e.resolveBuilds(ctx, s)
+	if err != nil {
 		return spec.Specification{}, err
 	}
 

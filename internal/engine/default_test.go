@@ -6,6 +6,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"cloudsdd/internal/provider"
@@ -379,6 +380,30 @@ func TestNew_RegistryIsolation(t *testing.T) {
 	}
 }
 
+// stubResolver answers revision lookups without a network. The Engine
+// resolves every build_pipeline's revision before anything is applied
+// (RFC 018 §2.4.1), so a test with a pipeline in it would otherwise reach
+// for github.com.
+type stubResolver struct {
+	commit string
+	err    error
+
+	mu    sync.Mutex
+	calls []string
+}
+
+func (s *stubResolver) Resolve(_ context.Context, repository, revision string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, repository+"@"+revision)
+	if s.err != nil {
+		return "", s.err
+	}
+	return s.commit, nil
+}
+
+const testCommit = "1c9e0aa5a5e14b6d34a3f9c1d0d0b1b9f0a1c2d3"
+
 // TestApplyAndDestroyFollowTheDependencyGraph asserts what RFC 018 §2.9
 // promises about ordering, at the level that actually matters: the order
 // resources reach a CloudProvider.
@@ -425,7 +450,8 @@ func TestApplyAndDestroyFollowTheDependencyGraph(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mock := &mockProvider{name: "aws"}
-			e := New(map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mock})
+			e := New(map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mock},
+				WithRevisionResolver(&stubResolver{commit: testCommit}))
 			s := spec.Specification{SDDVersion: "1.0", Intent: tt.intent, Resources: resources}
 
 			if err := tt.run(e, s); err != nil {
@@ -483,7 +509,7 @@ func TestValidateRejectsABrokenReference(t *testing.T) {
 			e := New(map[spec.Provider]provider.CloudProvider{
 				spec.ProviderAWS: mock,
 				spec.ProviderGCP: &mockProvider{name: "gcp"},
-			})
+			}, WithRevisionResolver(&stubResolver{commit: testCommit}))
 			s := spec.Specification{SDDVersion: "1.0", Intent: spec.IntentDeploy, Resources: tt.resources}
 
 			err := e.Validate(context.Background(), s)

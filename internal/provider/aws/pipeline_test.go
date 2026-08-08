@@ -12,14 +12,23 @@ import (
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
+	"cloudsdd/internal/provider/container"
 	"cloudsdd/internal/provider/pipeline"
+	"cloudsdd/internal/spec"
 )
 
 const (
 	ecrRepositoryToken    = "aws:ecr/repository:Repository"
 	ecrLifecycleToken     = "aws:ecr/lifecyclePolicy:LifecyclePolicy"
 	codeBuildProjectToken = "aws:codebuild/project:Project"
+	getEcrRepositoryToken = "aws:ecr/getRepository:getRepository"
 )
+
+// testCommit is the commit the Engine would have resolved `main` to.
+const testCommit = "1c9e0aa5a5e14b6d34a3f9c1d0d0b1b9f0a1c2d3"
+
+// testResolved is what the Engine hands a provider (RFC 018 §2.4.1).
+var testResolved = &spec.Resolved{ImageName: "acme/api", Commit: testCommit}
 
 func pipelineProperties() map[string]any {
 	return map[string]any{
@@ -48,7 +57,7 @@ func mustDecodePipeline(t *testing.T, props map[string]any) pipeline.BuildPipeli
 // account.
 func TestAWSCodeBuildGeneration(t *testing.T) {
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareBuildPipeline(ctx, "api-build", mustDecodePipeline(t, pipelineProperties()))
+		_, err := declareBuildPipeline(ctx, "api-build", mustDecodePipeline(t, pipelineProperties()), testResolved)
 		return err
 	})
 
@@ -125,7 +134,7 @@ func TestAWSCodeBuildGeneration(t *testing.T) {
 // preference.
 func TestDeclareBuildPipelineRepository(t *testing.T) {
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareBuildPipeline(ctx, "api-build", mustDecodePipeline(t, pipelineProperties()))
+		_, err := declareBuildPipeline(ctx, "api-build", mustDecodePipeline(t, pipelineProperties()), testResolved)
 		return err
 	})
 
@@ -183,7 +192,7 @@ func TestRetentionPolicy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorded := runProgram(t, func(ctx *pulumi.Context) error {
-				_, err := declareBuildPipeline(ctx, "api-build", mustDecodePipeline(t, tt.properties))
+				_, err := declareBuildPipeline(ctx, "api-build", mustDecodePipeline(t, tt.properties), testResolved)
 				return err
 			})
 
@@ -232,7 +241,7 @@ func TestRetentionPolicy(t *testing.T) {
 // buildspec that carries the generated Dockerfile into it.
 func TestDeclareBuildPipelineProject(t *testing.T) {
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareBuildPipeline(ctx, "api-build", mustDecodePipeline(t, pipelineProperties()))
+		_, err := declareBuildPipeline(ctx, "api-build", mustDecodePipeline(t, pipelineProperties()), testResolved)
 		return err
 	})
 
@@ -245,10 +254,12 @@ func TestDeclareBuildPipelineProject(t *testing.T) {
 	if got := source["location"].StringValue(); got != "https://github.com/acme/api" {
 		t.Errorf("source location = %q, want the repository URL unchanged", got)
 	}
-	// The revision reaches the project as declared; resolving it to a
-	// commit is CodeBuild's job at clone time (RFC 018 §2.4).
-	if got := project.Inputs["sourceVersion"].StringValue(); got != "main" {
-		t.Errorf("sourceVersion = %q, want %q", got, "main")
+	// The build checks out the commit the Engine resolved and showed, not
+	// the branch that was written (RFC 018 §2.4.1). Building the branch
+	// would build whatever it points at when CodeBuild gets there, which
+	// may not be what the plan displayed.
+	if got := project.Inputs["sourceVersion"].StringValue(); got != testCommit {
+		t.Errorf("sourceVersion = %q, want the resolved commit %q", got, testCommit)
 	}
 	// Nothing is written to S3: the artifact of this build is the image.
 	if got := project.Inputs["artifacts"].ObjectValue()["type"].StringValue(); got != artifactsNone {
@@ -445,6 +456,94 @@ func TestDecodeBuildPipelineProperties(t *testing.T) {
 			}
 			if tt.wantMsg != "" && !strings.Contains(err.Error(), tt.wantMsg) {
 				t.Fatalf("error = %q, want it to contain %q", err, tt.wantMsg)
+			}
+		})
+	}
+}
+
+// TestPipelineImage covers the service side of RFC 018 §2.4.1: a
+// `pipeline` reference becomes the image reference the task definition
+// runs.
+func TestPipelineImage(t *testing.T) {
+	wantHost := testAccountID + ".dkr.ecr.eu-central-1.amazonaws.com/acme/api"
+
+	t.Run("a resolved reference becomes a pinned image", func(t *testing.T) {
+		var got string
+		runProgram(t, func(ctx *pulumi.Context) error {
+			image, err := pipelineImage(ctx, spec.Resource{ID: "api", Resolved: testResolved})
+			got = image
+			return err
+		})
+
+		if want := wantHost + ":" + testCommit; got != want {
+			t.Errorf("pipelineImage() = %q, want %q", got, want)
+		}
+		// The registry is created with immutable tags, so a commit tag
+		// names one artifact forever — and it is never `latest`.
+		if strings.HasSuffix(got, ":latest") {
+			t.Error("pipelineImage() produced a `latest` reference")
+		}
+		// The image the service runs must parse under RFC 017 §2.4's own
+		// grammar, or the two halves disagree about what an image is.
+		ref, err := container.ParseImage(got)
+		if err != nil {
+			t.Fatalf("the assembled reference does not parse: %v", err)
+		}
+		if ref.Tag != testCommit {
+			t.Errorf("parsed tag = %q, want the commit %q", ref.Tag, testCommit)
+		}
+	})
+
+	t.Run("an unresolved reference is refused", func(t *testing.T) {
+		unresolved := []struct {
+			name     string
+			resolved *spec.Resolved
+		}{
+			{name: "nothing at all", resolved: nil},
+			{name: "no commit", resolved: &spec.Resolved{ImageName: "acme/api"}},
+			{name: "no image name", resolved: &spec.Resolved{Commit: testCommit}},
+		}
+
+		for _, tt := range unresolved {
+			t.Run(tt.name, func(t *testing.T) {
+				var got error
+				runProgram(t, func(ctx *pulumi.Context) error {
+					_, err := pipelineImage(ctx, spec.Resource{ID: "api", Resolved: tt.resolved})
+					got = err
+					return nil
+				})
+				// Guessing would mean inventing a repository name and a
+				// tag, and the plausible inventions are respectively wrong
+				// and the one thing RFC 017 §2.4 refuses outright.
+				if !errors.Is(got, ErrPipelineNotResolved) {
+					t.Fatalf("pipelineImage() = %v, want %v", got, ErrPipelineNotResolved)
+				}
+			})
+		}
+	})
+}
+
+// TestBuildRevision: driven through the Engine a commit is always present,
+// and driving the provider directly must still work.
+func TestBuildRevision(t *testing.T) {
+	props := pipeline.BuildPipelineProperties{
+		Source: pipeline.Source{Repository: "https://github.com/acme/api", Revision: "main"},
+	}
+
+	tests := []struct {
+		name     string
+		resolved *spec.Resolved
+		want     string
+	}{
+		{name: "the resolved commit wins", resolved: testResolved, want: testCommit},
+		{name: "no resolution falls back to the revision", resolved: nil, want: "main"},
+		{name: "an empty commit falls back", resolved: &spec.Resolved{ImageName: "acme/api"}, want: "main"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := buildRevision(props, tt.resolved); got != tt.want {
+				t.Errorf("buildRevision() = %q, want %q", got, tt.want)
 			}
 		})
 	}
