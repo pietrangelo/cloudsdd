@@ -220,9 +220,8 @@ func TestValidateVolumes(t *testing.T) {
 		wantErr bool
 		wantMsg string
 	}{
-		// The two types that mount a filesystem, and the absence case.
+		// The one type that mounts a filesystem, and the absence case.
 		{name: "a filesystem on a container_service", typ: ResourceTypeContainerService, volumes: []Volume{uploads}},
-		{name: "a filesystem on a build_pipeline", typ: ResourceTypeBuildPipeline, volumes: []Volume{uploads}},
 		{name: "no filesystem at all", typ: ResourceTypeContainerService},
 		{
 			name:    "size omitted, left to the provider default",
@@ -235,7 +234,7 @@ func TestValidateVolumes(t *testing.T) {
 			volumes: volumesNamed("a", "b", "c", "d", "e"),
 		},
 
-		// The four types with nothing to mount. Each is listed rather than
+		// The five types that are refused. Each is listed rather than
 		// looped: a type moving between the two groups is a decision, and
 		// it should show up as a changed line here.
 		{
@@ -252,6 +251,16 @@ func TestValidateVolumes(t *testing.T) {
 		},
 		{
 			name: "a cross_account_role cannot mount one", typ: ResourceTypeCrossAccountRole,
+			volumes: []Volume{uploads}, wantErr: true, wantMsg: "cannot mount",
+		},
+		// The fifth is not like the other four, and the difference is worth
+		// keeping visible: a build has a filesystem, it is simply not one
+		// any of the three clouds can share. Cloud Build and ACR Tasks
+		// cannot mount one at all, and CodeBuild can only for a build placed
+		// inside the VPC — which reverses RFC 018's deliberate choice of
+		// CodeBuild's own managed network (RFC 020 §2.4).
+		{
+			name: "a build_pipeline cannot mount one", typ: ResourceTypeBuildPipeline,
 			volumes: []Volume{uploads}, wantErr: true, wantMsg: "cannot mount",
 		},
 

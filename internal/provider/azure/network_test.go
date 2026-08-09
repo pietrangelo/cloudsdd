@@ -212,7 +212,7 @@ func TestEnsureNetworkSkipsRegionlessScopes(t *testing.T) {
 	err := p.EnsureNetwork(context.Background(), provider.NetworkScope{
 		Provider:    spec.ProviderAzure,
 		Environment: "dev",
-	}, spec.Policies{})
+	}, provider.ScopeContents{}, spec.Policies{})
 
 	if err != nil {
 		t.Errorf("EnsureNetwork() error = %v, want nil for a scope with no region", err)
@@ -335,7 +335,7 @@ func TestDestroyNetworkSkipsRegionlessScopes(t *testing.T) {
 	err := p.DestroyNetwork(context.Background(), provider.NetworkScope{
 		Provider:    spec.Provider("azure"),
 		Environment: "dev",
-	}, spec.Policies{})
+	}, provider.ScopeContents{}, spec.Policies{})
 
 	if err != nil {
 		t.Errorf("DestroyNetwork() error = %v, want nil for a scope with no region", err)
@@ -352,7 +352,7 @@ func TestDestroyNetworkRefusesAnUnusableAddressPlan(t *testing.T) {
 		Provider:    spec.Provider("azure"),
 		Environment: "dev",
 		Region:      "test-region",
-	}, spec.Policies{Network: &spec.NetworkPolicy{BaseCIDR: "8.8.0.0/16"}})
+	}, provider.ScopeContents{}, spec.Policies{Network: &spec.NetworkPolicy{BaseCIDR: "8.8.0.0/16"}})
 
 	if err == nil {
 		t.Fatal("DestroyNetwork() error = nil, want the public base_cidr to be refused")

@@ -61,7 +61,10 @@ const (
 // is not "private" so much as *absent*: Cloud SQL needs a VPC with
 // private services access to have any address, so the instance came up
 // with no path to it whatsoever (RFC 016 §1).
-func (p *GCPProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, policies spec.Policies) error {
+//
+// The scope's contents are not read yet: this stack declares no
+// filesystem until RFC 020 §2.7 lands Filestore here.
+func (p *GCPProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, policies spec.Policies) error {
 	// object_storage is global on GCP and reaches here without a region.
 	// It lives in no network.
 	if s.Region == "" {
@@ -289,7 +292,7 @@ func scopeNetworkName(s provider.NetworkScope) string {
 // The Engine establishes that the scope is empty before calling this.
 // Nothing here can check: a scope's contents live in other stacks, and
 // this one knows only about the network.
-func (p *GCPProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, policies spec.Policies) error {
+func (p *GCPProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, policies spec.Policies) error {
 	if s.Region == "" {
 		return nil
 	}

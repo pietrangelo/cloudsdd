@@ -16,10 +16,11 @@ import (
 // ensureNetworks provisions the shared network of every scope the
 // Specification touches, before any resource is applied (RFC 016 §2.2).
 //
-// Two things happen here and the order matters. The address ranges are
-// checked for conflict first, across every scope in the Specification, so
-// a Specification that cannot be addressed correctly fails before it has
-// created half a network. Only then is each provider asked to build.
+// The order matters. Everything the whole Specification says about its
+// scopes is settled first — the address ranges are checked for conflict,
+// and the volumes are merged — so a Specification that cannot be built
+// fails before it has built half of one. Only then is each provider asked
+// to build.
 //
 // This runs from Apply and not from Plan: Plan is side-effect free
 // (RFC 011 §2.4 made that explicit for intent, and it holds for
@@ -31,7 +32,11 @@ func (e *DefaultEngine) ensureNetworks(ctx context.Context, s spec.Specification
 		return nil
 	}
 
-	if err := network.Check(addressScopes(scopes), addressPolicy(s.Policies)); err != nil {
+	if err := network.Check(addressScopes(scopes), provider.AddressPolicyOf(s.Policies)); err != nil {
+		return err
+	}
+	contents, err := scopeVolumes(s)
+	if err != nil {
 		return err
 	}
 
@@ -43,7 +48,7 @@ func (e *DefaultEngine) ensureNetworks(ctx context.Context, s spec.Specification
 			// cannot reach a nil provider through this path.
 			return fmt.Errorf("%w: %q", ErrProviderNotFound, scope.Provider)
 		}
-		if err := p.EnsureNetwork(ctx, scope, s.Policies); err != nil {
+		if err := p.EnsureNetwork(ctx, scope, contents[scope], s.Policies); err != nil {
 			return fmt.Errorf("engine: failed to provision the network for scope %q: %w",
 				scopeLabel(scope), err)
 		}
@@ -68,14 +73,7 @@ func networkScopes(s spec.Specification) []provider.NetworkScope {
 	var scopes []provider.NetworkScope
 
 	for _, r := range s.Resources {
-		for _, region := range effectiveRegions(r.Scope) {
-			scope := provider.NetworkScope{
-				Provider:    r.Provider,
-				Account:     r.Account,
-				Environment: r.Scope.Environment,
-				Region:      region,
-				Sealed:      r.Scope.EffectiveSealed(),
-			}
+		for _, scope := range resourceScopes(r) {
 			if _, dup := seen[scope]; dup {
 				continue
 			}
@@ -90,41 +88,125 @@ func networkScopes(s spec.Specification) []provider.NetworkScope {
 	return scopes
 }
 
-// addressScopes projects the engine's scopes onto the address model.
+// resourceScopes yields the scopes one resource occupies: one per
+// effective region, since a multi-region resource has a separate network
+// in each of them (RFC 005 §2.4.2).
+func resourceScopes(r spec.Resource) []provider.NetworkScope {
+	regions := effectiveRegions(r.Scope)
+	scopes := make([]provider.NetworkScope, 0, len(regions))
+	for _, region := range regions {
+		scopes = append(scopes, provider.NetworkScope{
+			Provider:    r.Provider,
+			Account:     r.Account,
+			Environment: r.Scope.Environment,
+			Region:      region,
+			Sealed:      r.Scope.EffectiveSealed(),
+		})
+	}
+	return scopes
+}
+
+// scopeVolumes collects the filesystems each scope owns, merged by name
+// (RFC 020 §2.3).
 //
-// The Provider field is deliberately dropped: two providers cannot share
-// a network anyway, and including it would make the conflict check
-// compare an AWS VPC against an Azure VNet, which can no more overlap
-// than two accounts can.
+// Within a scope a volume name identifies one filesystem, so two services
+// naming "uploads" describe one share rather than two empty ones. The
+// merged record deliberately carries no MountPath: a path is where the
+// filesystem appears inside one container, and a shared record has no
+// business holding whichever container happened to be read first.
+//
+// A scope whose resources mount nothing is absent from the result rather
+// than present with an empty slice, so the caller's zero value is already
+// the right answer.
+func scopeVolumes(s spec.Specification) (map[provider.NetworkScope]provider.ScopeContents, error) {
+	declared := make(map[provider.NetworkScope]map[string]declaredVolume)
+
+	for _, r := range s.Resources {
+		for _, scope := range resourceScopes(r) {
+			for _, v := range r.Volumes {
+				byName, ok := declared[scope]
+				if !ok {
+					byName = make(map[string]declaredVolume)
+					declared[scope] = byName
+				}
+
+				merged, err := byName[v.Name].merge(v, r.ID)
+				if err != nil {
+					return nil, fmt.Errorf("%w: scope %q: %w", ErrVolumeConflict, scopeLabel(scope), err)
+				}
+				byName[v.Name] = merged
+			}
+		}
+	}
+	return scopeContents(declared), nil
+}
+
+// declaredVolume is one volume as merged so far. It remembers which
+// resource supplied the size, because a later contradiction has to name
+// both sides for the operator to know where either number was written.
+type declaredVolume struct {
+	sizeGB int
+
+	// sizedBy is the id of the resource that declared sizeGB, empty while
+	// no resource has declared one. That emptiness is the model of "let
+	// the provider decide": it is the absence of an answer, not an answer
+	// of zero.
+	sizedBy string
+}
+
+// merge folds one resource's declaration into what the scope already
+// knows about that volume.
+//
+// An absent size yields to a present one in either direction, since it is
+// not a competing answer. Two different sizes cannot both be honoured, so
+// they are refused here rather than resolved.
+func (d declaredVolume) merge(v spec.Volume, resourceID string) (declaredVolume, error) {
+	if v.SizeGB == 0 {
+		return d, nil
+	}
+	if d.sizedBy == "" {
+		return declaredVolume{sizeGB: v.SizeGB, sizedBy: resourceID}, nil
+	}
+	if d.sizeGB != v.SizeGB {
+		return d, fmt.Errorf("volume %q is declared with size_gb %d by resource %q and %d by resource %q",
+			v.Name, d.sizeGB, d.sizedBy, v.SizeGB, resourceID)
+	}
+	return d, nil
+}
+
+// scopeContents renders the merged declarations as what a provider
+// receives, with each scope's volumes sorted by name. Sorted because the
+// declarations were accumulated in a map, and filesystems reaching the
+// providers in a different order on every run would make one Pulumi
+// program's diff depend on nothing the operator changed.
+func scopeContents(declared map[provider.NetworkScope]map[string]declaredVolume) map[provider.NetworkScope]provider.ScopeContents {
+	contents := make(map[provider.NetworkScope]provider.ScopeContents, len(declared))
+	for scope, byName := range declared {
+		volumes := make([]spec.Volume, 0, len(byName))
+		for name, d := range byName {
+			volumes = append(volumes, spec.Volume{Name: name, SizeGB: d.sizeGB})
+		}
+		sort.Slice(volumes, func(i, j int) bool { return volumes[i].Name < volumes[j].Name })
+		contents[scope] = provider.ScopeContents{Volumes: volumes}
+	}
+	return contents
+}
+
+// addressScopes projects a run of scopes onto the address model, which is
+// the shape network.Check consults. Each element goes through
+// provider.NetworkScopeOf, whose doc comment holds the reason the Provider
+// field is dropped along the way.
 func addressScopes(scopes []provider.NetworkScope) []network.Scope {
 	out := make([]network.Scope, 0, len(scopes))
 	for _, s := range scopes {
-		out = append(out, network.Scope{
-			Account:     s.Account,
-			Environment: s.Environment,
-			Region:      s.Region,
-		})
+		out = append(out, provider.NetworkScopeOf(s))
 	}
 	return out
 }
 
-// addressPolicy translates the Specification's network policy into the
-// address package's own, so that internal/provider/network stays free of
-// spec types and testable on its own terms.
-func addressPolicy(p spec.Policies) network.Policy {
-	if p.Network == nil {
-		return network.Policy{}
-	}
-	return network.Policy{
-		BaseCIDR: p.Network.BaseCIDR,
-		Scopes:   p.Network.Scopes,
-	}
-}
-
 // scopeLabel renders a scope for an error message and for ordering.
 func scopeLabel(s provider.NetworkScope) string {
-	addr := network.Scope{Account: s.Account, Environment: s.Environment, Region: s.Region}
-	label := addr.String()
+	label := provider.NetworkScopeOf(s).String()
 	if label == "" {
 		// An entirely unscoped resource still needs something printable,
 		// or the error names an empty string and tells the reader
@@ -170,6 +252,14 @@ func (e *DefaultEngine) ReapNetworks(ctx context.Context, s spec.Specification) 
 		return nil, nil
 	}
 
+	// The same contents EnsureNetwork was given: a stack is selected by
+	// its program, so a teardown that described the scope differently
+	// would be tearing down a different scope.
+	contents, err := scopeVolumes(s)
+	if err != nil {
+		return nil, err
+	}
+
 	var reaped []provider.NetworkScope
 	for _, scope := range networkScopes(s) {
 		remaining, err := e.occupancy(ctx, scope)
@@ -185,7 +275,7 @@ func (e *DefaultEngine) ReapNetworks(ctx context.Context, s spec.Specification) 
 		if !ok {
 			return reaped, fmt.Errorf("%w: %q", ErrProviderNotFound, scope.Provider)
 		}
-		if err := p.DestroyNetwork(ctx, scope, s.Policies); err != nil {
+		if err := p.DestroyNetwork(ctx, scope, contents[scope], s.Policies); err != nil {
 			return reaped, fmt.Errorf("engine: failed to remove the network for scope %q: %w",
 				scopeLabel(scope), err)
 		}

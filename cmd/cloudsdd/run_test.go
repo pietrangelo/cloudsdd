@@ -82,12 +82,12 @@ func (f *fakeProvider) Destroy(ctx context.Context, r spec.Resource, p spec.Poli
 	return nil
 }
 
-func (f *fakeProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, p spec.Policies) error {
+func (f *fakeProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, c provider.ScopeContents, p spec.Policies) error {
 	f.networkScopes = append(f.networkScopes, s)
 	return nil
 }
 
-func (f *fakeProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, p spec.Policies) error {
+func (f *fakeProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, c provider.ScopeContents, p spec.Policies) error {
 	f.destroyedNetworks = append(f.destroyedNetworks, s)
 	return nil
 }

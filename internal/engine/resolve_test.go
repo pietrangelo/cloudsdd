@@ -59,12 +59,12 @@ func (p *pickyProvider) Destroy(ctx context.Context, r spec.Resource, _ spec.Pol
 	return nil
 }
 
-func (p *pickyProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, _ spec.Policies) error {
+func (p *pickyProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, _ spec.Policies) error {
 	p.operated = append(p.operated, "ensure-network")
 	return nil
 }
 
-func (p *pickyProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, _ spec.Policies) error {
+func (p *pickyProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, _ spec.Policies) error {
 	p.operated = append(p.operated, "destroy-network")
 	return nil
 }

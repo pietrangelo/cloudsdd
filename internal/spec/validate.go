@@ -119,7 +119,7 @@ func Validate(s *Specification) error {
 // (RFC 018 §2.7).
 //
 // The first is the pair (Type, Volumes): every resource type can spell the
-// field, only two have anywhere to mount it. The second is the pair of
+// field, only one has anywhere to mount it. The second is the pair of
 // volumes: within one resource a name and a mount path each identify one
 // filesystem, so a repeat is a Specification that cannot be honoured rather
 // than one that is merely odd — the second entry would have to overwrite

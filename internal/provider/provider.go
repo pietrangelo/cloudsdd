@@ -85,8 +85,9 @@ type CloudProvider interface {
 	Destroy(ctx context.Context, r spec.Resource, p spec.Policies) error
 
 	// EnsureNetwork idempotently provisions the shared network for a
-	// scope, before any resource in that scope is applied (RFC 016 §2.2).
-	// A provider with nothing to share returns nil.
+	// scope, and everything else that scope owns (RFC 016 §2.2, RFC 020
+	// §2.1), before any resource in that scope is applied. A provider
+	// with nothing to share returns nil.
 	//
 	// It exists because a network outlives and precedes the resources in
 	// it, and so cannot be declared inside any one resource's program:
@@ -95,16 +96,26 @@ type CloudProvider interface {
 	// Engine, which is the only component that can see every resource in
 	// a Specification — a provider deciding for itself would have three
 	// concurrent resource programs racing to create one VPC.
-	EnsureNetwork(ctx context.Context, s NetworkScope, p spec.Policies) error
+	//
+	// That same argument is why c is here: a filesystem is shared exactly
+	// as a network is, but a scope cannot say which ones the resources in
+	// it asked for. Only the Engine can, so it tells.
+	EnsureNetwork(ctx context.Context, s NetworkScope, c ScopeContents, p spec.Policies) error
 
-	// DestroyNetwork removes the shared network of a scope (RFC 016
-	// §2.6). A provider with nothing to share returns nil.
+	// DestroyNetwork removes the shared network of a scope, and
+	// everything else that scope owns (RFC 016 §2.6). A provider with
+	// nothing to share returns nil.
 	//
 	// The caller is responsible for establishing that the scope is empty
 	// first. A network is shared, so destroying one that still holds
 	// resources cuts them off from everything, and this method cannot
-	// tell — it sees a scope, not the scope's contents.
-	DestroyNetwork(ctx context.Context, s NetworkScope, p spec.Policies) error
+	// tell — c says what the scope owns, not who is still using it.
+	//
+	// It takes the contents even though a destroy works from recorded
+	// state rather than from the program: a stack cannot be selected
+	// without a program, and passing a different one here than
+	// EnsureNetwork passed would describe a different scope.
+	DestroyNetwork(ctx context.Context, s NetworkScope, c ScopeContents, p spec.Policies) error
 }
 
 // NetworkScope identifies the boundary one shared network serves
@@ -133,4 +144,20 @@ type NetworkScope struct {
 	// sealed scope may not be peered to another, and no scope may ever be
 	// peered across an account boundary regardless of this flag.
 	Sealed bool
+}
+
+// ScopeContents is what the Engine knows about a scope that the scope
+// itself cannot state: what the resources in it need shared (RFC 020
+// §2.2).
+//
+// It is deliberately not a field of NetworkScope. That type is a map key
+// in internal/engine, so it must stay comparable, and a slice would take
+// that away. Keeping the two apart also means the next shared thing a
+// scope owns — a scope-wide secret store, a shared cache — adds a field
+// here rather than another parameter to the methods that carry it.
+type ScopeContents struct {
+	// Volumes are the distinct filesystems the resources in this scope
+	// mount, merged by name (RFC 020 §2.3). Empty for a scope whose
+	// resources mount nothing.
+	Volumes []spec.Volume
 }

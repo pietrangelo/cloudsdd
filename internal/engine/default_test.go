@@ -36,6 +36,12 @@ type mockProvider struct {
 	networkScopes []provider.NetworkScope
 	networkErr    error
 
+	// contents records what each scope was said to own, from whichever
+	// network call carried it (RFC 020 §2.2). One field for both calls
+	// because both are given the same answer for a scope, and a test that
+	// found otherwise would be reporting a bug rather than a difference.
+	contents map[provider.NetworkScope]provider.ScopeContents
+
 	// destroyedNetworks records DestroyNetwork calls, so a test can
 	// assert that a shared network is removed only once its scope is
 	// empty (RFC 016 §2.6).
@@ -59,14 +65,23 @@ func (m *mockProvider) Apply(ctx context.Context, r spec.Resource, p spec.Polici
 	return m.apply, m.applyErr
 }
 
-func (m *mockProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, p spec.Policies) error {
+func (m *mockProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, c provider.ScopeContents, p spec.Policies) error {
 	m.networkScopes = append(m.networkScopes, s)
+	m.recordContents(s, c)
 	return m.networkErr
 }
 
-func (m *mockProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, p spec.Policies) error {
+func (m *mockProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, c provider.ScopeContents, p spec.Policies) error {
 	m.destroyedNetworks = append(m.destroyedNetworks, s)
+	m.recordContents(s, c)
 	return m.destroyNetworkErr
+}
+
+func (m *mockProvider) recordContents(s provider.NetworkScope, c provider.ScopeContents) {
+	if m.contents == nil {
+		m.contents = make(map[provider.NetworkScope]provider.ScopeContents)
+	}
+	m.contents[s] = c
 }
 
 func (m *mockProvider) Destroy(ctx context.Context, r spec.Resource, p spec.Policies) error {

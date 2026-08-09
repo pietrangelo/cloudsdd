@@ -6,6 +6,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -161,6 +162,50 @@ func TestEnsureNetworkCarriesTheScope(t *testing.T) {
 	}
 }
 
+// TestScopeContentsReachTheProvider is the seam RFC 020 §2.2 opens. A
+// scope cannot say which filesystems the resources in it asked for, so a
+// provider that only ever saw the scope could not declare one — and two
+// services naming "uploads" would each quietly create their own.
+//
+// Both network calls are checked. DestroyNetwork works from recorded
+// state, but a stack is selected by its program, so a teardown handed
+// different contents would be describing a different scope.
+func TestScopeContentsReachTheProvider(t *testing.T) {
+	mp := &mockProvider{name: "aws"}
+	e := New(
+		map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mp},
+		WithScopeOccupancy(func(context.Context, provider.NetworkScope) (int, error) { return 0, nil }),
+	)
+
+	s := mountingSpec(
+		mounter{id: "web", env: "dev", region: "eu-central-1",
+			volumes: []spec.Volume{{Name: "uploads", MountPath: "/var/uploads"}}},
+		mounter{id: "worker", env: "dev", region: "eu-central-1",
+			volumes: []spec.Volume{{Name: "uploads", MountPath: "/mnt/shared", SizeGB: 100}}},
+	)
+	scope := provider.NetworkScope{
+		Provider: spec.ProviderAWS, Environment: "dev", Region: "eu-central-1", Sealed: true,
+	}
+	// One filesystem for the two services, sized by whichever of them said
+	// so, and carrying neither service's mount path.
+	want := provider.ScopeContents{Volumes: []spec.Volume{{Name: "uploads", SizeGB: 100}}}
+
+	if _, err := e.Apply(context.Background(), s); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if got := mp.contents[scope]; !reflect.DeepEqual(got, want) {
+		t.Errorf("EnsureNetwork contents = %+v, want %+v", got, want)
+	}
+
+	mp.contents = nil
+	if _, err := e.ReapNetworks(context.Background(), s); err != nil {
+		t.Fatalf("ReapNetworks() error = %v", err)
+	}
+	if got := mp.contents[scope]; !reflect.DeepEqual(got, want) {
+		t.Errorf("DestroyNetwork contents = %+v, want %+v", got, want)
+	}
+}
+
 // TestApplyRefusesOverlappingScopes covers RFC 016 §5.11: an address
 // conflict is reported before anything is created, not discovered after
 // half a Specification has been applied.
@@ -276,6 +321,161 @@ func TestNetworkScopesAreOrdered(t *testing.T) {
 	}
 }
 
+// pinnedImage is an image reference RFC 013 accepts anywhere: a digest
+// names exactly one build, so no registry has to be trusted for it.
+const pinnedImage = "registry.example.com/app@sha256:" +
+	"0000000000000000000000000000000000000000000000000000000000000000"
+
+// mounter describes one container_service for mountingSpec: where it is
+// deployed and what it asks to mount.
+type mounter struct {
+	id      string
+	env     string
+	region  string
+	volumes []spec.Volume
+}
+
+// mountingSpec builds a deploy Specification of container services, all on
+// one provider, so a test row reads as the volumes its resources declare
+// and nothing else.
+//
+// The image is digest-pinned so the fixture survives a full Apply and not
+// only the collector: an unpinned tag from an allow-listed registry is
+// refused by RFC 013's supply-chain rule, which has nothing to say about
+// volumes and should not be what a volume test trips over.
+func mountingSpec(rs ...mounter) spec.Specification {
+	s := spec.Specification{SDDVersion: "1.0", Intent: spec.IntentDeploy}
+	for _, r := range rs {
+		s.Resources = append(s.Resources, spec.Resource{
+			ID:         r.id,
+			Type:       spec.ResourceTypeContainerService,
+			Provider:   spec.ProviderAWS,
+			Scope:      spec.Scope{Environment: r.env, Region: r.region},
+			Properties: map[string]any{"image": pinnedImage},
+			Volumes:    r.volumes,
+		})
+	}
+	return s
+}
+
+// TestScopeVolumes covers RFC 020 §2.3. Within a scope a volume name
+// identifies one filesystem — that is the entire promise of a scope-owned
+// volume, and the failure it prevents is silent: two services both naming
+// "uploads" would otherwise each get their own filesystem and each see an
+// empty directory where the other's files were supposed to be.
+//
+// The merged volume carries no mount path on purpose. A path is where the
+// filesystem appears inside one container, so the scope has none, and
+// keeping whichever resource was read first would put one service's
+// private detail into a shared record.
+func TestScopeVolumes(t *testing.T) {
+	tests := []struct {
+		name string
+		spec spec.Specification
+		// want is keyed by scope label so a failure names a scope a human
+		// recognises rather than printing a struct.
+		want    map[string][]spec.Volume
+		wantMsg []string
+	}{
+		{
+			name: "one name is one filesystem, whatever the mount paths",
+			spec: mountingSpec(
+				mounter{id: "web", env: "dev", region: "eu-central-1", volumes: []spec.Volume{
+					{Name: "uploads", MountPath: "/var/lib/uploads", SizeGB: 100},
+				}},
+				mounter{id: "worker", env: "dev", region: "eu-central-1", volumes: []spec.Volume{
+					{Name: "uploads", MountPath: "/srv/uploads", SizeGB: 100},
+				}},
+				// A scope whose resources mount nothing has no entry at
+				// all, rather than an entry holding an empty slice.
+				mounter{id: "api", env: "staging", region: "eu-central-1"},
+			),
+			want: map[string][]spec.Volume{
+				"aws::dev::eu-central-1": {{Name: "uploads", SizeGB: 100}},
+			},
+		},
+		{
+			name: "an absent size merges with a present one, in either order",
+			spec: mountingSpec(
+				mounter{id: "web", env: "dev", region: "eu-central-1", volumes: []spec.Volume{
+					{Name: "uploads", MountPath: "/var/lib/uploads"},
+					{Name: "cache", MountPath: "/var/cache", SizeGB: 50},
+				}},
+				mounter{id: "worker", env: "dev", region: "eu-central-1", volumes: []spec.Volume{
+					{Name: "uploads", MountPath: "/var/lib/uploads", SizeGB: 200},
+					{Name: "cache", MountPath: "/var/cache"},
+				}},
+			),
+			want: map[string][]spec.Volume{
+				"aws::dev::eu-central-1": {
+					{Name: "cache", SizeGB: 50},
+					{Name: "uploads", SizeGB: 200},
+				},
+			},
+		},
+		{
+			name: "two scopes keep their volumes apart",
+			spec: mountingSpec(
+				mounter{id: "web", env: "dev", region: "eu-central-1", volumes: []spec.Volume{
+					{Name: "uploads", MountPath: "/var/lib/uploads", SizeGB: 100},
+				}},
+				mounter{id: "worker", env: "prod", region: "eu-central-1", volumes: []spec.Volume{
+					{Name: "uploads", MountPath: "/var/lib/uploads", SizeGB: 200},
+				}},
+			),
+			want: map[string][]spec.Volume{
+				"aws::dev::eu-central-1":  {{Name: "uploads", SizeGB: 100}},
+				"aws::prod::eu-central-1": {{Name: "uploads", SizeGB: 200}},
+			},
+		},
+		{
+			name: "one volume declared with two sizes is refused",
+			spec: mountingSpec(
+				mounter{id: "web", env: "dev", region: "eu-central-1", volumes: []spec.Volume{
+					{Name: "uploads", MountPath: "/var/lib/uploads", SizeGB: 100},
+				}},
+				mounter{id: "worker", env: "dev", region: "eu-central-1", volumes: []spec.Volume{
+					{Name: "uploads", MountPath: "/srv/uploads", SizeGB: 200},
+				}},
+			),
+			// Both sizes and both resource ids: without all four the
+			// operator knows a volume is contradictory but not where
+			// either number was written.
+			wantMsg: []string{"aws::dev::eu-central-1", `"uploads"`, "100", "200", `"web"`, `"worker"`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := scopeVolumes(tt.spec)
+
+			if len(tt.wantMsg) > 0 {
+				if !errors.Is(err, ErrVolumeConflict) {
+					t.Fatalf("scopeVolumes() error = %v, want ErrVolumeConflict", err)
+				}
+				for _, want := range tt.wantMsg {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %q, want it to name %s", err, want)
+					}
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("scopeVolumes() error = %v", err)
+			}
+
+			byLabel := make(map[string][]spec.Volume, len(got))
+			for scope, contents := range got {
+				byLabel[scopeLabel(scope)] = contents.Volumes
+			}
+			if !reflect.DeepEqual(byLabel, tt.want) {
+				t.Errorf("volumes = %+v, want %+v", byLabel, tt.want)
+			}
+		})
+	}
+}
+
 // orderingProvider records the sequence of operations rather than their
 // arguments.
 type orderingProvider struct {
@@ -303,12 +503,12 @@ func (p *orderingProvider) Destroy(context.Context, spec.Resource, spec.Policies
 	return nil
 }
 
-func (p *orderingProvider) EnsureNetwork(context.Context, provider.NetworkScope, spec.Policies) error {
+func (p *orderingProvider) EnsureNetwork(context.Context, provider.NetworkScope, provider.ScopeContents, spec.Policies) error {
 	p.record("ensure-network")
 	return nil
 }
 
-func (p *orderingProvider) DestroyNetwork(context.Context, provider.NetworkScope, spec.Policies) error {
+func (p *orderingProvider) DestroyNetwork(context.Context, provider.NetworkScope, provider.ScopeContents, spec.Policies) error {
 	p.record("destroy-network")
 	return nil
 }

@@ -91,7 +91,10 @@ const defaultRoute = "0.0.0.0/0"
 // second call converges on what the first created. The Engine calls it
 // once per scope before applying anything in that scope, so a resource
 // program may assume the network exists.
-func (p *AWSProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, policies spec.Policies) error {
+//
+// The scope's contents are not read yet: this stack declares no
+// filesystem until RFC 020 §2.5 lands EFS here.
+func (p *AWSProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, policies spec.Policies) error {
 	// A scope with no region has no VPC. object_storage and
 	// cross_account_role are the only resources that reach here without
 	// one, and neither lives in a network.
@@ -424,7 +427,7 @@ func (p *AWSProvider) networkProgram(s provider.NetworkScope, cidr netip.Prefix)
 // The Engine establishes that the scope is empty before calling this.
 // Nothing here can check: a scope's contents live in other stacks, and
 // this one knows only about the network.
-func (p *AWSProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, policies spec.Policies) error {
+func (p *AWSProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, policies spec.Policies) error {
 	if s.Region == "" {
 		return nil
 	}

@@ -86,7 +86,10 @@ var networkingByEngine = map[string]engineNetworking{
 // database a VNet containing nothing but itself, which is private and
 // also useless: there was no way to put an application next to the
 // database it was meant to talk to.
-func (p *AzureProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, policies spec.Policies) error {
+//
+// The scope's contents are not read yet: this stack declares no
+// filesystem until RFC 020 §2.5 lands Azure Files here.
+func (p *AzureProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, policies spec.Policies) error {
 	// object_storage reaches here without a region on some scopes and
 	// lives in no network.
 	if s.Region == "" {
@@ -466,7 +469,7 @@ func subnetBlock(cidr netip.Prefix, index int) (netip.Prefix, error) {
 // The Engine establishes that the scope is empty before calling this.
 // Nothing here can check: a scope's contents live in other stacks, and
 // this one knows only about the network.
-func (p *AzureProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, policies spec.Policies) error {
+func (p *AzureProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, policies spec.Policies) error {
 	if s.Region == "" {
 		return nil
 	}

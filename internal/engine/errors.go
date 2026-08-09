@@ -61,6 +61,16 @@ var ErrIntentMismatch = errors.New("engine: specification intent does not permit
 // them.
 var ErrResourceNotSchedulable = errors.New("engine: resource type does not support a power schedule")
 
+// ErrVolumeConflict indicates that one volume name is declared with two
+// different sizes within a single scope (RFC 020 §2.3).
+//
+// A refusal rather than a winner, because there is no honest way to pick:
+// a name identifies one filesystem, one filesystem has one size, and
+// honouring either number would silently discard the other. The wrapped
+// message names both sizes and both resources, since the operator has to
+// go and change one of the two declarations.
+var ErrVolumeConflict = errors.New("engine: conflicting volume declaration")
+
 // ErrIncompleteBuildSource indicates a build_pipeline missing one of the
 // properties the Engine needs to resolve what will be built (RFC 018
 // §2.4.1).

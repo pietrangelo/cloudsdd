@@ -56,24 +56,29 @@ func (t ResourceType) SupportsSchedule() bool {
 }
 
 // MountsFilesystem reports whether the ResourceType has somewhere to mount
-// a Volume (RFC 018 §2.7).
+// a Volume (RFC 020 §2.4, narrowing RFC 018 §2.7).
 //
 // Like SupportsSchedule, this is a property of the type and not of the
 // cloud: a database manages its own storage, an object store is reached by
-// SDK and not by path, and an IAM role has no filesystem at all. The two
-// types that run a container image are the two that can be handed a
-// directory inside it.
+// SDK and not by path, and an IAM role has no filesystem at all. A
+// container_service runs a long-lived image and can be handed a directory
+// inside it, so it is the one type that mounts.
 //
-// A compute_instance is deliberately not one of them. It has a filesystem,
-// but attaching a shared one to a VM means the guest OS mounts it at boot,
-// which is a machine-image concern rather than a resource declaration.
+// A build_pipeline was the second until RFC 020 §2.4 withdrew it, and the
+// reason is worth keeping here because it is not an implementation gap a
+// later commit should close. Cloud Build and ACR Tasks cannot mount a
+// filesystem at all. CodeBuild can, but only for a build placed inside the
+// VPC — and RFC 018 runs the build in CodeBuild's own managed network on
+// purpose. Honouring the field would mean two providers refusing it and
+// the third contradicting RFC 018. A pipeline that wants a cache wants
+// each service's native build cache, which is a different feature.
+//
+// A compute_instance is deliberately not one of them either. It has a
+// filesystem, but attaching a shared one to a VM means the guest OS mounts
+// it at boot, which is a machine-image concern rather than a resource
+// declaration.
 func (t ResourceType) MountsFilesystem() bool {
-	switch t {
-	case ResourceTypeContainerService, ResourceTypeBuildPipeline:
-		return true
-	default:
-		return false
-	}
+	return t == ResourceTypeContainerService
 }
 
 // SupportsScheduleOn narrows SupportsSchedule to one cloud (RFC 017 §2.5).
