@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"cloudsdd/internal/spec"
@@ -167,6 +168,194 @@ func TestAWSProvider_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAWSProvider_ValidateRegionPath pins the premise of RFC 019 §2.3:
+// every regional ResourceType reaches the same three region checks —
+// required, well-formed, allowed by policy — so those checks belong once,
+// after the switch, rather than repeated inside each case.
+//
+// The one asymmetry the hoist cannot absorb gets its own subtest:
+// cross_account_role is global (IAM has no region, RFC 003 §2.3), so it
+// refuses scoping instead of requiring it and must return from inside the
+// switch, never reaching the hoisted block at all.
+func TestAWSProvider_ValidateRegionPath(t *testing.T) {
+	p := &AWSProvider{}
+
+	// Each entry is a valid resource of its type in every respect except
+	// the scope, which the region cases below supply.
+	regional := []struct {
+		name  string
+		build func(spec.Scope) spec.Resource
+	}{
+		{
+			name: "relational_database",
+			build: func(scope spec.Scope) spec.Resource {
+				return spec.Resource{
+					ID: "app-db", Type: spec.ResourceTypeRelationalDatabase, Provider: spec.ProviderAWS,
+					Scope:      scope,
+					Properties: map[string]any{"engine": "postgres", "version": "15"},
+				}
+			},
+		},
+		{
+			name: "compute_instance",
+			build: func(scope spec.Scope) spec.Resource {
+				return spec.Resource{
+					ID: "build-agent", Type: spec.ResourceTypeComputeInstance, Provider: spec.ProviderAWS,
+					Scope:      scope,
+					Properties: map[string]any{"size": "small", "os": "ubuntu-22.04"},
+				}
+			},
+		},
+		{
+			name: "container_service",
+			build: func(scope spec.Scope) spec.Resource {
+				return containerResource(func(r *spec.Resource) { r.Scope = scope })
+			},
+		},
+		{
+			name: "build_pipeline",
+			build: func(scope spec.Scope) spec.Resource {
+				return spec.Resource{
+					ID: "api-build", Type: spec.ResourceTypeBuildPipeline, Provider: spec.ProviderAWS,
+					Scope:      scope,
+					Properties: pipelineProperties(),
+				}
+			},
+		},
+		{
+			name: "object_storage",
+			build: func(scope spec.Scope) spec.Resource {
+				return spec.Resource{
+					ID: "app-data", Type: spec.ResourceTypeObjectStorage, Provider: spec.ProviderAWS,
+					Scope:      scope,
+					Properties: map[string]any{"bucket_name": "app-data"},
+				}
+			},
+		},
+	}
+
+	regionCases := []struct {
+		name     string
+		scope    spec.Scope
+		policies spec.Policies
+		wantErr  error  // matched with errors.Is when non-nil
+		wantMsg  string // matched as a substring when wantErr is nil
+	}{
+		{
+			name:    "no region at all",
+			scope:   spec.Scope{},
+			wantErr: ErrRegionRequired,
+		},
+		{
+			// The format check has no sentinel of its own, so the message
+			// is the only thing there is to assert on.
+			name:    "a region in another cloud's format",
+			scope:   spec.Scope{Region: "europe-west1"},
+			wantMsg: "is not a valid AWS region",
+		},
+		{
+			name:     "a region outside allowed_regions",
+			scope:    spec.Scope{Region: "eu-central-1"},
+			policies: spec.Policies{AllowedRegions: []string{"us-east-1"}},
+			wantErr:  ErrRegionNotAllowed,
+		},
+		{
+			name:     "a region the policy allows",
+			scope:    spec.Scope{Region: "eu-central-1"},
+			policies: spec.Policies{AllowedRegions: []string{"eu-central-1"}},
+		},
+	}
+
+	for _, rt := range regional {
+		for _, rc := range regionCases {
+			t.Run(rt.name+"/"+rc.name, func(t *testing.T) {
+				err := p.Validate(context.Background(), rt.build(rc.scope), rc.policies)
+
+				switch {
+				case rc.wantErr != nil:
+					if !errors.Is(err, rc.wantErr) {
+						t.Fatalf("Validate() error = %v, want errors.Is %v", err, rc.wantErr)
+					}
+				case rc.wantMsg != "":
+					if err == nil || !strings.Contains(err.Error(), rc.wantMsg) {
+						t.Fatalf("Validate() error = %v, want it to contain %q", err, rc.wantMsg)
+					}
+				default:
+					if err != nil {
+						t.Fatalf("Validate() error = %v, want nil", err)
+					}
+				}
+			})
+		}
+	}
+
+	t.Run("cross_account_role stays off the regional path", func(t *testing.T) {
+		role := func(scope spec.Scope) spec.Resource {
+			return spec.Resource{
+				ID: "partner-access", Type: spec.ResourceTypeCrossAccountRole, Provider: spec.ProviderAWS,
+				Scope:      scope,
+				Properties: validCrossAccountRoleProps(),
+			}
+		}
+		unsealed := spec.Scope{Sealed: boolPtr(false)}
+		allowed := spec.Policies{AllowedRegions: []string{"eu-central-1"}}
+
+		tests := []struct {
+			name     string
+			resource spec.Resource
+			policies spec.Policies
+			wantErr  error
+		}{
+			{
+				name:     "a region is refused",
+				resource: role(spec.Scope{Sealed: boolPtr(false), Region: "eu-central-1"}),
+				policies: allowed,
+				wantErr:  ErrGlobalResourceScoped,
+			},
+			{
+				name:     "a region list is refused",
+				resource: role(spec.Scope{Sealed: boolPtr(false), Regions: []string{"eu-central-1"}}),
+				policies: allowed,
+				wantErr:  ErrGlobalResourceScoped,
+			},
+			{
+				name:     "zones are refused",
+				resource: role(spec.Scope{Sealed: boolPtr(false), Zones: []string{"eu-central-1a"}}),
+				policies: allowed,
+				wantErr:  ErrGlobalResourceScoped,
+			},
+			{
+				name:     "a missing region policy is refused",
+				resource: role(unsealed),
+				policies: spec.Policies{},
+				wantErr:  ErrMissingRegionPolicy,
+			},
+			{
+				// The proof that the hoisted block is never reached: a
+				// role with no region of any kind validates cleanly.
+				name:     "no region at all is accepted",
+				resource: role(unsealed),
+				policies: allowed,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				err := p.Validate(context.Background(), tt.resource, tt.policies)
+				if tt.wantErr == nil {
+					if err != nil {
+						t.Fatalf("Validate() error = %v, want nil", err)
+					}
+					return
+				}
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("Validate() error = %v, want errors.Is %v", err, tt.wantErr)
+				}
+			})
+		}
+	})
 }
 
 // TestAWSProvider_resourceProgram exercises the construction of the

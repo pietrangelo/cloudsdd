@@ -101,13 +101,6 @@ func (p *AWSProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 		if _, err := decodeRelationalDatabaseProperties(r.Properties); err != nil {
 			return err
 		}
-		if r.Scope.Region == "" {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrRegionRequired)
-		}
-		if err := validateAWSRegionFormat(r.Scope.Region); err != nil {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
-		}
-		return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
 
 	case spec.ResourceTypeComputeInstance:
 		if _, err := decodeComputeInstanceProperties(r.Properties); err != nil {
@@ -118,13 +111,6 @@ func (p *AWSProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 		if _, err := compute.Zone(r.Scope.Zones); err != nil {
 			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
 		}
-		if r.Scope.Region == "" {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrRegionRequired)
-		}
-		if err := validateAWSRegionFormat(r.Scope.Region); err != nil {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
-		}
-		return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
 
 	case spec.ResourceTypeContainerService:
 		if _, err := decodeContainerServiceProperties(r.Properties, policies.AllowedRegistries); err != nil {
@@ -132,16 +118,9 @@ func (p *AWSProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 		}
 		// Fargate places tasks itself across the subnets it is given, so a
 		// pinned zone is a placement the user asked for and will not get.
-		if len(r.Scope.Zones) > 0 {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrZonesNotSupported)
+		if err := refuseZones(r); err != nil {
+			return err
 		}
-		if r.Scope.Region == "" {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrRegionRequired)
-		}
-		if err := validateAWSRegionFormat(r.Scope.Region); err != nil {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
-		}
-		return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
 
 	case spec.ResourceTypeBuildPipeline:
 		if _, err := decodeBuildPipelineProperties(r.Properties); err != nil {
@@ -150,32 +129,23 @@ func (p *AWSProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 		// CodeBuild places the build container itself, and the registry is
 		// regional. A pinned zone is a placement the user asked for and
 		// will not get.
-		if len(r.Scope.Zones) > 0 {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrZonesNotSupported)
+		if err := refuseZones(r); err != nil {
+			return err
 		}
-		if r.Scope.Region == "" {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrRegionRequired)
-		}
-		if err := validateAWSRegionFormat(r.Scope.Region); err != nil {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
-		}
-		return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
 
 	case spec.ResourceTypeObjectStorage:
 		if _, err := decodeS3Properties(r.Properties); err != nil {
 			return err
 		}
-		if len(r.Scope.Zones) > 0 {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrZonesNotSupported)
+		// A bucket is regional and S3 spreads it across the region's zones
+		// on its own. A pinned zone is a placement the user asked for and
+		// will not get.
+		if err := refuseZones(r); err != nil {
+			return err
 		}
-		if r.Scope.Region == "" {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, ErrRegionRequired)
-		}
-		if err := validateAWSRegionFormat(r.Scope.Region); err != nil {
-			return fmt.Errorf("aws: resource %q: %w", r.ID, err)
-		}
-		return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
 
+	// IAM is global (RFC 003 §2.3), so this type is not on the regional
+	// path below and returns from here.
 	case spec.ResourceTypeCrossAccountRole:
 		if _, err := decodeCrossAccountRoleProperties(r.Properties); err != nil {
 			return err
@@ -194,6 +164,26 @@ func (p *AWSProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 	default:
 		return fmt.Errorf("aws: resource %q: %w: %q", r.ID, ErrUnsupportedResourceType, r.Type)
 	}
+
+	// Every ResourceType still here is regional: it must name a region,
+	// that region must be well-formed, and the Policies must allow it.
+	if r.Scope.Region == "" {
+		return fmt.Errorf("aws: resource %q: %w", r.ID, ErrRegionRequired)
+	}
+	if err := validateAWSRegionFormat(r.Scope.Region); err != nil {
+		return fmt.Errorf("aws: resource %q: %w", r.ID, err)
+	}
+	return validateRegionAllowed(r.Scope.Region, policies.AllowedRegions)
+}
+
+// refuseZones rejects a Scope.Zones pin on a ResourceType that chooses its
+// own placement. The rule is shared; the *reason* is not, so each caller
+// keeps its own comment saying which AWS service does the placing.
+func refuseZones(r spec.Resource) error {
+	if len(r.Scope.Zones) > 0 {
+		return fmt.Errorf("aws: resource %q: %w", r.ID, ErrZonesNotSupported)
+	}
+	return nil
 }
 
 // Plan computes the Diff for the resource via Pulumi Preview (RFC 002
