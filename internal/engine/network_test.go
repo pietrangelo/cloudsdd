@@ -131,11 +131,11 @@ func TestEnsureNetworkCarriesTheScope(t *testing.T) {
 	mp := &mockProvider{name: "aws"}
 	e := New(
 		map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mp},
-		WithDeploymentTargets(map[string]DeploymentTarget{
+		WithDeploymentTargets(map[string]provider.DeploymentTarget{
 			"prod-account": {Name: "prod-account", Provider: spec.ProviderAWS, Enabled: true},
 		}),
 		WithTargetProviderFactory(spec.ProviderAWS,
-			func(context.Context, DeploymentTarget) (provider.CloudProvider, error) { return mp, nil }),
+			func(context.Context, provider.DeploymentTarget) (provider.CloudProvider, error) { return mp, nil }),
 	)
 
 	s := scopedSpec([2]string{"live", "eu-central-1"})
@@ -206,12 +206,12 @@ func TestAccountsMayShareARange(t *testing.T) {
 	mp := &mockProvider{name: "aws"}
 	e := New(
 		map[spec.Provider]provider.CloudProvider{spec.ProviderAWS: mp},
-		WithDeploymentTargets(map[string]DeploymentTarget{
+		WithDeploymentTargets(map[string]provider.DeploymentTarget{
 			"acct-a": {Name: "acct-a", Provider: spec.ProviderAWS, Enabled: true},
 			"acct-b": {Name: "acct-b", Provider: spec.ProviderAWS, Enabled: true},
 		}),
 		WithTargetProviderFactory(spec.ProviderAWS,
-			func(context.Context, DeploymentTarget) (provider.CloudProvider, error) { return mp, nil }),
+			func(context.Context, provider.DeploymentTarget) (provider.CloudProvider, error) { return mp, nil }),
 	)
 
 	s := scopedSpec(

@@ -283,27 +283,27 @@ func specWithAccount(account string) spec.Specification {
 func TestDefaultEngine_ResolveTargetProvider(t *testing.T) {
 	targetProvider := &mockProvider{name: "aws-target"}
 	factoryCalls := 0
-	factory := func(ctx context.Context, target DeploymentTarget) (provider.CloudProvider, error) {
+	factory := func(ctx context.Context, target provider.DeploymentTarget) (provider.CloudProvider, error) {
 		factoryCalls++
 		return targetProvider, nil
 	}
 
 	tests := []struct {
 		name    string
-		targets map[string]DeploymentTarget
+		targets map[string]provider.DeploymentTarget
 		opts    []Option
 		account string
 		wantErr error
 	}{
 		{
 			name:    "account references unknown target",
-			targets: map[string]DeploymentTarget{},
+			targets: map[string]provider.DeploymentTarget{},
 			account: "prod",
 			wantErr: ErrDeploymentTargetNotFound,
 		},
 		{
 			name: "disabled target rejected without contacting factory",
-			targets: map[string]DeploymentTarget{
+			targets: map[string]provider.DeploymentTarget{
 				"prod": {Name: "prod", Provider: spec.ProviderAWS, Enabled: false},
 			},
 			account: "prod",
@@ -311,7 +311,7 @@ func TestDefaultEngine_ResolveTargetProvider(t *testing.T) {
 		},
 		{
 			name: "provider mismatch rejected",
-			targets: map[string]DeploymentTarget{
+			targets: map[string]provider.DeploymentTarget{
 				"prod": {Name: "prod", Provider: spec.ProviderGCP, Enabled: true},
 			},
 			account: "prod",
@@ -319,7 +319,7 @@ func TestDefaultEngine_ResolveTargetProvider(t *testing.T) {
 		},
 		{
 			name: "enabled target without registered factory",
-			targets: map[string]DeploymentTarget{
+			targets: map[string]provider.DeploymentTarget{
 				"prod": {Name: "prod", Provider: spec.ProviderAWS, Enabled: true},
 			},
 			account: "prod",
@@ -340,7 +340,7 @@ func TestDefaultEngine_ResolveTargetProvider(t *testing.T) {
 	t.Run("enabled target with factory is used and cached", func(t *testing.T) {
 		e := New(
 			map[spec.Provider]provider.CloudProvider{},
-			WithDeploymentTargets(map[string]DeploymentTarget{
+			WithDeploymentTargets(map[string]provider.DeploymentTarget{
 				"prod": {Name: "prod", Provider: spec.ProviderAWS, Enabled: true},
 			}),
 			WithTargetProviderFactory(spec.ProviderAWS, factory),

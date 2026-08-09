@@ -362,56 +362,8 @@ func TestDestroyNetworkRefusesAnUnusableAddressPlan(t *testing.T) {
 	}
 }
 
-// TestResourceScope: the scope a resource's network is looked up by has to
-// be derived from the same three fields the network stack was named for,
-// or a resource looks for a network nobody built.
-//
-// It carries Account as well as Environment and Region because a
-// DeploymentTarget is a separate credential boundary (RFC 004 §2.2): two
-// accounts with the same environment name have different networks.
-func TestResourceScope(t *testing.T) {
-	tests := []struct {
-		name     string
-		resource spec.Resource
-		want     provider.NetworkScope
-	}{
-		{
-			name: "fully scoped",
-			resource: spec.Resource{
-				Account: "prod",
-				Scope:   spec.Scope{Environment: "live", Region: "westeurope"},
-			},
-			want: provider.NetworkScope{
-				Provider:    spec.ProviderAzure,
-				Account:     "prod",
-				Environment: "live",
-				Region:      "westeurope",
-			},
-		},
-		{
-			// Legal, and it means "I have not told CloudSDD where this
-			// belongs" (RFC 016 §7.4). It must still derive a scope rather
-			// than an error.
-			name:     "unscoped",
-			resource: spec.Resource{},
-			want:     provider.NetworkScope{Provider: spec.ProviderAzure},
-		},
-		{
-			// Zones are not part of the network scope: a network spans the
-			// region, not one zone within it.
-			name: "zones do not narrow the network",
-			resource: spec.Resource{
-				Scope: spec.Scope{Region: "westeurope", Zones: []string{"1", "2"}},
-			},
-			want: provider.NetworkScope{Provider: spec.ProviderAzure, Region: "westeurope"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := resourceScope(tt.resource); got != tt.want {
-				t.Errorf("resourceScope() = %+v, want %+v", got, tt.want)
-			}
-		})
-	}
-}
+// TestResourceScope moved with the function it covered: the local
+// resourceScope is now provider.ResourceScope (RFC 019 §2.4), and
+// TestResourceScope in internal/provider/scope_test.go asserts the same
+// three cases against all three provider constants rather than Azure's
+// alone.

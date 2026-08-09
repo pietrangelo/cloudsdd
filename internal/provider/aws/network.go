@@ -99,7 +99,7 @@ func (p *AWSProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope
 		return nil
 	}
 
-	cidr, err := network.Derive(networkScope(s), addressPolicy(policies))
+	cidr, err := network.Derive(provider.NetworkScopeOf(s), provider.AddressPolicyOf(policies))
 	if err != nil {
 		return err
 	}
@@ -380,14 +380,15 @@ func subnetBlock(cidr netip.Prefix, index int) (netip.Prefix, error) {
 
 // scopeTag renders the scope as the CloudSDDScope tag value, and as the
 // label in error messages.
+//
+// It is provider.ScopeName under the name this provider needs: on AWS the
+// label is not only prose, it is the value a resource program searches the
+// account by. That is also why the shared form's "default" fallback
+// matters more here than elsewhere — a scope with no account and no
+// environment is still a scope, and an empty tag value would make its
+// network unfindable.
 func scopeTag(s provider.NetworkScope) string {
-	label := networkScope(s).String()
-	if label == "" {
-		// A scope with no account and no environment is still a scope;
-		// an empty tag value would make it unfindable.
-		return "default"
-	}
-	return label
+	return provider.ScopeName(s)
 }
 
 // scopeTags is the tag set every network resource carries, plus whatever
@@ -401,24 +402,6 @@ func scopeTags(s provider.NetworkScope, extra map[string]string) pulumi.StringMa
 		tags[k] = pulumi.String(v)
 	}
 	return tags
-}
-
-// networkScope projects a provider scope onto the address model.
-func networkScope(s provider.NetworkScope) network.Scope {
-	return network.Scope{
-		Account:     s.Account,
-		Environment: s.Environment,
-		Region:      s.Region,
-	}
-}
-
-// addressPolicy translates the Specification's network policy for the
-// address package, which stays free of spec types.
-func addressPolicy(p spec.Policies) network.Policy {
-	if p.Network == nil {
-		return network.Policy{}
-	}
-	return network.Policy{BaseCIDR: p.Network.BaseCIDR, Scopes: p.Network.Scopes}
 }
 
 // networkProgram is the scope network's Pulumi program, shared by
@@ -446,7 +429,7 @@ func (p *AWSProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScop
 		return nil
 	}
 
-	cidr, err := network.Derive(networkScope(s), addressPolicy(policies))
+	cidr, err := network.Derive(provider.NetworkScopeOf(s), provider.AddressPolicyOf(policies))
 	if err != nil {
 		return err
 	}

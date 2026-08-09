@@ -5,9 +5,7 @@ package gcp
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"math"
 	"net/netip"
@@ -70,7 +68,7 @@ func (p *GCPProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope
 		return nil
 	}
 
-	cidr, err := network.Derive(networkScope(s), addressPolicy(policies))
+	cidr, err := network.Derive(provider.NetworkScopeOf(s), provider.AddressPolicyOf(policies))
 	if err != nil {
 		return err
 	}
@@ -81,10 +79,10 @@ func (p *GCPProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope
 
 	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", program)
 	if err != nil {
-		return fmt.Errorf("gcp: failed to prepare the network stack for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("gcp: failed to prepare the network stack for scope %q: %w", provider.ScopeName(s), err)
 	}
 	if _, err := stack.Up(ctx); err != nil {
-		return fmt.Errorf("gcp: failed to provision the network for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("gcp: failed to provision the network for scope %q: %w", provider.ScopeName(s), err)
 	}
 	return nil
 }
@@ -105,15 +103,15 @@ func declareScopeNetwork(
 		Name:                  pulumi.String(name),
 		AutoCreateSubnetworks: pulumi.Bool(false),
 		Description: pulumi.String(fmt.Sprintf(
-			"CloudSDD network for scope %s", scopeName(s))),
+			"CloudSDD network for scope %s", provider.ScopeName(s))),
 	})
 	if err != nil {
-		return fmt.Errorf("gcp: failed to declare the network for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("gcp: failed to declare the network for scope %q: %w", provider.ScopeName(s), err)
 	}
 
 	workload, err := subnetBlock(cidr, 0)
 	if err != nil {
-		return fmt.Errorf("gcp: scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("gcp: scope %q: %w", provider.ScopeName(s), err)
 	}
 	subnet, err := gcpcompute.NewSubnetwork(ctx, name+"-subnet", &gcpcompute.SubnetworkArgs{
 		Name:        pulumi.String(name + "-subnet"),
@@ -126,7 +124,7 @@ func declareScopeNetwork(
 		PrivateIpGoogleAccess: pulumi.Bool(true),
 	})
 	if err != nil {
-		return fmt.Errorf("gcp: failed to declare the subnet for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("gcp: failed to declare the subnet for scope %q: %w", provider.ScopeName(s), err)
 	}
 
 	if err := declareScopeEgress(ctx, s, vpc, subnet); err != nil {
@@ -140,7 +138,7 @@ func declareScopeNetwork(
 	// outside it and could overlap another scope.
 	peering, err := subnetBlock(cidr, 1)
 	if err != nil {
-		return fmt.Errorf("gcp: scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("gcp: scope %q: %w", provider.ScopeName(s), err)
 	}
 	peeringRange, err := gcpcompute.NewGlobalAddress(ctx, name+"-peering", &gcpcompute.GlobalAddressArgs{
 		Name:         pulumi.String(name + "-peering"),
@@ -151,7 +149,7 @@ func declareScopeNetwork(
 		Network:      vpc.ID(),
 	})
 	if err != nil {
-		return fmt.Errorf("gcp: failed to reserve the peering range for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("gcp: failed to reserve the peering range for scope %q: %w", provider.ScopeName(s), err)
 	}
 
 	// Without this connection the reserved range is just a reservation:
@@ -164,7 +162,7 @@ func declareScopeNetwork(
 			ReservedPeeringRanges: pulumi.StringArray{peeringRange.Name},
 		}); err != nil {
 		return fmt.Errorf("gcp: failed to peer the network for scope %q with %s: %w",
-			scopeName(s), peeringService, err)
+			provider.ScopeName(s), peeringService, err)
 	}
 
 	// No firewall rules are declared here. GCP rules are allow-only and a
@@ -200,10 +198,10 @@ func declareScopeEgress(
 		Network: vpc.ID(),
 		Region:  pulumi.String(s.Region),
 		Description: pulumi.String(fmt.Sprintf(
-			"CloudSDD egress router for scope %s", scopeName(s))),
+			"CloudSDD egress router for scope %s", provider.ScopeName(s))),
 	})
 	if err != nil {
-		return fmt.Errorf("gcp: failed to declare the router for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("gcp: failed to declare the router for scope %q: %w", provider.ScopeName(s), err)
 	}
 
 	if _, err := gcpcompute.NewRouterNat(ctx, name+"-nat", &gcpcompute.RouterNatArgs{
@@ -219,7 +217,7 @@ func declareScopeEgress(
 			},
 		},
 	}); err != nil {
-		return fmt.Errorf("gcp: failed to declare the nat for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("gcp: failed to declare the nat for scope %q: %w", provider.ScopeName(s), err)
 	}
 	return nil
 }
@@ -266,7 +264,7 @@ func subnetBlock(cidr netip.Prefix, index int) (netip.Prefix, error) {
 func scopeNetworkName(s provider.NetworkScope) string {
 	var b strings.Builder
 	b.WriteString("cloudsdd-")
-	for _, r := range strings.ToLower(scopeName(s)) {
+	for _, r := range strings.ToLower(provider.ScopeName(s)) {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
 			b.WriteRune(r)
@@ -281,59 +279,9 @@ func scopeNetworkName(s provider.NetworkScope) string {
 		// tail is replaced by a hash of the whole name rather than
 		// dropped. Distinct scopes keep distinct networks, which is the
 		// property that matters.
-		name = name[:54] + "-" + shortHash(name)
+		name = name[:54] + "-" + provider.ShortHash(name)
 	}
 	return strings.TrimRight(name, "-")
-}
-
-// scopeName is the scope's label, used in names and error messages.
-func scopeName(s provider.NetworkScope) string {
-	label := networkScope(s).String()
-	if label == "" {
-		return "default"
-	}
-	return label
-}
-
-// networkScope projects a provider scope onto the address model.
-func networkScope(s provider.NetworkScope) network.Scope {
-	return network.Scope{
-		Account:     s.Account,
-		Environment: s.Environment,
-		Region:      s.Region,
-	}
-}
-
-// addressPolicy translates the Specification's network policy for the
-// address package, which stays free of spec types.
-func addressPolicy(p spec.Policies) network.Policy {
-	if p.Network == nil {
-		return network.Policy{}
-	}
-	return network.Policy{BaseCIDR: p.Network.BaseCIDR, Scopes: p.Network.Scopes}
-}
-
-// shortHash is a stable 8-character tag used to keep two long scope names
-// from colliding after truncation.
-func shortHash(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:4])
-}
-
-// resourceScope is the network scope a resource belongs to.
-//
-// GCP needs no lookup to find its network: names are unique within a
-// project and resolvable directly, so the resource program derives the
-// same name the network stack used from the same inputs. That is one
-// fewer invoke than the AWS provider needs, and one fewer way for the two
-// halves to disagree.
-func resourceScope(r spec.Resource) provider.NetworkScope {
-	return provider.NetworkScope{
-		Provider:    spec.ProviderGCP,
-		Account:     r.Account,
-		Environment: r.Scope.Environment,
-		Region:      r.Scope.Region,
-	}
 }
 
 // DestroyNetwork removes the scope's network stack (RFC 016 §2.6).
@@ -346,7 +294,7 @@ func (p *GCPProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScop
 		return nil
 	}
 
-	cidr, err := network.Derive(networkScope(s), addressPolicy(policies))
+	cidr, err := network.Derive(provider.NetworkScopeOf(s), provider.AddressPolicyOf(policies))
 	if err != nil {
 		return err
 	}
@@ -356,10 +304,10 @@ func (p *GCPProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScop
 	}
 	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", program)
 	if err != nil {
-		return fmt.Errorf("gcp: failed to select the network stack for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("gcp: failed to select the network stack for scope %q: %w", provider.ScopeName(s), err)
 	}
 	if _, err := stack.Destroy(ctx); err != nil {
-		return fmt.Errorf("gcp: failed to destroy the network for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("gcp: failed to destroy the network for scope %q: %w", provider.ScopeName(s), err)
 	}
 	return nil
 }

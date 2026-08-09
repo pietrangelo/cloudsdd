@@ -182,7 +182,7 @@ func (p *AzureProvider) resourceProgram(r spec.Resource, policies spec.Policies)
 			return nil, "", err
 		}
 		return func(ctx *pulumi.Context) error {
-			server, err := declareRelationalDatabase(ctx, r.ID, region, resourceScope(r), *props)
+			server, err := declareRelationalDatabase(ctx, r.ID, region, provider.ResourceScope(spec.ProviderAzure, r), *props)
 			if err != nil {
 				return err
 			}
@@ -205,7 +205,7 @@ func (p *AzureProvider) resourceProgram(r spec.Resource, policies spec.Policies)
 			return nil, "", err
 		}
 		return func(ctx *pulumi.Context) error {
-			_, err := declareComputeInstance(ctx, r.ID, region, zone, resourceScope(r), *props, rules)
+			_, err := declareComputeInstance(ctx, r.ID, region, zone, provider.ResourceScope(spec.ProviderAzure, r), *props, rules)
 			return err
 		}, region, nil
 
@@ -218,7 +218,7 @@ func (p *AzureProvider) resourceProgram(r spec.Resource, policies spec.Policies)
 		if err != nil {
 			return nil, "", err
 		}
-		scope := resourceScope(r)
+		scope := provider.ResourceScope(spec.ProviderAzure, r)
 		return func(ctx *pulumi.Context) error {
 			// The Engine provisioned the scope's network, including the
 			// delegated Container Apps subnet, before this program runs.

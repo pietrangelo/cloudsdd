@@ -47,7 +47,7 @@ func lookupScopeNetwork(ctx *pulumi.Context, s provider.NetworkScope, subnet str
 	if err != nil {
 		return scopeNetwork{}, fmt.Errorf(
 			"azure: no CloudSDD network found for scope %q. The network is created before the "+
-				"resources in it, so this means it was removed out of band: %w", scopeName(s), err)
+				"resources in it, so this means it was removed out of band: %w", provider.ScopeName(s), err)
 	}
 
 	return scopeNetwork{
@@ -71,7 +71,7 @@ func lookupEngineNetwork(ctx *pulumi.Context, s provider.NetworkScope, engine st
 	}, nil)
 	if err != nil {
 		return scopeNetwork{}, fmt.Errorf(
-			"azure: no private DNS zone found for %s in scope %q: %w", engine, scopeName(s), err)
+			"azure: no private DNS zone found for %s in scope %q: %w", engine, provider.ScopeName(s), err)
 	}
 
 	net.dnsZoneID = zone.Id

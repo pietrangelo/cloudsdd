@@ -11,7 +11,6 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
-	"cloudsdd/internal/engine"
 	"cloudsdd/internal/provider"
 )
 
@@ -21,13 +20,13 @@ import (
 // choice to the SDK's default).
 const defaultAssumeRoleSessionSeconds = int32(3600)
 
-// NewTargetProviderFactory builds an engine.TargetProviderFactory (RFC
+// NewTargetProviderFactory builds a provider.TargetProviderFactory (RFC
 // 004 §4) that, for every AWS DeploymentTarget, assumes the role described
 // in target.AWS via STS and returns an AWSProvider scoped to those
 // credentials, reusing the same base state backend/passphrase.
 // base must already be initialized with NewProvider.
-func NewTargetProviderFactory(base *AWSProvider) engine.TargetProviderFactory {
-	return func(ctx context.Context, target engine.DeploymentTarget) (provider.CloudProvider, error) {
+func NewTargetProviderFactory(base *AWSProvider) provider.TargetProviderFactory {
+	return func(ctx context.Context, target provider.DeploymentTarget) (provider.CloudProvider, error) {
 		if target.AWS == nil {
 			return nil, fmt.Errorf("aws: deployment target %q has no AWS configuration", target.Name)
 		}

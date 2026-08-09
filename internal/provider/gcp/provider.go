@@ -180,7 +180,7 @@ func (p *GCPProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		if err != nil {
 			return nil, "", err
 		}
-		netName := scopeNetworkName(resourceScope(r))
+		netName := scopeNetworkName(provider.ResourceScope(spec.ProviderGCP, r))
 		return func(ctx *pulumi.Context) error {
 			instance, err := declareRelationalDatabase(ctx, r.ID, region, netName, *props)
 			if err != nil {
@@ -204,7 +204,7 @@ func (p *GCPProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		if err != nil {
 			return nil, "", err
 		}
-		netName := scopeNetworkName(resourceScope(r))
+		netName := scopeNetworkName(provider.ResourceScope(spec.ProviderGCP, r))
 		return func(ctx *pulumi.Context) error {
 			_, err := declareComputeInstance(ctx, r.ID, region, zone, netName, *props, rules)
 			return err
@@ -215,7 +215,7 @@ func (p *GCPProvider) resourceProgram(r spec.Resource, policies spec.Policies) (
 		if err != nil {
 			return nil, "", fmt.Errorf("gcp: resource %q: %w", r.ID, err)
 		}
-		netName := scopeNetworkName(resourceScope(r))
+		netName := scopeNetworkName(provider.ResourceScope(spec.ProviderGCP, r))
 		return func(ctx *pulumi.Context) error {
 			_, err := declareContainerService(ctx, r, netName, *props)
 			return err

@@ -103,6 +103,13 @@ FLOORS=(
 # or a provider.NetworkScope would read naturally and cost exactly this.
 LEAVES=(compute container decode network pipeline)
 
+# The Pulumi-bound provider packages, checked for the layering inversion
+# RFC 019 §2.4 removed: none of them may depend on the engine that drives
+# them. Only internal/provider/aws ever did, which is precisely what made
+# it read as an accident rather than a decision — so the check covers all
+# three, and the rule the next provider inherits is the fixed one.
+PROVIDERS=(aws azure gcp)
+
 if [[ ! -f "$PROFILE" ]]; then
   echo "coverage profile $PROFILE not found" >&2
   exit 1
@@ -190,6 +197,28 @@ for leaf in "${LEAVES[@]}"; do
     status=1
   else
     printf 'ok    %-42s leaf, no internal imports\n' "$pkg"
+  fi
+done
+
+# The inversion invariant. A provider depending on the engine that drives
+# it inverts the dependency the architecture rests on; RFC 019 §2.4 moved
+# DeploymentTarget and TargetProviderFactory into internal/provider so the
+# edge could go, and this is what keeps it gone.
+#
+# `.Deps` and not `.Imports` here: reaching the engine through an
+# intermediate package is the same inversion, and all three providers are
+# clean transitively today, so the stronger form costs nothing. As above,
+# it is the shipped code's graph and not its tests' — an engine-driving
+# integration test is free to import both.
+for p in "${PROVIDERS[@]}"; do
+  pkg="cloudsdd/internal/provider/$p"
+  inverted=$(go list -f '{{join .Deps "\n"}}' "./internal/provider/$p" | grep '^cloudsdd/internal/engine$' || true)
+
+  if [[ -n "$inverted" ]]; then
+    echo "FAIL  $pkg — must not depend on cloudsdd/internal/engine (RFC 019 §2.4)" >&2
+    status=1
+  else
+    printf 'ok    %-42s no dependency on internal/engine\n' "$pkg"
   fi
 done
 

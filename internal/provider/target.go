@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Pietrangelo Masala
 
-package engine
+package provider
 
 import (
 	"context"
 
-	"cloudsdd/internal/provider"
 	"cloudsdd/internal/spec"
 )
 
@@ -57,4 +56,4 @@ type AWSTargetConfig struct {
 // orchestrates but knows nothing about any cloud's credential assumption
 // mechanism (consistent with RFC 001 §2.3, the Engine stays
 // cloud-agnostic).
-type TargetProviderFactory func(ctx context.Context, target DeploymentTarget) (provider.CloudProvider, error)
+type TargetProviderFactory func(ctx context.Context, target DeploymentTarget) (CloudProvider, error)

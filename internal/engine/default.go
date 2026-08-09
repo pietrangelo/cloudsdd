@@ -18,8 +18,8 @@ import (
 // per-resource operations to them after domain validation.
 type DefaultEngine struct {
 	providers       map[spec.Provider]provider.CloudProvider
-	targets         map[string]DeploymentTarget
-	targetFactories map[spec.Provider]TargetProviderFactory
+	targets         map[string]provider.DeploymentTarget
+	targetFactories map[spec.Provider]provider.TargetProviderFactory
 
 	// defaultProvider breaks a tie for agnostic resources when the
 	// Specification states no preference (RFC 014 §2.4). It arrives as an
@@ -54,9 +54,9 @@ type Option func(*DefaultEngine)
 // WithDeploymentTargets registers the available DeploymentTargets,
 // indexed by Name. The content is copied to isolate the Engine from
 // subsequent changes to the map passed by the caller.
-func WithDeploymentTargets(targets map[string]DeploymentTarget) Option {
+func WithDeploymentTargets(targets map[string]provider.DeploymentTarget) Option {
 	return func(e *DefaultEngine) {
-		registry := make(map[string]DeploymentTarget, len(targets))
+		registry := make(map[string]provider.DeploymentTarget, len(targets))
 		for name, t := range targets {
 			registry[name] = t
 		}
@@ -81,7 +81,7 @@ func WithDefaultProvider(p spec.Provider) Option {
 // WithTargetProviderFactory registers the TargetProviderFactory to use to
 // build a CloudProvider with assumed credentials when a DeploymentTarget
 // declares provider p.
-func WithTargetProviderFactory(p spec.Provider, factory TargetProviderFactory) Option {
+func WithTargetProviderFactory(p spec.Provider, factory provider.TargetProviderFactory) Option {
 	return func(e *DefaultEngine) {
 		e.targetFactories[p] = factory
 	}
@@ -98,8 +98,8 @@ func New(providers map[spec.Provider]provider.CloudProvider, opts ...Option) *De
 	}
 	e := &DefaultEngine{
 		providers:       registry,
-		targets:         map[string]DeploymentTarget{},
-		targetFactories: map[spec.Provider]TargetProviderFactory{},
+		targets:         map[string]provider.DeploymentTarget{},
+		targetFactories: map[spec.Provider]provider.TargetProviderFactory{},
 		targetCache:     map[string]provider.CloudProvider{},
 		graph:           NewDependencyGraph(),
 		revisions:       pipeline.NewRevisionResolver(),

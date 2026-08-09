@@ -5,9 +5,7 @@ package azure
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"math"
 	"net/netip"
@@ -95,7 +93,7 @@ func (p *AzureProvider) EnsureNetwork(ctx context.Context, s provider.NetworkSco
 		return nil
 	}
 
-	cidr, err := addr.Derive(networkScope(s), addressPolicy(policies))
+	cidr, err := addr.Derive(provider.NetworkScopeOf(s), provider.AddressPolicyOf(policies))
 	if err != nil {
 		return err
 	}
@@ -106,10 +104,10 @@ func (p *AzureProvider) EnsureNetwork(ctx context.Context, s provider.NetworkSco
 
 	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", program)
 	if err != nil {
-		return fmt.Errorf("azure: failed to prepare the network stack for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: failed to prepare the network stack for scope %q: %w", provider.ScopeName(s), err)
 	}
 	if _, err := stack.Up(ctx); err != nil {
-		return fmt.Errorf("azure: failed to provision the network for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: failed to provision the network for scope %q: %w", provider.ScopeName(s), err)
 	}
 	return nil
 }
@@ -129,7 +127,7 @@ func declareScopeNetwork(ctx *pulumi.Context, s provider.NetworkScope, cidr neti
 	})
 	if err != nil {
 		return fmt.Errorf("azure: failed to declare the network resource group for scope %q: %w",
-			scopeName(s), err)
+			provider.ScopeName(s), err)
 	}
 
 	vnet, err := network.NewVirtualNetwork(ctx, name+"-vnet", &network.VirtualNetworkArgs{
@@ -139,7 +137,7 @@ func declareScopeNetwork(ctx *pulumi.Context, s provider.NetworkScope, cidr neti
 		AddressSpaces:     pulumi.StringArray{pulumi.String(cidr.String())},
 	})
 	if err != nil {
-		return fmt.Errorf("azure: failed to declare the vnet for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: failed to declare the vnet for scope %q: %w", provider.ScopeName(s), err)
 	}
 
 	// No security rules at all: an Azure NSG carries a DenyAllInBound
@@ -150,13 +148,13 @@ func declareScopeNetwork(ctx *pulumi.Context, s provider.NetworkScope, cidr neti
 		Location:          rg.Location,
 	})
 	if err != nil {
-		return fmt.Errorf("azure: failed to declare the security group for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: failed to declare the security group for scope %q: %w", provider.ScopeName(s), err)
 	}
 
 	// The general subnet, where compute instances live.
 	general, err := subnetBlock(cidr, subnetIndexGeneral)
 	if err != nil {
-		return fmt.Errorf("azure: scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: scope %q: %w", provider.ScopeName(s), err)
 	}
 	generalSubnet, err := network.NewSubnet(ctx, name+"-subnet", &network.SubnetArgs{
 		Name:               pulumi.String(generalSubnetName),
@@ -165,7 +163,7 @@ func declareScopeNetwork(ctx *pulumi.Context, s provider.NetworkScope, cidr neti
 		AddressPrefixes:    pulumi.StringArray{pulumi.String(general.String())},
 	})
 	if err != nil {
-		return fmt.Errorf("azure: failed to declare the general subnet for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: failed to declare the general subnet for scope %q: %w", provider.ScopeName(s), err)
 	}
 
 	// The security group is attached to the subnet rather than to each
@@ -179,7 +177,7 @@ func declareScopeNetwork(ctx *pulumi.Context, s provider.NetworkScope, cidr neti
 			SubnetId:               generalSubnet.ID(),
 			NetworkSecurityGroupId: nsg.ID(),
 		}); err != nil {
-		return fmt.Errorf("azure: failed to attach the security group for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: failed to attach the security group for scope %q: %w", provider.ScopeName(s), err)
 	}
 
 	if err := declareScopeEgress(ctx, s, rg, generalSubnet); err != nil {
@@ -228,7 +226,7 @@ func declareScopeEgress(
 		Sku:               pulumi.String(natPublicIPSkuStandard),
 	})
 	if err != nil {
-		return fmt.Errorf("azure: failed to declare the nat address for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: failed to declare the nat address for scope %q: %w", provider.ScopeName(s), err)
 	}
 
 	gateway, err := network.NewNatGateway(ctx, name+"-nat", &network.NatGatewayArgs{
@@ -239,7 +237,7 @@ func declareScopeEgress(
 		IdleTimeoutInMinutes: pulumi.Int(natIdleTimeoutInMinutes),
 	})
 	if err != nil {
-		return fmt.Errorf("azure: failed to declare the nat gateway for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: failed to declare the nat gateway for scope %q: %w", provider.ScopeName(s), err)
 	}
 
 	if _, err := network.NewNatGatewayPublicIpAssociation(ctx, name+"-nat-ip-assoc",
@@ -247,7 +245,7 @@ func declareScopeEgress(
 			NatGatewayId:      gateway.ID(),
 			PublicIpAddressId: address.ID(),
 		}); err != nil {
-		return fmt.Errorf("azure: failed to attach the nat address for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: failed to attach the nat address for scope %q: %w", provider.ScopeName(s), err)
 	}
 
 	if _, err := network.NewSubnetNatGatewayAssociation(ctx, name+"-nat-subnet-assoc",
@@ -256,7 +254,7 @@ func declareScopeEgress(
 			NatGatewayId: gateway.ID(),
 		}); err != nil {
 		return fmt.Errorf("azure: failed to attach the nat gateway to the general subnet for scope %q: %w",
-			scopeName(s), err)
+			provider.ScopeName(s), err)
 	}
 	return nil
 }
@@ -283,7 +281,7 @@ func declareContainerAppsSubnet(
 
 	block, err := subnetBlock(cidr, subnetIndexContainerApps)
 	if err != nil {
-		return fmt.Errorf("azure: scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: scope %q: %w", provider.ScopeName(s), err)
 	}
 	if _, err := network.NewSubnet(ctx, name+"-containerapps-subnet", &network.SubnetArgs{
 		Name:               pulumi.String(containerAppsSubnetName),
@@ -301,7 +299,7 @@ func declareContainerAppsSubnet(
 		},
 	}); err != nil {
 		return fmt.Errorf("azure: failed to declare the container apps subnet for scope %q: %w",
-			scopeName(s), err)
+			provider.ScopeName(s), err)
 	}
 	return nil
 }
@@ -324,7 +322,7 @@ func declareEngineNetwork(
 
 	block, err := subnetBlock(cidr, engineSubnetIndex(engine))
 	if err != nil {
-		return fmt.Errorf("azure: scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: scope %q: %w", provider.ScopeName(s), err)
 	}
 	if _, err := network.NewSubnet(ctx, fmt.Sprintf("%s-%s-subnet", name, engine), &network.SubnetArgs{
 		Name:               pulumi.String(engineSubnetName(engine)),
@@ -341,7 +339,7 @@ func declareEngineNetwork(
 			},
 		},
 	}); err != nil {
-		return fmt.Errorf("azure: failed to declare the %s subnet for scope %q: %w", engine, scopeName(s), err)
+		return fmt.Errorf("azure: failed to declare the %s subnet for scope %q: %w", engine, provider.ScopeName(s), err)
 	}
 
 	// One zone per engine per scope, shared by every database of that
@@ -352,7 +350,7 @@ func declareEngineNetwork(
 		ResourceGroupName: rg.Name,
 	})
 	if err != nil {
-		return fmt.Errorf("azure: failed to declare the %s dns zone for scope %q: %w", engine, scopeName(s), err)
+		return fmt.Errorf("azure: failed to declare the %s dns zone for scope %q: %w", engine, provider.ScopeName(s), err)
 	}
 
 	if _, err := privatedns.NewZoneVirtualNetworkLink(ctx,
@@ -366,7 +364,7 @@ func declareEngineNetwork(
 			// auto-registering records here.
 			RegistrationEnabled: pulumi.Bool(false),
 		}); err != nil {
-		return fmt.Errorf("azure: failed to link the %s dns zone for scope %q: %w", engine, scopeName(s), err)
+		return fmt.Errorf("azure: failed to link the %s dns zone for scope %q: %w", engine, provider.ScopeName(s), err)
 	}
 	return nil
 }
@@ -414,7 +412,7 @@ func scopeResourceGroupName(s provider.NetworkScope) string {
 func scopeNetworkName(s provider.NetworkScope) string {
 	var b strings.Builder
 	b.WriteString("cloudsdd-")
-	for _, r := range strings.ToLower(scopeName(s)) {
+	for _, r := range strings.ToLower(provider.ScopeName(s)) {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
 			b.WriteRune(r)
@@ -428,22 +426,9 @@ func scopeNetworkName(s provider.NetworkScope) string {
 	// this name has to fit too. Replacing the tail with a hash rather
 	// than truncating keeps two long scopes on distinct networks.
 	if len(name) > 40 {
-		name = name[:31] + "-" + shortHash(name)
+		name = name[:31] + "-" + provider.ShortHash(name)
 	}
 	return strings.TrimRight(name, "-")
-}
-
-func scopeName(s provider.NetworkScope) string {
-	label := networkScope(s).String()
-	if label == "" {
-		return "default"
-	}
-	return label
-}
-
-func shortHash(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:4])
 }
 
 // subnetBlock carves the index'th /24 out of the scope's range, using the
@@ -476,31 +461,6 @@ func subnetBlock(cidr netip.Prefix, index int) (netip.Prefix, error) {
 	return netip.PrefixFrom(netip.AddrFrom4(raw), subnetBits), nil
 }
 
-func networkScope(s provider.NetworkScope) addr.Scope {
-	return addr.Scope{
-		Account:     s.Account,
-		Environment: s.Environment,
-		Region:      s.Region,
-	}
-}
-
-func addressPolicy(p spec.Policies) addr.Policy {
-	if p.Network == nil {
-		return addr.Policy{}
-	}
-	return addr.Policy{BaseCIDR: p.Network.BaseCIDR, Scopes: p.Network.Scopes}
-}
-
-// resourceScope is the network scope a resource belongs to.
-func resourceScope(r spec.Resource) provider.NetworkScope {
-	return provider.NetworkScope{
-		Provider:    spec.ProviderAzure,
-		Account:     r.Account,
-		Environment: r.Scope.Environment,
-		Region:      r.Scope.Region,
-	}
-}
-
 // DestroyNetwork removes the scope's network stack (RFC 016 §2.6).
 //
 // The Engine establishes that the scope is empty before calling this.
@@ -511,7 +471,7 @@ func (p *AzureProvider) DestroyNetwork(ctx context.Context, s provider.NetworkSc
 		return nil
 	}
 
-	cidr, err := addr.Derive(networkScope(s), addressPolicy(policies))
+	cidr, err := addr.Derive(provider.NetworkScopeOf(s), provider.AddressPolicyOf(policies))
 	if err != nil {
 		return err
 	}
@@ -521,10 +481,10 @@ func (p *AzureProvider) DestroyNetwork(ctx context.Context, s provider.NetworkSc
 	}
 	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", program)
 	if err != nil {
-		return fmt.Errorf("azure: failed to select the network stack for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: failed to select the network stack for scope %q: %w", provider.ScopeName(s), err)
 	}
 	if _, err := stack.Destroy(ctx); err != nil {
-		return fmt.Errorf("azure: failed to destroy the network for scope %q: %w", scopeName(s), err)
+		return fmt.Errorf("azure: failed to destroy the network for scope %q: %w", provider.ScopeName(s), err)
 	}
 	return nil
 }
