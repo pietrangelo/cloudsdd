@@ -14,6 +14,7 @@ import (
 
 	"cloudsdd/internal/provider"
 	"cloudsdd/internal/provider/container"
+	"cloudsdd/internal/provider/pipeline"
 	"cloudsdd/internal/schedule"
 	"cloudsdd/internal/spec"
 )
@@ -72,14 +73,25 @@ func containerTestScope() provider.NetworkScope {
 func declaredContainer(t *testing.T, mutate func(map[string]any)) []recordedResource {
 	t.Helper()
 
-	props, err := decodeContainerServiceProperties(containerProps(mutate), nil)
+	return declaredContainerFor(t, containerResource(func(r *spec.Resource) {
+		r.Properties = containerProps(mutate)
+	}), nil)
+}
+
+// declaredContainerFor declares one specific resource, which is what the
+// pipeline path needs: the image reference is assembled from `Resolved`,
+// and that lives on the resource rather than in its properties.
+func declaredContainerFor(t *testing.T, r spec.Resource, rules []schedule.Rule) []recordedResource {
+	t.Helper()
+
+	props, err := decodeContainerServiceProperties(r.Properties, nil)
 	if err != nil {
 		t.Fatalf("decodeContainerServiceProperties() = %v", err)
 	}
 	net := scopeNetwork{subnetID: containerAppsSubnetID, addressSpace: "10.42.3.0/24"}
 
 	return runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareContainerService(ctx, "api", "westeurope", containerTestScope(), net, *props, nil)
+		_, err := declareContainerService(ctx, r, containerTestScope(), net, *props, rules)
 		return err
 	})
 }
@@ -423,6 +435,116 @@ func TestDecodeContainerServiceProperties(t *testing.T) {
 	}
 }
 
+// TestDeclareContainerServiceRunsThePipelineImage is the service half of
+// RFC 018 §2.4.1: a service that names a `pipeline` instead of an `image`
+// runs the Container Registry reference the resolved commit named.
+//
+// Without this the decode succeeds — `image` is optional since RFC 018 §3
+// — and Container Apps is handed an empty image, which is a service that
+// validates, plans, and then fails on apply for a reason the plan never
+// showed.
+func TestDeclareContainerServiceRunsThePipelineImage(t *testing.T) {
+	r := containerResource(func(r *spec.Resource) {
+		r.Properties = containerProps(func(p map[string]any) {
+			delete(p, "image")
+			p["pipeline"] = "api-build"
+		})
+		r.Resolved = testResolved
+	})
+
+	recorded := declaredContainerFor(t, r, nil)
+
+	got := containerImage(t, findResource(t, recorded, containerAppToken))
+	want := acrImageReference(testACRLoginServer, testResolved.ImageName, testResolved.Commit)
+	if got != want {
+		t.Errorf("container image = %q, want the pipeline's own %q", got, want)
+	}
+	// The commit, never a branch and never `latest`. ACR has no
+	// registry-wide immutable-tags setting (RFC 018 §2.8.1), so this is a
+	// weaker promise here than on the other two clouds — which is exactly
+	// why the tag must at least be the one the plan displayed.
+	if !strings.HasSuffix(got, ":"+testCommit) {
+		t.Errorf("container image = %q, want it tagged with the resolved commit", got)
+	}
+
+	// The login server comes from the registry rather than from the name,
+	// so the lookup must actually happen and must name the registry the
+	// pipeline created — both derived from the image name, which is all the
+	// Engine hands across.
+	lookup := findResource(t, recorded, getAcrRegistryToken)
+	if got, want := lookup.Inputs["name"].StringValue(), acrRegistryName(testSubscriptionID, testResolved.ImageName); got != want {
+		t.Errorf("looked up registry %q, want the derived %q", got, want)
+	}
+	if got, want := lookup.Inputs["resourceGroupName"].StringValue(), acrResourceGroupName(testResolved.ImageName); got != want {
+		t.Errorf("looked up resource group %q, want the derived %q", got, want)
+	}
+}
+
+// TestDeclareContainerServiceWithAnImageAsksTheRegistryNothing: the
+// pipeline path is entered only by a service that has no image of its own.
+// A lookup on every service would fail every deployment that names a
+// public image, since there is no registry to find.
+func TestDeclareContainerServiceWithAnImageAsksTheRegistryNothing(t *testing.T) {
+	recorded := declaredContainer(t, nil)
+
+	if hasResource(recorded, getAcrRegistryToken) {
+		t.Error("the registry was queried for a service that named its own image")
+	}
+	if got := containerImage(t, findResource(t, recorded, containerAppToken)); got != testContainerImage {
+		t.Errorf("container image = %q, want the requested %q", got, testContainerImage)
+	}
+}
+
+// TestDeclareContainerServiceRefusesAnUnresolvedPipeline: reaching the
+// provider without the Engine's answer is refused rather than guessed at.
+// The two plausible inventions — the pipeline's resource id, or `latest` —
+// are respectively wrong and the one thing RFC 017 §2.4 refuses outright.
+func TestDeclareContainerServiceRefusesAnUnresolvedPipeline(t *testing.T) {
+	r := containerResource(func(r *spec.Resource) {
+		r.Properties = containerProps(func(p map[string]any) {
+			delete(p, "image")
+			p["pipeline"] = "api-build"
+		})
+	})
+
+	props, err := decodeContainerServiceProperties(r.Properties, nil)
+	if err != nil {
+		t.Fatalf("decodeContainerServiceProperties() = %v", err)
+	}
+	net := scopeNetwork{subnetID: containerAppsSubnetID, addressSpace: "10.42.3.0/24"}
+
+	var got error
+	recorded := runProgram(t, func(ctx *pulumi.Context) error {
+		_, got = declareContainerService(ctx, r, containerTestScope(), net, *props, nil)
+		return nil
+	})
+
+	if !errors.Is(got, pipeline.ErrNotResolved) {
+		t.Fatalf("declareContainerService() = %v, want %v", got, pipeline.ErrNotResolved)
+	}
+	// The refusal has to come before anything is registered, or the stack
+	// holds an app pointed at nothing — and, on Azure, a resource group and
+	// an environment around it.
+	if hasResource(recorded, containerAppToken) {
+		t.Error("a container app was declared despite the unresolved pipeline reference")
+	}
+	if hasResource(recorded, rgToken) {
+		t.Error("a resource group was declared despite the unresolved pipeline reference")
+	}
+}
+
+// containerImage reads the image off the single container of a declared
+// Container Apps app.
+func containerImage(t *testing.T, app recordedResource) string {
+	t.Helper()
+
+	containers := app.Inputs["template"].ObjectValue()["containers"].ArrayValue()
+	if len(containers) != 1 {
+		t.Fatalf("declared %d containers, want 1", len(containers))
+	}
+	return containers[0].ObjectValue()["image"].StringValue()
+}
+
 // TestValidateContainerServiceAcceptsAWellFormedOne is the regression test
 // for the defect RFC 017 §1 records, and the last provider to close it:
 // with this, no ResourceType in the schema is advertised and unimplemented.
@@ -458,16 +580,7 @@ func declaredScheduledContainer(t *testing.T) []recordedResource {
 	if err != nil {
 		t.Fatalf("Compile() = %v", err)
 	}
-	props, err := decodeContainerServiceProperties(containerProps(nil), nil)
-	if err != nil {
-		t.Fatalf("decodeContainerServiceProperties() = %v", err)
-	}
-	net := scopeNetwork{subnetID: containerAppsSubnetID, addressSpace: "10.42.3.0/24"}
-
-	return runProgram(t, func(ctx *pulumi.Context) error {
-		_, err := declareContainerService(ctx, "api", "westeurope", containerTestScope(), net, *props, rules)
-		return err
-	})
+	return declaredContainerFor(t, containerResource(nil), rules)
 }
 
 // TestDeclareContainerSchedule covers RFC 017 §2.5 on Azure.

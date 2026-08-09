@@ -80,6 +80,13 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 	if args.TypeToken == runbookToken || args.TypeToken == automationScheduleToken {
 		outputs["name"] = args.Inputs["name"]
 	}
+	// The login server is computed by ACR from the registry's name, and
+	// both halves of RFC 018 §2.4.1 read it back: the build task tags what
+	// it pushes with it, and the service resolves its image through it.
+	if args.TypeToken == acrRegistryToken {
+		outputs["loginServer"] = resource.NewStringProperty(
+			args.Inputs["name"].StringValue() + acrLoginServerSuffix)
+	}
 	// The generated host key of RFC 013 §2.4: the VM reads back the
 	// public half, so without it the declaration sees an unknown.
 	if args.TypeToken == privateKeyToken {
@@ -125,6 +132,36 @@ func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error
 			"id":                resource.NewStringProperty("/subscriptions/sub-id/zones/acme.example"),
 			"name":              args.Args["name"],
 			"resourceGroupName": resource.NewStringProperty("dns-rg"),
+		}, nil
+	// The subscription the ambient credentials resolve to (RFC 018 §2.8.1).
+	// An ACR name is globally unique, so it is part of the derivation on
+	// both sides — which means both sides have to ask this question.
+	case getClientConfigToken:
+		m.rec.add(recordedResource{Type: args.Token, Name: getClientConfigToken, Inputs: args.Args})
+		return resource.PropertyMap{
+			"subscriptionId": resource.NewStringProperty(testSubscriptionID),
+			"tenantId":       resource.NewStringProperty("00000000-0000-0000-0000-00000000000t"),
+			"clientId":       resource.NewStringProperty("00000000-0000-0000-0000-00000000000c"),
+			"objectId":       resource.NewStringProperty("00000000-0000-0000-0000-00000000000o"),
+			"id":             resource.NewStringProperty("client-config"),
+		}, nil
+	// The registry the pipeline created, as the service's side of RFC 018
+	// §2.4.1 looks it up: by a name and a resource group both derived from
+	// the image name, which is all the Engine hands across.
+	case getAcrRegistryToken:
+		m.rec.add(recordedResource{Type: args.Token, Name: getAcrRegistryToken, Inputs: args.Args})
+		name := args.Args["name"].StringValue()
+		return resource.PropertyMap{
+			"id": resource.NewStringProperty(
+				"/subscriptions/sub-id/resourceGroups/" +
+					args.Args["resourceGroupName"].StringValue() +
+					"/providers/Microsoft.ContainerRegistry/registries/" + name),
+			"name":              args.Args["name"],
+			"resourceGroupName": args.Args["resourceGroupName"],
+			"loginServer":       resource.NewStringProperty(name + acrLoginServerSuffix),
+			"location":          resource.NewStringProperty("westeurope"),
+			"sku":               resource.NewStringProperty(acrSKUBasic),
+			"adminEnabled":      resource.NewBoolProperty(false),
 		}, nil
 	}
 	return resource.PropertyMap{}, nil

@@ -91,7 +91,7 @@ FLOORS=(
   "cloudsdd/internal/state:91"
   # Pulumi-bound: see the note above.
   "cloudsdd/internal/provider/aws:65"
-  "cloudsdd/internal/provider/azure:69"
+  "cloudsdd/internal/provider/azure:71"
   "cloudsdd/internal/provider/gcp:72"
 )
 

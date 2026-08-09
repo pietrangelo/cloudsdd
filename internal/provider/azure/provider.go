@@ -99,6 +99,16 @@ func (p *AzureProvider) Validate(ctx context.Context, r spec.Resource, policies 
 		if len(r.Scope.Zones) > 0 {
 			return fmt.Errorf("azure: resource %q: %w", r.ID, ErrZonesNotSupported)
 		}
+	case spec.ResourceTypeBuildPipeline:
+		if _, err := decodeBuildPipelineProperties(r.Properties); err != nil {
+			return fmt.Errorf("azure: resource %q: %w", r.ID, err)
+		}
+		// An ACR Task runs on a pool ACR places itself, and the registry is
+		// regional. A pinned zone is a placement the user asked for and will
+		// not get.
+		if len(r.Scope.Zones) > 0 {
+			return fmt.Errorf("azure: resource %q: %w", r.ID, ErrZonesNotSupported)
+		}
 	default:
 		return fmt.Errorf("azure: resource %q: unsupported resource type: %q", r.ID, r.Type)
 	}
@@ -216,7 +226,22 @@ func (p *AzureProvider) resourceProgram(r spec.Resource, policies spec.Policies)
 			if err != nil {
 				return err
 			}
-			_, err = declareContainerService(ctx, r.ID, region, scope, net, *props, rules)
+			_, err = declareContainerService(ctx, r, scope, net, *props, rules)
+			return err
+		}, region, nil
+
+	case spec.ResourceTypeBuildPipeline:
+		props, err := decodeBuildPipelineProperties(r.Properties)
+		if err != nil {
+			return nil, "", fmt.Errorf("azure: resource %q: %w", r.ID, err)
+		}
+		// No lookupScopeNetwork here, unlike the container_service case above:
+		// the build runs on ACR's own managed pool, not in the scope's
+		// network. It needs the internet to clone a public repository, and
+		// the registry it pushes to is reached over ACR's endpoint rather
+		// than through the scope. Nothing it produces is reachable from it.
+		return func(ctx *pulumi.Context) error {
+			_, err := declareBuildPipeline(ctx, r.ID, region, *props, r.Resolved)
 			return err
 		}, region, nil
 

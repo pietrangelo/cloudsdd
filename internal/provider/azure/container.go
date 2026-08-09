@@ -16,6 +16,7 @@ import (
 	"cloudsdd/internal/provider"
 	"cloudsdd/internal/provider/container"
 	"cloudsdd/internal/schedule"
+	"cloudsdd/internal/spec"
 )
 
 // Container Apps configuration (RFC 017 §2.6).
@@ -98,15 +99,30 @@ func decodeContainerServiceProperties(props map[string]any, allowedRegistries []
 // records and custom-domain binding (RFC 017 §2.6).
 func declareContainerService(
 	ctx *pulumi.Context,
-	id, location string,
+	r spec.Resource,
 	s provider.NetworkScope,
 	net scopeNetwork,
 	p container.Properties,
 	rules []schedule.Rule,
 ) (*containerapp.App, error) {
+	id := r.ID
+	location := r.Scope.Region
+
 	cpu, memory, err := containerResources(p.Size)
 	if err != nil {
 		return nil, err
+	}
+
+	// A service fed by a pipeline names no image: the reference is turned
+	// into one here, where the registry's login server is knowable (RFC 018
+	// §2.4.1). It happens before anything is registered, so an unresolved
+	// reference is refused rather than leaving a stack holding a resource
+	// group and an app pointed at nothing.
+	image := p.Image
+	if image == "" {
+		if image, err = pipelineImage(ctx, r); err != nil {
+			return nil, err
+		}
 	}
 
 	rg, err := core.NewResourceGroup(ctx, id+"-rg", &core.ResourceGroupArgs{
@@ -193,7 +209,7 @@ func declareContainerService(
 			Containers: containerapp.AppTemplateContainerArray{
 				&containerapp.AppTemplateContainerArgs{
 					Name:   pulumi.String(id),
-					Image:  pulumi.String(p.Image),
+					Image:  pulumi.String(image),
 					Cpu:    pulumi.Float64(cpu),
 					Memory: pulumi.String(memory),
 				},

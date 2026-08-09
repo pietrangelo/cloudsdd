@@ -263,13 +263,64 @@ and is why it is not a property of `container_service`.
 |---|---|---|---|
 | Build | CodeBuild | Cloud Build | ACR Tasks |
 | Registry | ECR | Artifact Registry | ACR |
-| Retention | ECR lifecycle policy | Cleanup policy | Retention policy (Premium) |
+| Retention | ECR lifecycle policy | Cleanup policy | Purge task, `--keep` (§2.8.1) |
 | Filesystem | EFS | Filestore | Azure Files |
 | Build identity | Service role, scoped to one ECR repository | Service account, no project roles | Task identity |
 
 The build identity gets **write access to one repository and nothing
 else**, following the RFC 017 §2.6 precedent. A build role that can push
 anywhere is a build role that can replace any image in the account.
+
+### 2.8.1 Azure: retention and tag immutability — decided
+
+§2.5 and §2.4.1 were written against ECR and Artifact Registry, and ACR
+does not have the two features they assume. This section records what
+Azure does instead, because both gaps are real and neither is visible from
+the table above.
+
+**Retention: a purge task, not the native retention policy.** §7.2 framed
+the choice as Premium-or-nothing. That framing was wrong on a fact:
+ACR's native retention policy is `{days, enabled}` — **age-based, and it
+reaps only untagged manifests**. It cannot express "keep the most recent
+`retain` images" the way `imageCountMoreThan` and
+`mostRecentVersions` do, and because this pipeline pushes one commit tag
+per build there are almost no untagged manifests for it to find. Buying
+Premium — roughly five times Basic — would therefore have paid for a
+policy that deletes close to nothing, while leaving `retain` decoded and
+unhonoured.
+
+So Azure keeps a **Basic** registry and honours `retain` with a
+timer-triggered ACR Task running `acr purge --keep <retain>`. That is the
+scheduled task §7.2 was reluctant about, and the reluctance is worth
+answering: `acr purge` is a first-party Microsoft command shipped as
+`mcr.microsoft.com/acr/acr-cli`, not code CloudSDD writes, deploys or
+patches — the distinction §2.7 drew against shipping a CSI driver. This
+package already declares an Azure Automation runbook for RFC 012's power
+schedule on the same terms.
+
+It also honours `retain` **better** than the Premium option would: the
+purge counts images and keeps the newest `retain` of them, which is what
+§2.5 asks for and what the other two clouds do.
+
+`retain`'s exclusion of a running image is not expressible here either, on
+the same terms recorded for AWS and GCP: purge selects on a repository
+filter, an age and a count, and cannot ask what is deployed.
+
+**Tag immutability: not available, and the guarantee is weaker.** §2.4.1
+rests the commit tag's strength on the registry being created with
+immutable tags. **ACR has no registry-wide immutable-tags setting** — it
+is a per-repository lock applied after the fact, not a property of the
+registry — so the Azure registry cannot offer it and the tag is
+technically movable.
+
+What holds instead: the registry is created by CloudSDD for this pipeline
+alone, and the only principal that can push to it is the pipeline's own
+task, which only ever pushes `<image_name>:<commit>` built from that
+commit. Repointing a reviewed tag at a different artifact therefore
+requires push access to a registry nothing else has push access to. That
+is a weaker guarantee than ECR's and Artifact Registry's — it is enforced
+by who holds the credential rather than by the registry refusing the
+write — and it is stated here rather than discovered.
 
 ### 2.9 This introduces resource references
 
@@ -372,13 +423,15 @@ is three translations of decisions already made.
    pipeline that only runs when you run CloudSDD is arguably not a
    pipeline. Proposed: no webhook in this RFC, revisited when there is a
    reason beyond symmetry with other CI tools.
-2. **ACR retention needs a Premium registry.** Basic and Standard have no
-   retention policy, so `retain` on Azure either forces a Premium registry
-   — roughly five times the cost of Basic — or is honoured by a scheduled
-   purge task, which is a deployed code artifact of exactly the kind §2.7
-   argues against. Proposed: Premium when `retain` is set, refused with a
-   clear error otherwise, so nobody discovers the cost from an invoice.
-   This one should be argued with.
+2. ~~**ACR retention needs a Premium registry.**~~ **Decided — see §2.8.1.**
+   The question was argued with, as it asked to be, and its premise did
+   not survive: ACR's native retention policy is age-based and reaps only
+   untagged manifests, so Premium would have bought a policy that deletes
+   close to nothing. Azure keeps a Basic registry and honours `retain`
+   with a timer-triggered `acr purge --keep` task. §2.8.1 also records the
+   second ACR gap the original question did not notice — there is no
+   registry-wide immutable-tags setting, so §2.4.1's guarantee is weaker
+   on Azure than on the other two clouds.
 3. **`agnostic` resolution for a pipeline and its service.** Nothing
    currently stops a Specification resolving a pipeline to GCP and the
    service that consumes it to AWS, which would work — a registry is
