@@ -55,6 +55,27 @@ func (t ResourceType) SupportsSchedule() bool {
 	}
 }
 
+// MountsFilesystem reports whether the ResourceType has somewhere to mount
+// a Volume (RFC 018 §2.7).
+//
+// Like SupportsSchedule, this is a property of the type and not of the
+// cloud: a database manages its own storage, an object store is reached by
+// SDK and not by path, and an IAM role has no filesystem at all. The two
+// types that run a container image are the two that can be handed a
+// directory inside it.
+//
+// A compute_instance is deliberately not one of them. It has a filesystem,
+// but attaching a shared one to a VM means the guest OS mounts it at boot,
+// which is a machine-image concern rather than a resource declaration.
+func (t ResourceType) MountsFilesystem() bool {
+	switch t {
+	case ResourceTypeContainerService, ResourceTypeBuildPipeline:
+		return true
+	default:
+		return false
+	}
+}
+
 // SupportsScheduleOn narrows SupportsSchedule to one cloud (RFC 017 §2.5).
 //
 // There is exactly one exception today, and it is not an implementation
@@ -132,6 +153,21 @@ type Resource struct {
 	// resource out of a policy that would otherwise power it down.
 	Schedule *schedule.Schedule `json:"schedule,omitempty"`
 
+	// Volumes declares the filesystems the resource mounts (RFC 018
+	// §2.7). It belongs here beside Scope rather than in Properties for
+	// the reason Scope does: a filesystem is part of the "where". It is
+	// created in the scope's network, it outlives the resource that
+	// mounts it, and everything in the scope naming it gets the same one.
+	//
+	// Which types may declare one is enforced in Validate rather than by
+	// a tag, because the rule constrains the pair (Type, Volumes) and
+	// neither field can state it alone.
+	//
+	// Capped for the reason every other list in a Specification is (RFC
+	// 005 §3): each entry is a filesystem to provision, and an unbounded
+	// list is an unbounded amount of infrastructure.
+	Volumes []Volume `json:"volumes,omitempty" validate:"omitempty,max=5,dive"`
+
 	Properties map[string]any `json:"properties" validate:"required"`
 
 	// Resolved carries what the Engine worked out about this resource that
@@ -190,6 +226,33 @@ func (r *Resolved) CommitOr(fallback string) string {
 // the one tag RFC 017 §2.4 refuses outright.
 func (r *Resolved) Complete() bool {
 	return r != nil && r.ImageName != "" && r.Commit != ""
+}
+
+// Volume is one filesystem mounted into a resource (RFC 018 §2.7): EFS on
+// AWS, Filestore on GCP, Azure Files on Azure.
+//
+// Only filesystems are expressible. Object storage mounted as a filesystem
+// is not one — no atomic rename, no locking, listings that cost money and
+// lie under concurrency — so RFC 018 §2.7 defers it rather than shipping a
+// sidecar on the two clouds where it is not native. A user who wants a
+// bucket declares an object_storage and gets an SDK.
+type Volume struct {
+	// Name identifies the filesystem within its scope: two resources
+	// naming the same volume in the same scope mount the same one. It
+	// carries the same charset as Scope.Environment for the same reason
+	// — it becomes part of a name a cloud has to accept.
+	Name string `json:"name" validate:"required,scopename"`
+
+	// MountPath is where the filesystem appears inside the container.
+	// Absolute, no "." or ".." segment, and never "/" itself: mounting
+	// over the root would hide the image the resource was built from.
+	MountPath string `json:"mount_path" validate:"required,mountpath"`
+
+	// SizeGB is the requested capacity, in gibibytes. Absent means "let
+	// the provider decide", which is not laziness: EFS capacity is
+	// elastic and has no size to request, so a value invented here would
+	// be a number one of the three clouds must then discard.
+	SizeGB int `json:"size_gb,omitempty" validate:"omitempty,min=1,max=65536"`
 }
 
 // Scope describes where a resource is deployed within its Account (RFC

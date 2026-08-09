@@ -5,6 +5,7 @@ package spec
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -188,4 +189,158 @@ func TestValidateBuildPipelineType(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestValidateVolumes covers the filesystem declaration of RFC 018 §2.7.
+//
+// Volumes sits on Resource beside Scope rather than inside Properties
+// because the filesystem belongs to the scope, not to one service: two
+// services in one environment sharing a name share a filesystem. That
+// placement is what makes the rest of this table necessary — a field every
+// resource type can spell needs someone to say which ones it means, and a
+// list of mounts needs someone to say two of them cannot collide.
+//
+// wantMsg is set only on the rules Validate expresses in Go rather than in
+// a struct tag. For those, "an error was returned" is too weak an
+// assertion: every case in this table returns one, so a rule firing for
+// the wrong reason would still pass.
+func TestValidateVolumes(t *testing.T) {
+	uploads := Volume{Name: "uploads", MountPath: "/var/lib/uploads", SizeGB: 100}
+
+	// mountPathOf keeps the shape-of-one-volume cases to their one varying
+	// field, so the table reads as a list of paths rather than of structs.
+	mountPathOf := func(path string) []Volume {
+		return []Volume{{Name: "uploads", MountPath: path, SizeGB: 100}}
+	}
+
+	tests := []struct {
+		name    string
+		typ     ResourceType
+		volumes []Volume
+		wantErr bool
+		wantMsg string
+	}{
+		// The two types that mount a filesystem, and the absence case.
+		{name: "a filesystem on a container_service", typ: ResourceTypeContainerService, volumes: []Volume{uploads}},
+		{name: "a filesystem on a build_pipeline", typ: ResourceTypeBuildPipeline, volumes: []Volume{uploads}},
+		{name: "no filesystem at all", typ: ResourceTypeContainerService},
+		{
+			name:    "size omitted, left to the provider default",
+			typ:     ResourceTypeContainerService,
+			volumes: []Volume{{Name: "cache", MountPath: "/var/cache"}},
+		},
+		{
+			name:    "five filesystems, the cap",
+			typ:     ResourceTypeContainerService,
+			volumes: volumesNamed("a", "b", "c", "d", "e"),
+		},
+
+		// The four types with nothing to mount. Each is listed rather than
+		// looped: a type moving between the two groups is a decision, and
+		// it should show up as a changed line here.
+		{
+			name: "a relational_database cannot mount one", typ: ResourceTypeRelationalDatabase,
+			volumes: []Volume{uploads}, wantErr: true, wantMsg: "cannot mount",
+		},
+		{
+			name: "an object_storage cannot mount one", typ: ResourceTypeObjectStorage,
+			volumes: []Volume{uploads}, wantErr: true, wantMsg: "cannot mount",
+		},
+		{
+			name: "a compute_instance cannot mount one", typ: ResourceTypeComputeInstance,
+			volumes: []Volume{uploads}, wantErr: true, wantMsg: "cannot mount",
+		},
+		{
+			name: "a cross_account_role cannot mount one", typ: ResourceTypeCrossAccountRole,
+			volumes: []Volume{uploads}, wantErr: true, wantMsg: "cannot mount",
+		},
+
+		// The shape of one volume. The mount path is the hostile field: it
+		// is user-supplied and ends up as a path inside a container.
+		{
+			name: "missing name", typ: ResourceTypeContainerService,
+			volumes: []Volume{{MountPath: "/var/lib/uploads"}}, wantErr: true,
+		},
+		{
+			name: "a name outside the label charset", typ: ResourceTypeContainerService,
+			volumes: []Volume{{Name: "../etc", MountPath: "/var/lib/uploads"}}, wantErr: true,
+		},
+		{
+			name: "a name too long to label a filesystem", typ: ResourceTypeContainerService,
+			volumes: []Volume{{Name: strings.Repeat("u", 33), MountPath: "/var/lib/uploads"}}, wantErr: true,
+		},
+		{
+			name: "missing mount path", typ: ResourceTypeContainerService,
+			volumes: []Volume{{Name: "uploads"}}, wantErr: true,
+		},
+		{name: "a relative mount path", typ: ResourceTypeContainerService, volumes: mountPathOf("var/lib/uploads"), wantErr: true},
+		{name: "the root filesystem itself", typ: ResourceTypeContainerService, volumes: mountPathOf("/"), wantErr: true},
+		{name: "a parent-directory segment", typ: ResourceTypeContainerService, volumes: mountPathOf("/var/../etc"), wantErr: true},
+		{name: "a current-directory segment", typ: ResourceTypeContainerService, volumes: mountPathOf("/var/./uploads"), wantErr: true},
+		{name: "an empty segment", typ: ResourceTypeContainerService, volumes: mountPathOf("/var//uploads"), wantErr: true},
+		{name: "a trailing slash", typ: ResourceTypeContainerService, volumes: mountPathOf("/var/lib/uploads/"), wantErr: true},
+		{name: "a space in the mount path", typ: ResourceTypeContainerService, volumes: mountPathOf("/var/lib/my uploads"), wantErr: true},
+		{name: "a NUL byte in the mount path", typ: ResourceTypeContainerService, volumes: mountPathOf("/var/lib/up\x00loads"), wantErr: true},
+		{
+			name: "a mount path too long to be one", typ: ResourceTypeContainerService,
+			volumes: mountPathOf("/" + strings.Repeat("var/", 79) + "var"), wantErr: true,
+		},
+		{
+			name: "a negative size", typ: ResourceTypeContainerService,
+			volumes: []Volume{{Name: "uploads", MountPath: "/var/lib/uploads", SizeGB: -1}}, wantErr: true,
+		},
+		{
+			name: "a size beyond the cap", typ: ResourceTypeContainerService,
+			volumes: []Volume{{Name: "uploads", MountPath: "/var/lib/uploads", SizeGB: 65537}}, wantErr: true,
+		},
+
+		// Collisions within one list. Both are Specifications that cannot
+		// be honoured rather than merely odd ones.
+		{
+			name: "two filesystems under one name", typ: ResourceTypeContainerService,
+			volumes: []Volume{
+				{Name: "uploads", MountPath: "/var/lib/uploads"},
+				{Name: "uploads", MountPath: "/var/lib/other"},
+			},
+			wantErr: true, wantMsg: "declared twice",
+		},
+		{
+			name: "two filesystems at one mount path", typ: ResourceTypeContainerService,
+			volumes: []Volume{
+				{Name: "uploads", MountPath: "/var/lib/shared"},
+				{Name: "cache", MountPath: "/var/lib/shared"},
+			},
+			wantErr: true, wantMsg: "mount path",
+		},
+		{
+			name: "six filesystems, one past the cap", typ: ResourceTypeContainerService,
+			volumes: volumesNamed("a", "b", "c", "d", "e", "f"), wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := validSpec()
+			s.Resources[0].Type = tt.typ
+			s.Resources[0].Volumes = tt.volumes
+
+			err := Validate(&s)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantMsg != "" && !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Fatalf("Validate() error = %v, want it to mention %q", err, tt.wantMsg)
+			}
+		})
+	}
+}
+
+// volumesNamed builds a list of distinct volumes, one per name, for the
+// cases that are about the length of the list and nothing else.
+func volumesNamed(names ...string) []Volume {
+	volumes := make([]Volume, 0, len(names))
+	for _, name := range names {
+		volumes = append(volumes, Volume{Name: name, MountPath: "/var/lib/" + name})
+	}
+	return volumes
 }

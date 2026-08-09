@@ -85,6 +85,78 @@ func TestParse(t *testing.T) {
 	}
 }
 
+// TestParseVolumes pins the JSON spelling of RFC 018 §2.7's declaration.
+//
+// Volumes is the first field the Resource declaration has gained that is
+// itself a list of structs, so it is the first place DisallowUnknownFields
+// has to reach two levels down. A misspelled JSON tag or a volume that
+// quietly absorbs an unexpected key would both pass every test in
+// validate_test.go, which builds its Volumes in Go.
+func TestParseVolumes(t *testing.T) {
+	resource := func(volumes string) string {
+		return `{
+			"sdd_version": "1.0",
+			"intent": "deploy",
+			"resources": [
+				{
+					"id": "api",
+					"type": "container_service",
+					"provider": "agnostic",
+					"properties": {"image": "ghcr.io/acme/api@sha256:abc"},
+					"volumes": ` + volumes + `
+				}
+			]
+		}`
+	}
+
+	tests := []struct {
+		name    string
+		input   string
+		want    *Volume
+		wantErr bool
+	}{
+		{
+			name:  "every field of a volume decodes",
+			input: resource(`[{"name": "uploads", "mount_path": "/var/lib/uploads", "size_gb": 100}]`),
+			want:  &Volume{Name: "uploads", MountPath: "/var/lib/uploads", SizeGB: 100},
+		},
+		{
+			name:  "size_gb is optional",
+			input: resource(`[{"name": "uploads", "mount_path": "/var/lib/uploads"}]`),
+			want:  &Volume{Name: "uploads", MountPath: "/var/lib/uploads"},
+		},
+		{
+			name:    "unknown field inside a volume rejected (mass assignment)",
+			input:   resource(`[{"name": "uploads", "mount_path": "/var/lib/uploads", "read_only": false}]`),
+			wantErr: true,
+		},
+		{
+			name:    "a volume that is not an object",
+			input:   resource(`["uploads"]`),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, err := Parse(strings.NewReader(tt.input))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Parse() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.want == nil {
+				return
+			}
+			got := s.Resources[0].Volumes
+			if len(got) != 1 {
+				t.Fatalf("Volumes = %v, want exactly one", got)
+			}
+			if got[0] != *tt.want {
+				t.Fatalf("Volumes[0] = %+v, want %+v", got[0], *tt.want)
+			}
+		})
+	}
+}
+
 func TestParse_TrailingDataSentinel(t *testing.T) {
 	_, err := Parse(strings.NewReader(`{"sdd_version": "1.0", "intent": "deploy", "resources": []} {}`))
 	if !errors.Is(err, ErrTrailingData) {
