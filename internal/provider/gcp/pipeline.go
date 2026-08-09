@@ -5,7 +5,6 @@ package gcp
 
 import (
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"strings"
@@ -91,50 +90,19 @@ const (
 	// referenced by tag, which is the only form Cloud Build accepts here.
 	gitBuilderImage    = "gcr.io/cloud-builders/git"
 	dockerBuilderImage = "gcr.io/cloud-builders/docker"
-
-	// generatedDockerfile is where the generated Dockerfile is written. It
-	// is deliberately not "Dockerfile": a repository that has one of its
-	// own is not overwritten, and the difference between what the
-	// repository builds and what CloudSDD builds stays visible.
-	generatedDockerfile = "Dockerfile.cloudsdd"
 )
-
-// ErrPipelineNotResolved indicates a container_service whose `pipeline`
-// reference reached the provider without the Engine's answer.
-//
-// It is refused rather than guessed at. Guessing would mean inventing a
-// repository name and a tag, and the two plausible inventions — the
-// pipeline's resource id, or `latest` — are respectively wrong and the one
-// thing RFC 017 §2.4 refuses outright.
-var ErrPipelineNotResolved = errors.New("gcp: `pipeline` reached the provider unresolved")
 
 // decodeBuildPipelineProperties decodes and validates Properties as a
 // cloud-agnostic pipeline.BuildPipelineProperties through the shared strict
 // decoder.
 //
-// Unlike the AWS twin there is no repository-host check. CodeBuild's source
-// types are named after specific hosts, so an unrecognised one has to be
+// Unlike the AWS twin there is nothing to add to the shared helper. CodeBuild's
+// source types are named after specific hosts, so an unrecognised one has to be
 // refused there; here the clone is a `git clone` in a build step, any host
 // serving a public repository over HTTPS works, and refusing one would be
 // an invented limit.
 func decodeBuildPipelineProperties(props map[string]any) (*pipeline.BuildPipelineProperties, error) {
-	var p pipeline.BuildPipelineProperties
-	if err := dec.Properties(props, &p); err != nil {
-		return nil, err
-	}
-	if err := p.Validate(); err != nil {
-		return nil, fmt.Errorf("gcp: %w", err)
-	}
-	// The Dockerfile is generated at declaration time, so an unsupported
-	// runtime version is refused during Validate rather than discovered by
-	// a build that has already been provisioned and started.
-	if _, err := pipeline.NewDockerfileGenerator().Generate(pipeline.BuildSpec{
-		Stack: p.Stack,
-		Ports: p.Ports,
-	}); err != nil {
-		return nil, fmt.Errorf("gcp: %w", err)
-	}
-	return &p, nil
+	return pipeline.DecodeAndValidate(props, dec.Properties, "gcp")
 }
 
 // declareBuildPipeline registers the Artifact Registry repository and its
@@ -187,7 +155,7 @@ func declareBuildPipeline(
 
 	// The commit the Engine resolved and showed, not the branch that was
 	// written (RFC 018 §2.4.1).
-	revision := buildRevision(p, resolved)
+	revision := resolved.CommitOr(p.Source.Revision)
 	image := repository.Project.ApplyT(func(project string) string {
 		return artifactImageReference(region, project, p.ImageName, revision)
 	}).(pulumi.StringOutput)
@@ -220,20 +188,6 @@ func declareBuildPipeline(
 	return trigger, nil
 }
 
-// buildRevision is the revision the build checks out: the resolved commit
-// when the Engine supplied one, and otherwise the revision as written.
-//
-// The fallback exists because a provider can be driven directly, outside
-// the Engine, and refusing there would make the GCP provider unusable on
-// its own. Driven through the Engine — every path a user takes — a commit
-// is always present.
-func buildRevision(p pipeline.BuildPipelineProperties, resolved *spec.Resolved) string {
-	if resolved != nil && resolved.Commit != "" {
-		return resolved.Commit
-	}
-	return p.Source.Revision
-}
-
 // buildSteps is what Cloud Build runs: fetch the one revision, then build
 // the generated Dockerfile against it.
 //
@@ -264,8 +218,8 @@ func buildSteps(repository, revision, dockerfile string, image pulumi.StringOutp
 
 	build := pulumi.Sprintf(strings.Join([]string{
 		"set -eu",
-		"echo " + encoded + " | base64 -d > " + generatedDockerfile,
-		"docker build -f " + generatedDockerfile + " -t %s .",
+		"echo " + encoded + " | base64 -d > " + pipeline.GeneratedDockerfileName,
+		"docker build -f " + pipeline.GeneratedDockerfileName + " -t %s .",
 	}, "\n"), image)
 
 	return cloudbuild.TriggerBuildStepArray{
@@ -533,8 +487,8 @@ func bucketToken(s string, budget int) string {
 // — so a lookup that misses means the two disagree, and saying so beats
 // deploying a service pointed at a registry path that holds nothing.
 func pipelineImage(ctx *pulumi.Context, r spec.Resource, region string, opts ...pulumi.InvokeOption) (string, error) {
-	if r.Resolved == nil || r.Resolved.ImageName == "" || r.Resolved.Commit == "" {
-		return "", fmt.Errorf("%w: resource %q", ErrPipelineNotResolved, r.ID)
+	if !r.Resolved.Complete() {
+		return "", fmt.Errorf("gcp: resource %q: %w", r.ID, pipeline.ErrNotResolved)
 	}
 
 	repositoryID := artifactRepositoryID(r.Resolved.ImageName)

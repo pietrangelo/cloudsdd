@@ -523,8 +523,8 @@ func TestPipelineImage(t *testing.T) {
 				// Guessing would mean inventing a repository and a tag, and
 				// the plausible inventions are respectively wrong and the
 				// one thing RFC 017 §2.4 refuses outright.
-				if !errors.Is(got, ErrPipelineNotResolved) {
-					t.Fatalf("pipelineImage() = %v, want %v", got, ErrPipelineNotResolved)
+				if !errors.Is(got, pipeline.ErrNotResolved) {
+					t.Fatalf("pipelineImage() = %v, want %v", got, pipeline.ErrNotResolved)
 				}
 			})
 		}
@@ -618,28 +618,9 @@ func TestBuildLogsBucketName(t *testing.T) {
 	}
 }
 
-// TestBuildRevision: driven through the Engine a commit is always present,
-// and driving the provider directly must still work.
-func TestBuildRevision(t *testing.T) {
-	props := pipeline.BuildPipelineProperties{
-		Source: pipeline.Source{Repository: "https://github.com/acme/api", Revision: "main"},
-	}
-
-	tests := []struct {
-		name     string
-		resolved *spec.Resolved
-		want     string
-	}{
-		{name: "the resolved commit wins", resolved: testResolved, want: testCommit},
-		{name: "no resolution falls back to the revision", resolved: nil, want: "main"},
-		{name: "an empty commit falls back", resolved: &spec.Resolved{ImageName: "acme/api"}, want: "main"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := buildRevision(props, tt.resolved); got != tt.want {
-				t.Errorf("buildRevision() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
+// The revision Cloud Build checks out — the resolved commit, falling back
+// to the revision as written when a provider is driven outside the Engine —
+// is now spec.Resolved.CommitOr, covered by TestResolved_CommitOr in
+// internal/spec (RFC 019 §2.2). What stays asserted here is that the build
+// steps carry it: see TestDeclareBuildPipelineTrigger, which requires the
+// resolved commit in the script and refuses the branch that was written.

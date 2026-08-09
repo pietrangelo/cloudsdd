@@ -127,3 +127,74 @@ func TestBuildPipelineNotSchedulable(t *testing.T) {
 		}
 	}
 }
+
+// TestResolved_CommitOr covers the fallback every provider needs when it is
+// driven directly rather than through the Engine (RFC 019 §2.2).
+//
+// The nil receiver is the case that matters. A provider used on its own
+// never sees a Resolved at all, and refusing there would make the provider
+// unusable outside the Engine — so absence selects the revision as written
+// rather than an error.
+func TestResolved_CommitOr(t *testing.T) {
+	tests := []struct {
+		name     string
+		resolved *Resolved
+		fallback string
+		want     string
+	}{
+		{
+			name:     "no reference falls back to the revision as written",
+			resolved: nil,
+			fallback: "main",
+			want:     "main",
+		},
+		{
+			name:     "a resolved commit wins over the revision",
+			resolved: &Resolved{ImageName: "acme/api", Commit: "0f3a1c"},
+			fallback: "main",
+			want:     "0f3a1c",
+		},
+		{
+			name:     "a reference carrying no commit falls back",
+			resolved: &Resolved{ImageName: "acme/api"},
+			fallback: "main",
+			want:     "main",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.resolved.CommitOr(tt.fallback); got != tt.want {
+				t.Errorf("CommitOr(%q) = %q, want %q", tt.fallback, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolved_Complete covers the guard each provider's pipelineImage opens
+// with (RFC 019 §2.2).
+//
+// Both halves of the RFC 018 §2.4.1 hand-off are required, and a half-filled
+// reference is refused rather than completed by guessing: the two plausible
+// inventions — the pipeline's resource id, or `latest` — are respectively
+// wrong and the one thing RFC 017 §2.4 refuses outright.
+func TestResolved_Complete(t *testing.T) {
+	tests := []struct {
+		name     string
+		resolved *Resolved
+		want     bool
+	}{
+		{name: "no reference at all", resolved: nil, want: false},
+		{name: "a commit with no image name", resolved: &Resolved{Commit: "0f3a1c"}, want: false},
+		{name: "an image name with no commit", resolved: &Resolved{ImageName: "acme/api"}, want: false},
+		{name: "both halves present", resolved: &Resolved{ImageName: "acme/api", Commit: "0f3a1c"}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.resolved.Complete(); got != tt.want {
+				t.Errorf("Complete() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

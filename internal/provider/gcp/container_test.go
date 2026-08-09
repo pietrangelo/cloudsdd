@@ -13,6 +13,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider/container"
+	"cloudsdd/internal/provider/pipeline"
 	"cloudsdd/internal/schedule"
 	"cloudsdd/internal/spec"
 )
@@ -551,8 +552,8 @@ func TestDeclareContainerServiceRefusesAnUnresolvedPipeline(t *testing.T) {
 		return nil
 	})
 
-	if !errors.Is(got, ErrPipelineNotResolved) {
-		t.Fatalf("declareContainerService() = %v, want %v", got, ErrPipelineNotResolved)
+	if !errors.Is(got, pipeline.ErrNotResolved) {
+		t.Fatalf("declareContainerService() = %v, want %v", got, pipeline.ErrNotResolved)
 	}
 	// The refusal has to come before the service is registered, or the
 	// stack holds a Cloud Run service pointed at nothing.

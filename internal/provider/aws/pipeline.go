@@ -67,27 +67,19 @@ var ErrUnsupportedSourceHost = errors.New("aws: CodeBuild has no source type for
 // decodeBuildPipelineProperties decodes and validates Properties as a
 // cloud-agnostic pipeline.BuildPipelineProperties through the shared strict
 // decoder.
+//
+// The source-type check stays here rather than moving into the shared
+// helper: it is a real CodeBuild constraint and not a rule of the schema,
+// and GCP and Azure are right not to have it (RFC 019 §2.2).
 func decodeBuildPipelineProperties(props map[string]any) (*pipeline.BuildPipelineProperties, error) {
-	var p pipeline.BuildPipelineProperties
-	if err := dec.Properties(props, &p); err != nil {
+	p, err := pipeline.DecodeAndValidate(props, dec.Properties, "aws")
+	if err != nil {
 		return nil, err
-	}
-	if err := p.Validate(); err != nil {
-		return nil, fmt.Errorf("aws: %w", err)
-	}
-	// The Dockerfile is generated at declaration time, so an unsupported
-	// runtime version is refused during Validate rather than discovered by
-	// a build that has already been provisioned and started.
-	if _, err := pipeline.NewDockerfileGenerator().Generate(pipeline.BuildSpec{
-		Stack: p.Stack,
-		Ports: p.Ports,
-	}); err != nil {
-		return nil, fmt.Errorf("aws: %w", err)
 	}
 	if _, err := codeBuildSourceType(p.Source.Repository); err != nil {
 		return nil, err
 	}
-	return &p, nil
+	return p, nil
 }
 
 // codeBuildSourceType maps a repository URL onto the CodeBuild source type
@@ -159,7 +151,7 @@ func declareBuildPipeline(
 		// was written (RFC 018 §2.4.1). Building the branch would build
 		// whatever it points at when CodeBuild gets there, which may not be
 		// what the plan displayed.
-		SourceVersion: pulumi.String(buildRevision(p, resolved)),
+		SourceVersion: pulumi.String(resolved.CommitOr(p.Source.Revision)),
 		Environment: &codebuild.ProjectEnvironmentArgs{
 			ComputeType: pulumi.String(buildComputeType),
 			Image:       pulumi.String(buildImage),
@@ -179,20 +171,6 @@ func declareBuildPipeline(
 		return nil, fmt.Errorf("aws: failed to declare the build project for %q: %w", id, err)
 	}
 	return project, nil
-}
-
-// buildRevision is the revision CodeBuild checks out: the resolved commit
-// when the Engine supplied one, and otherwise the revision as written.
-//
-// The fallback exists because a provider can be driven directly, outside
-// the Engine, and refusing there would make the AWS provider unusable on
-// its own. Driven through the Engine — every path a user takes — a commit
-// is always present.
-func buildRevision(p pipeline.BuildPipelineProperties, resolved *spec.Resolved) string {
-	if resolved != nil && resolved.Commit != "" {
-		return resolved.Commit
-	}
-	return p.Source.Revision
 }
 
 // declarePipelineRepository registers the ECR repository and its retention
@@ -420,8 +398,8 @@ func buildspec(registry, dockerfile string) string {
 		`      - test -n "$COMMIT"`,
 		`  build:`,
 		`    commands:`,
-		`      - echo "` + encoded + `" | base64 -d > Dockerfile.cloudsdd`,
-		`      - docker build -f Dockerfile.cloudsdd -t "` + registry + `:$COMMIT" .`,
+		`      - echo "` + encoded + `" | base64 -d > ` + pipeline.GeneratedDockerfileName,
+		`      - docker build -f ` + pipeline.GeneratedDockerfileName + ` -t "` + registry + `:$COMMIT" .`,
 		`  post_build:`,
 		`    commands:`,
 		`      - docker push "` + registry + `:$COMMIT"`,
@@ -429,15 +407,6 @@ func buildspec(registry, dockerfile string) string {
 		``,
 	}, "\n")
 }
-
-// ErrPipelineNotResolved indicates a container_service whose `pipeline`
-// reference reached the provider without the Engine's answer.
-//
-// It is refused rather than guessed at. Guessing would mean inventing a
-// repository name and a tag, and the two plausible inventions — the
-// pipeline's resource id, or `latest` — are respectively wrong and the one
-// thing RFC 017 §2.4 refuses outright.
-var ErrPipelineNotResolved = errors.New("aws: `pipeline` reached the provider unresolved")
 
 // pipelineImage turns a resolved `pipeline` reference into the image
 // reference the task definition runs (RFC 018 §2.4.1).
@@ -455,8 +424,8 @@ var ErrPipelineNotResolved = errors.New("aws: `pipeline` reached the provider un
 // §2.9) — so a lookup that misses means the two disagree, and saying so
 // beats deploying a service pointed at a registry path that holds nothing.
 func pipelineImage(ctx *pulumi.Context, r spec.Resource, opts ...pulumi.InvokeOption) (string, error) {
-	if r.Resolved == nil || r.Resolved.ImageName == "" || r.Resolved.Commit == "" {
-		return "", fmt.Errorf("%w: resource %q", ErrPipelineNotResolved, r.ID)
+	if !r.Resolved.Complete() {
+		return "", fmt.Errorf("aws: resource %q: %w", r.ID, pipeline.ErrNotResolved)
 	}
 
 	repository, err := ecr.LookupRepository(ctx, &ecr.LookupRepositoryArgs{

@@ -166,6 +166,32 @@ type Resolved struct {
 	Commit string
 }
 
+// CommitOr returns the commit the Engine resolved, or fallback when it
+// supplied none (RFC 019 §2.2).
+//
+// The fallback exists because a provider can be driven directly, outside
+// the Engine, and refusing there would make the provider unusable on its
+// own. Driven through the Engine — every path a user takes — a commit is
+// always present, so callers pass the revision as written as the fallback.
+func (r *Resolved) CommitOr(fallback string) string {
+	if r == nil || r.Commit == "" {
+		return fallback
+	}
+	return r.Commit
+}
+
+// Complete reports whether r carries both halves of the RFC 018 §2.4.1
+// hand-off: the repository the pipeline publishes to, and the tag it
+// publishes under.
+//
+// A half-filled reference is incomplete rather than completable. The two
+// plausible inventions — the pipeline's resource id in place of the image
+// name, or `latest` in place of the commit — are respectively wrong and
+// the one tag RFC 017 §2.4 refuses outright.
+func (r *Resolved) Complete() bool {
+	return r != nil && r.ImageName != "" && r.Commit != ""
+}
+
 // Scope describes where a resource is deployed within its Account (RFC
 // 005 §2.2): logical Environment, Region(s), Zones, and whether it is
 // allowed to cross an Account/Environment boundary.

@@ -44,6 +44,21 @@
 #   no-op and the address-plan refusal); what remains is stack.Destroy
 #   and its error wrap.
 #
+#   2026-08-09, RFC 019 Phase 1: the build_pipeline seam. gcp 73 -> 72.
+#   This is the exception's mirror image and deserves stating as such,
+#   because RFC 019 §5 predicted the opposite: it expected floors to
+#   *rise* as logic migrated out of the Pulumi-bound packages, and it had
+#   the arithmetic backwards. Phase 1 moved ten statements out of
+#   internal/provider/gcp — buildRevision, the decode skeleton, the
+#   hand-off guard — and every one of the ten was covered. The package
+#   went 412/563 to 402/553: numerator and denominator each fell by ten
+#   while the uncovered remainder held at exactly 151. No test was
+#   deleted and no statement stopped being tested; the ten now live in
+#   internal/provider/pipeline, which reads 96.1%. Removing covered code
+#   from a package whose uncovered remainder is fixed lowers its ratio,
+#   which is the clearest demonstration available that this ratio is a
+#   proxy and not the thing itself.
+#
 #   2026-08-02, RFC 017 step 5: the Container Apps power schedule.
 #   azure 70 -> 69. The exception is used here rather than in step 4,
 #   where the shortfall was closed by writing the test resourceScope had
@@ -69,16 +84,24 @@ FLOORS=(
   "cloudsdd/internal/provider/container:98"
   "cloudsdd/internal/provider/decode:95"
   "cloudsdd/internal/provider/network:93"
-  "cloudsdd/internal/provider/pipeline:95"
+  "cloudsdd/internal/provider/pipeline:96"
   "cloudsdd/internal/provider/pulumiutil:100"
   "cloudsdd/internal/schedule:96"
-  "cloudsdd/internal/spec:90"
+  "cloudsdd/internal/spec:91"
   "cloudsdd/internal/state:91"
   # Pulumi-bound: see the note above.
   "cloudsdd/internal/provider/aws:65"
   "cloudsdd/internal/provider/azure:69"
-  "cloudsdd/internal/provider/gcp:73"
+  "cloudsdd/internal/provider/gcp:72"
 )
+
+# The leaf packages of RFC 011 §1.1H, which RFC 019 §2.1 makes a checked
+# invariant rather than a remembered one: each must have zero internal
+# imports. Their leafness is why they carry 95-100% floors while the
+# Pulumi-bound packages sit at 65-73%, so it is the property every shared
+# helper added to them has to preserve — a helper taking a *decode.Decoder
+# or a provider.NetworkScope would read naturally and cost exactly this.
+LEAVES=(compute container decode network pipeline)
 
 if [[ ! -f "$PROFILE" ]]; then
   echo "coverage profile $PROFILE not found" >&2
@@ -145,6 +168,28 @@ for pkg in $(awk '{ print $1 }' <<<"$COVERAGE"); do
   if [[ $listed -eq 0 ]]; then
     echo "FAIL  $pkg — package has coverage but no floor in scripts/coverage-gate.sh" >&2
     status=1
+  fi
+done
+
+# The leaf invariant. `.Imports` is the package's own import set and not
+# its tests' — a test file may reach for another package without costing
+# the shipped code its leafness, which is the property being guarded.
+#
+# The `|| true` matters: grep exits 1 when it matches nothing, and nothing
+# is the passing case, so under `pipefail` the clean run is the one that
+# would kill the script.
+for leaf in "${LEAVES[@]}"; do
+  pkg="cloudsdd/internal/provider/$leaf"
+  imports=$(go list -f '{{join .Imports "\n"}}' "./internal/provider/$leaf" | grep '^cloudsdd/' || true)
+
+  if [[ -n "$imports" ]]; then
+    echo "FAIL  $pkg — leaf package (RFC 019 §2.1) must have no internal imports:" >&2
+    while IFS= read -r imp; do
+      echo "        imports $imp" >&2
+    done <<<"$imports"
+    status=1
+  else
+    printf 'ok    %-42s leaf, no internal imports\n' "$pkg"
   fi
 done
 

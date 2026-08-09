@@ -82,6 +82,15 @@ const (
 // MaxPorts caps the declared port list, on the same reasoning.
 const MaxPorts = 10
 
+// GeneratedDockerfileName is the file each build service writes the
+// generated Dockerfile to before building it.
+//
+// Deliberately not "Dockerfile": a repository that has one of its own is
+// not overwritten, and the difference between what the repository builds
+// and what CloudSDD builds stays visible. All three clouds agree on the
+// name, so it is stated once (RFC 019 §2.2).
+const GeneratedDockerfileName = "Dockerfile.cloudsdd"
+
 // BuildPipelineProperties represents the Properties of a Resource with
 // Type "build_pipeline" on any provider (RFC 018 §2.1).
 type BuildPipelineProperties struct {
@@ -157,6 +166,50 @@ var (
 	// grammar, which no registry would accept.
 	ErrImageNameMalformed = errors.New("build_pipeline: `image_name` is malformed")
 )
+
+// ErrNotResolved indicates a container_service whose `pipeline` reference
+// reached a provider without the Engine's answer (RFC 018 §2.4.1).
+//
+// It is refused rather than guessed at. Guessing would mean inventing a
+// repository name and a tag, and the two plausible inventions — the
+// pipeline's resource id, or `latest` — are respectively wrong and the one
+// thing RFC 017 §2.4 refuses outright.
+//
+// One sentinel for three clouds: each provider wraps it, so the prefix
+// stays local while errors.Is answers the same question everywhere.
+var ErrNotResolved = errors.New("build_pipeline: `pipeline` reached the provider unresolved")
+
+// DecodeAndValidate turns a Resource's raw Properties into a validated
+// BuildPipelineProperties, through the caller's own strict decoder.
+//
+// The three steps are the ones every provider performed identically before
+// RFC 019 §2.2 collapsed them: decode, apply the shared rules, and generate
+// the Dockerfile — the last of these purely to refuse an unbuildable stack
+// while the user is still reading a plan, rather than by a build that has
+// already been provisioned and started.
+//
+// decode is a plain func, satisfied by decode.Decoder.Properties, so that
+// this package keeps the zero internal imports RFC 019 §2.1 protects.
+// prefix names the provider, and labels only the failures this function
+// owns: a decoder that refuses the properties has already named itself, and
+// relabelling it would say so twice.
+func DecodeAndValidate(
+	props map[string]any,
+	decode func(map[string]any, any) error,
+	prefix string,
+) (*BuildPipelineProperties, error) {
+	var p BuildPipelineProperties
+	if err := decode(props, &p); err != nil {
+		return nil, err
+	}
+	if err := p.Validate(); err != nil {
+		return nil, fmt.Errorf("%s: %w", prefix, err)
+	}
+	if _, err := NewDockerfileGenerator().Generate(BuildSpec{Stack: p.Stack, Ports: p.Ports}); err != nil {
+		return nil, fmt.Errorf("%s: %w", prefix, err)
+	}
+	return &p, nil
+}
 
 // revisionPattern is what a Git branch, tag or SHA may look like here.
 //
