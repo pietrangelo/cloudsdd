@@ -4,6 +4,7 @@
 package aws
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 
@@ -39,6 +40,32 @@ func (r *recorder) snapshot() []recordedResource {
 // mockMonitor captures declared resources without contacting AWS.
 type mockMonitor struct {
 	rec *recorder
+
+	// efs is what the scope's network stack left behind, as the two
+	// lookups of RFC 020 §2.8 see it. The zero value is the ordinary
+	// scope, which is what every test that is not about a broken one
+	// wants.
+	efs efsScope
+}
+
+// efsScope lets a test describe a scope whose filesystems are not where
+// the mounting stack expects them.
+//
+// Both cases it can describe are broken invariants rather than races: the
+// Engine provisions a scope's network stack before any resource in it is
+// applied, so a filesystem that is absent here was removed out of band.
+// The provider must refuse, because the alternative — declaring a mount
+// against something that is not there — fails at task start, long after
+// the user approved a plan that looked fine.
+type efsScope struct {
+	// missingToken is a creation token no filesystem answers to. The real
+	// getFileSystem invoke fails when nothing matches, and so does this.
+	missingToken string
+
+	// withoutAccessPoints strips every filesystem of the access point the
+	// network stack gave it (RFC 020 §2.6). The filesystem is then present
+	// and the identity a task would reach it through is not.
+	withoutAccessPoints bool
 }
 
 func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
@@ -60,6 +87,11 @@ func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource
 		outputs["identifier"] = resource.NewStringProperty(args.Name)
 	case iamRoleToken:
 		outputs["arn"] = resource.NewStringProperty("arn:aws:iam::" + testAccountID + ":role/" + args.Name)
+		// An inline policy names the role it is attached to by name, so
+		// without this the two roles of RFC 017 §2.6 are indistinguishable
+		// in the recorded inputs — and a permission granted to the
+		// execution role instead of the task role would read the same.
+		outputs["name"] = resource.NewStringProperty(args.Name)
 	case ecrRepositoryToken:
 		// The build role's policy is built from the ARN and the buildspec
 		// from the URL, so both have to be knowable here or the
@@ -150,6 +182,39 @@ func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error
 				resource.NewStringProperty("subnet-aaa"),
 				resource.NewStringProperty("subnet-bbb"),
 			}),
+		}, nil
+	}
+	// The filesystem a mounting resource stack finds rather than creates
+	// (RFC 020 §2.8), by the creation token both halves derive from the
+	// same scope and volume name.
+	if args.Token == getFileSystemToken {
+		m.rec.add(recordedResource{Type: args.Token, Name: getFileSystemToken, Inputs: args.Args})
+		token := args.Args["creationToken"].StringValue()
+		if token == m.efs.missingToken {
+			return nil, fmt.Errorf("no EFS file system with creation token %q", token)
+		}
+		id := testFileSystemID(token)
+		return resource.PropertyMap{
+			"id":            resource.NewStringProperty(id),
+			"fileSystemId":  resource.NewStringProperty(id),
+			"creationToken": resource.NewStringProperty(token),
+			"arn":           resource.NewStringProperty(testFileSystemARN(id)),
+		}, nil
+	}
+	// The access point that filesystem carries, which is the identity the
+	// task mounts as (RFC 020 §2.6). The network stack declares exactly
+	// one per filesystem, so the set is a set of one.
+	if args.Token == getAccessPointsToken {
+		m.rec.add(recordedResource{Type: args.Token, Name: getAccessPointsToken, Inputs: args.Args})
+		fileSystemID := args.Args["fileSystemId"].StringValue()
+		ids := []resource.PropertyValue{resource.NewStringProperty(testAccessPointID(fileSystemID))}
+		if m.efs.withoutAccessPoints {
+			ids = nil
+		}
+		return resource.PropertyMap{
+			"id":           resource.NewStringProperty(fileSystemID),
+			"fileSystemId": resource.NewStringProperty(fileSystemID),
+			"ids":          resource.NewArrayProperty(ids),
 		}, nil
 	}
 	// The hosted zone a public container service's certificate is

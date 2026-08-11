@@ -724,3 +724,320 @@ func TestDeclareContainerServiceWithoutScheduleDeclaresNoScheduleResources(t *te
 		t.Error("a schedule was declared for an unscheduled service")
 	}
 }
+
+// mountingContainerResource is a service that mounts volumes its scope
+// already holds.
+//
+// It carries the scope's environment rather than the empty one every other
+// fixture here uses, because the creation token both halves derive is built
+// from it: a service in another environment looks for another filesystem,
+// which is the whole of what "the volume belongs to the scope" means.
+func mountingContainerResource(volumes []spec.Volume) spec.Resource {
+	return containerResource(func(r *spec.Resource) {
+		r.Scope.Environment = testScope().Environment
+		r.Volumes = volumes
+	})
+}
+
+func declaredMountingContainer(t *testing.T, volumes []spec.Volume) []recordedResource {
+	t.Helper()
+
+	props, err := decodeContainerServiceProperties(containerProps(nil), nil)
+	if err != nil {
+		t.Fatalf("decodeContainerServiceProperties() = %v", err)
+	}
+	return runProgram(t, func(ctx *pulumi.Context) error {
+		_, err := declareContainerService(ctx, mountingContainerResource(volumes), testNetwork(), *props, nil)
+		return err
+	})
+}
+
+// TestDeclareContainerServiceMountsItsVolumes covers the AWS row of RFC
+// 020 §2.8's mount table.
+//
+// Two volumes rather than one, because every assertion here is about
+// *which* filesystem a mount reaches. A single volume would pass just as
+// well against an implementation that looked the first one up and wired
+// every mount to it — which is the shape of the failure §1 describes, two
+// names resolving to one share.
+func TestDeclareContainerServiceMountsItsVolumes(t *testing.T) {
+	volumes := []spec.Volume{
+		{Name: "uploads", MountPath: "/var/lib/uploads"},
+		// A size the AWS row of §2.7 ignores: EFS capacity is elastic, so
+		// declaring one here must change nothing about the mount.
+		{Name: "cache", MountPath: "/var/cache/app", SizeGB: 100},
+	}
+	recorded := declaredMountingContainer(t, volumes)
+
+	// Lookup, not create. A filesystem declared here would be a second one
+	// beside the scope's, and the two services meant to share it would each
+	// see an empty directory — the silent wrong answer RFC 020 §1 exists to
+	// prevent.
+	for _, token := range []string{
+		fileSystemToken, accessPointToken, mountTargetToken, efsBackupPolicyToken,
+	} {
+		if n := len(resourcesOfType(recorded, token)); n != 0 {
+			t.Errorf("the resource stack declared %d %q; the scope's network stack owns them", n, token)
+		}
+	}
+
+	lookedUp := map[string]bool{}
+	for _, l := range resourcesOfType(recorded, getFileSystemToken) {
+		lookedUp[l.Inputs["creationToken"].StringValue()] = true
+	}
+	if len(lookedUp) != len(volumes) {
+		t.Fatalf("looked up %d distinct filesystems, want one per volume (%d)", len(lookedUp), len(volumes))
+	}
+
+	// Each volume is reached by the token the network stack set. A
+	// filesystem sought under any other token is one that does not exist.
+	fileSystemOf := make(map[string]string, len(volumes))
+	for _, v := range volumes {
+		token := fileSystemTokenFor(testScope(), v.Name)
+		if !lookedUp[token] {
+			t.Fatalf("volume %q was not looked up by its creation token %q; tokens sought = %v",
+				v.Name, token, lookedUp)
+		}
+		fileSystemOf[v.Name] = testFileSystemID(token)
+	}
+
+	assertTaskVolumes(t, recorded, fileSystemOf)
+	assertMountPoints(t, recorded, volumes)
+	assertTaskRoleMounts(t, recorded, fileSystemOf)
+}
+
+// assertTaskVolumes covers the task definition's half of the mount: each
+// volume names its own filesystem, and reaches it encrypted and through
+// the access point rather than as root over the whole share.
+func assertTaskVolumes(t *testing.T, recorded []recordedResource, fileSystemOf map[string]string) {
+	t.Helper()
+
+	task := findResource(t, recorded, ecsTaskDefinitionToken)
+	declared := task.Inputs["volumes"].ArrayValue()
+	if len(declared) != len(fileSystemOf) {
+		t.Fatalf("the task definition declares %d volumes, want %d", len(declared), len(fileSystemOf))
+	}
+
+	for _, entry := range declared {
+		volume := entry.ObjectValue()
+		name := volume["name"].StringValue()
+		wantFileSystem, ok := fileSystemOf[name]
+		if !ok {
+			t.Fatalf("the task definition declares a volume %q the resource never asked for", name)
+		}
+
+		config := volume["efsVolumeConfiguration"].ObjectValue()
+		if got := config["fileSystemId"].StringValue(); got != wantFileSystem {
+			t.Errorf("volume %q mounts filesystem %q, want %q — the one the scope holds under its creation token",
+				name, got, wantFileSystem)
+		}
+		// Not decoration: the file system policy of §2.6 denies anything
+		// arriving over an unencrypted connection, so a mount without this
+		// is one the filesystem itself refuses.
+		if got := config["transitEncryption"].StringValue(); got != "ENABLED" {
+			t.Errorf("volume %q: transitEncryption = %q, want ENABLED; the file system policy denies plaintext",
+				name, got)
+		}
+
+		auth := config["authorizationConfig"].ObjectValue()
+		want := testAccessPointID(wantFileSystem)
+		if got := auth["accessPointId"].StringValue(); got != want {
+			t.Errorf("volume %q: accessPointId = %q, want %q; without it the task reaches the whole "+
+				"filesystem as root, whatever the image runs as", name, got, want)
+		}
+		// IAM authorization is what makes the task role's grant apply at
+		// all. Without it the mount is authorized by the network alone.
+		if got := auth["iam"].StringValue(); got != "ENABLED" {
+			t.Errorf("volume %q: iam = %q, want ENABLED", name, got)
+		}
+
+		// AWS admits a root directory beside an access point only when it
+		// is "/", and the access point already pins /<volume>.
+		if root, ok := config["rootDirectory"]; ok && root.IsString() && root.StringValue() != "/" {
+			t.Errorf("volume %q: rootDirectory = %q beside an access point; AWS admits only %q or nothing",
+				name, root.StringValue(), "/")
+		}
+	}
+}
+
+// assertMountPoints covers the container's half: a volume the task
+// definition declares but the container never mounts is a filesystem
+// nothing can reach, which is a deployment that reports success and serves
+// an empty directory.
+func assertMountPoints(t *testing.T, recorded []recordedResource, volumes []spec.Volume) {
+	t.Helper()
+
+	task := findResource(t, recorded, ecsTaskDefinitionToken)
+
+	var definitions []struct {
+		MountPoints []struct {
+			SourceVolume  string `json:"sourceVolume"`
+			ContainerPath string `json:"containerPath"`
+		} `json:"mountPoints"`
+	}
+	if err := json.Unmarshal([]byte(task.Inputs["containerDefinitions"].StringValue()), &definitions); err != nil {
+		t.Fatalf("container definitions are not valid JSON: %v", err)
+	}
+	if len(definitions) != 1 {
+		t.Fatalf("declared %d container definitions, want 1", len(definitions))
+	}
+
+	paths := map[string]string{}
+	for _, mp := range definitions[0].MountPoints {
+		paths[mp.SourceVolume] = mp.ContainerPath
+	}
+	if len(paths) != len(volumes) {
+		t.Fatalf("the container declares %d mount points, want one per volume (%d)", len(paths), len(volumes))
+	}
+	for _, v := range volumes {
+		if got := paths[v.Name]; got != v.MountPath {
+			t.Errorf("volume %q appears at %q inside the container, want the requested %q",
+				v.Name, got, v.MountPath)
+		}
+	}
+}
+
+// assertTaskRoleMounts covers the identity half of RFC 020 §2.6: the task
+// role receives its first permission ever — RFC 017 §2.6 declared it empty
+// on purpose — and it names the filesystems this service mounts and
+// nothing else.
+func assertTaskRoleMounts(t *testing.T, recorded []recordedResource, fileSystemOf map[string]string) {
+	t.Helper()
+
+	policies := resourcesOfType(recorded, iamRolePolicyToken)
+	if len(policies) != 1 {
+		t.Fatalf("declared %d inline role policies, want 1 (the mount grant)", len(policies))
+	}
+	policy := policies[0]
+
+	// On the task role, which is what the container runs as. The execution
+	// role belongs to the ECS agent, and a grant there would let the agent
+	// mount while the container still could not.
+	if role := policy.Inputs["role"].StringValue(); !strings.Contains(role, "task-role") {
+		t.Errorf("the mount grant is attached to %q, want the task role", role)
+	}
+
+	var document struct {
+		Statement []struct {
+			Effect   string
+			Action   []string
+			Resource []string
+		}
+	}
+	if err := json.Unmarshal([]byte(policy.Inputs["policy"].StringValue()), &document); err != nil {
+		t.Fatalf("the mount policy is not valid JSON: %v", err)
+	}
+	if len(document.Statement) != 1 {
+		t.Fatalf("the mount policy has %d statements, want 1", len(document.Statement))
+	}
+	statement := document.Statement[0]
+
+	if statement.Effect != "Allow" {
+		t.Errorf("the mount statement has effect %q, want Allow", statement.Effect)
+	}
+	// Exactly two actions, which is also how ClientRootAccess is refused:
+	// it is the one permission that would make the access point's non-root
+	// user pointless, and an allowlist rejects it without naming it.
+	wanted := map[string]bool{
+		"elasticfilesystem:ClientMount": true,
+		"elasticfilesystem:ClientWrite": true,
+	}
+	if len(statement.Action) != len(wanted) {
+		t.Errorf("granted actions = %v, want exactly ClientMount and ClientWrite", statement.Action)
+	}
+	for _, action := range statement.Action {
+		if !wanted[action] {
+			t.Errorf("granted %q; ClientMount and ClientWrite are all a mount needs", action)
+		}
+	}
+
+	arns := map[string]bool{}
+	for _, id := range fileSystemOf {
+		arns[testFileSystemARN(id)] = true
+	}
+	if len(statement.Resource) != len(arns) {
+		t.Errorf("granted on %v, want one ARN per mounted filesystem (%d)", statement.Resource, len(arns))
+	}
+	for _, arn := range statement.Resource {
+		if arn == "*" {
+			t.Error("the task role is granted on *, want the filesystems this service mounts")
+		}
+		if !arns[arn] {
+			t.Errorf("granted on %q, which is not a filesystem this service mounts", arn)
+		}
+	}
+}
+
+// TestDeclareContainerServiceWithoutVolumesGrantsTheTaskRoleNothing keeps
+// RFC 017 §2.6 true for every service that mounts nothing: the task role's
+// first permission arrives with a volume, and only with one.
+func TestDeclareContainerServiceWithoutVolumesGrantsTheTaskRoleNothing(t *testing.T) {
+	recorded := declaredContainer(t, nil)
+
+	if n := len(resourcesOfType(recorded, iamRolePolicyToken)); n != 0 {
+		t.Errorf("declared %d inline role policies for a service that mounts nothing, want none", n)
+	}
+	for _, token := range []string{getFileSystemToken, getAccessPointsToken} {
+		if hasResource(recorded, token) {
+			t.Errorf("%s was invoked for a service with no volumes", token)
+		}
+	}
+	if volumes := findResource(t, recorded, ecsTaskDefinitionToken).Inputs["volumes"]; volumes.IsArray() {
+		if n := len(volumes.ArrayValue()); n != 0 {
+			t.Errorf("the task definition declares %d volumes, want none", n)
+		}
+	}
+}
+
+// TestDeclareContainerServiceRefusesAFilesystemTheScopeDoesNotHave covers
+// the lookup-not-create discipline of RFC 020 §2.8.
+//
+// The Engine provisions a scope's network stack before any resource in it,
+// so a filesystem absent here was removed out of band rather than lost to
+// a race. Creating a replacement would be §1's silent wrong answer — a
+// second, empty share where a shared one was meant to be — so the provider
+// refuses and names what it could not find.
+func TestDeclareContainerServiceRefusesAFilesystemTheScopeDoesNotHave(t *testing.T) {
+	tests := []struct {
+		name    string
+		efs     efsScope
+		wantMsg string
+	}{
+		{
+			name:    "no filesystem answers to the creation token",
+			efs:     efsScope{missingToken: fileSystemTokenFor(testScope(), "uploads")},
+			wantMsg: "uploads",
+		},
+		{
+			// The filesystem is there and the identity a task would reach
+			// it through is not. Mounting anyway would build a task
+			// definition that fails at task start, long after the plan was
+			// approved.
+			name:    "the filesystem carries no access point",
+			efs:     efsScope{withoutAccessPoints: true},
+			wantMsg: "access point",
+		},
+	}
+
+	props, err := decodeContainerServiceProperties(containerProps(nil), nil)
+	if err != nil {
+		t.Fatalf("decodeContainerServiceProperties() = %v", err)
+	}
+	r := mountingContainerResource([]spec.Volume{{Name: "uploads", MountPath: "/var/lib/uploads"}})
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+				_, err := declareContainerService(ctx, r, testNetwork(), *props, nil)
+				return err
+			}, pulumi.WithMocks("cloudsdd-aws", "test", mockMonitor{rec: &recorder{}, efs: tt.efs}))
+
+			if !errors.Is(err, ErrFilesystemMissing) {
+				t.Fatalf("declareContainerService() = %v, want ErrFilesystemMissing", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Errorf("error = %q, want it to name %q", err, tt.wantMsg)
+			}
+		})
+	}
+}

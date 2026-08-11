@@ -92,9 +92,10 @@ const defaultRoute = "0.0.0.0/0"
 // once per scope before applying anything in that scope, so a resource
 // program may assume the network exists.
 //
-// The scope's contents are not read yet: this stack declares no
-// filesystem until RFC 020 §2.5 lands EFS here.
-func (p *AWSProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, policies spec.Policies) error {
+// The scope's contents carry the volumes its resources mount, and this
+// stack owns the filesystems behind them (RFC 020 §2.1): they outlive and
+// precede the resources, exactly as the network does.
+func (p *AWSProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, contents provider.ScopeContents, policies spec.Policies) error {
 	// A scope with no region has no VPC. object_storage and
 	// cross_account_role are the only resources that reach here without
 	// one, and neither lives in a network.
@@ -107,7 +108,7 @@ func (p *AWSProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope
 		return err
 	}
 
-	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", p.networkProgram(s, cidr))
+	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", p.networkProgram(s, cidr, contents))
 	if err != nil {
 		return fmt.Errorf("aws: failed to prepare the network stack for scope %q: %w", scopeTag(s), err)
 	}
@@ -121,7 +122,8 @@ func (p *AWSProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope
 }
 
 // declareScopeNetwork builds the VPC, its private subnets, the egress
-// path and the DB subnet group.
+// path, and the things every resource in the scope shares: the DB subnet
+// group and the filesystems of RFC 020 §2.1.
 //
 // The egress path is the RFC 017 §2.7 repair. RFC 016 shipped this network
 // with no route out, arguing that a database and a VM reached through
@@ -133,6 +135,7 @@ func declareScopeNetwork(
 	ctx *pulumi.Context,
 	s provider.NetworkScope,
 	cidr netip.Prefix,
+	contents provider.ScopeContents,
 	opts ...pulumi.ResourceOption,
 ) error {
 	const name = "cloudsdd-net"
@@ -208,7 +211,11 @@ func declareScopeNetwork(
 		return fmt.Errorf("aws: failed to declare the db subnet group for scope %q: %w", scopeTag(s), err)
 	}
 
-	return nil
+	// The filesystems belong here for the same reason the subnet group
+	// does: a volume is named by a resource but shared by the scope, so two
+	// services asking for "uploads" must find the one filesystem rather
+	// than each create their own (RFC 020 §1).
+	return declareScopeFilesystems(ctx, s, vpc, cidr.String(), private, contents.Volumes, opts...)
 }
 
 // declareScopeEgress gives the private subnets a route out (RFC 017 §2.7).
@@ -412,13 +419,17 @@ func scopeTags(s provider.NetworkScope, extra map[string]string) pulumi.StringMa
 // than from the program, but a stack cannot be selected without one, and
 // passing the same program keeps the two paths from describing different
 // networks.
-func (p *AWSProvider) networkProgram(s provider.NetworkScope, cidr netip.Prefix) pulumi.RunFunc {
+func (p *AWSProvider) networkProgram(
+	s provider.NetworkScope,
+	cidr netip.Prefix,
+	contents provider.ScopeContents,
+) pulumi.RunFunc {
 	return func(pctx *pulumi.Context) error {
 		opts, _, err := p.providerOpts(pctx, s.Region)
 		if err != nil {
 			return err
 		}
-		return declareScopeNetwork(pctx, s, cidr, opts...)
+		return declareScopeNetwork(pctx, s, cidr, contents, opts...)
 	}
 }
 
@@ -427,7 +438,7 @@ func (p *AWSProvider) networkProgram(s provider.NetworkScope, cidr netip.Prefix)
 // The Engine establishes that the scope is empty before calling this.
 // Nothing here can check: a scope's contents live in other stacks, and
 // this one knows only about the network.
-func (p *AWSProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, policies spec.Policies) error {
+func (p *AWSProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, contents provider.ScopeContents, policies spec.Policies) error {
 	if s.Region == "" {
 		return nil
 	}
@@ -437,7 +448,7 @@ func (p *AWSProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScop
 		return err
 	}
 
-	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", p.networkProgram(s, cidr))
+	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", p.networkProgram(s, cidr, contents))
 	if err != nil {
 		return fmt.Errorf("aws: failed to select the network stack for scope %q: %w", scopeTag(s), err)
 	}

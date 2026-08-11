@@ -62,8 +62,9 @@ const (
 // the ECS agent rather than by the container.
 //
 // It is distinct from the task role, which is what the *container* can do
-// and which CloudSDD leaves empty (RFC 017 §2.6). Conflating the two is
-// how a workload ends up able to read every log group in the account.
+// and which carries nothing beyond the filesystems the resource declared
+// (RFC 017 §2.6, RFC 020 §2.6). Conflating the two is how a workload ends
+// up able to read every log group in the account.
 const executionRolePolicy = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 
 // fargateResources maps a cloud-agnostic size onto a Fargate CPU/memory
@@ -135,7 +136,7 @@ func hostedZoneName(domain string) string {
 
 // containerDefinition renders the single-container definition ECS takes as
 // a JSON document.
-func containerDefinition(id, image, region, logGroup string, port int) (string, error) {
+func containerDefinition(id, image, region, logGroup string, port int, mounts []mountedFilesystem) (string, error) {
 	definitions := []map[string]any{{
 		"name":      id,
 		"image":     image,
@@ -152,6 +153,11 @@ func containerDefinition(id, image, region, logGroup string, port int) (string, 
 				"awslogs-stream-prefix": managedByValue,
 			},
 		},
+		// Where each volume appears inside the container. A volume the task
+		// definition declares but the container never mounts is a filesystem
+		// nothing can reach: a deployment that reports success and serves an
+		// empty directory.
+		"mountPoints": containerMountPoints(mounts),
 	}}
 
 	encoded, err := json.Marshal(definitions)
@@ -159,6 +165,27 @@ func containerDefinition(id, image, region, logGroup string, port int) (string, 
 		return "", fmt.Errorf("aws: failed to render the container definition for %q: %w", id, err)
 	}
 	return string(encoded), nil
+}
+
+// containerMountPoints renders the container's half of the mount: each
+// volume at the path the resource asked for.
+//
+// The path is read here and nowhere else. It is where a filesystem appears
+// inside one container, so it belongs to the resource rather than to the
+// scope — which is why the scope's own record of the volume drops it
+// (RFC 020 §2.3).
+func containerMountPoints(mounts []mountedFilesystem) []map[string]any {
+	points := make([]map[string]any, 0, len(mounts))
+	for _, m := range mounts {
+		points = append(points, map[string]any{
+			"sourceVolume":  m.volume.Name,
+			"containerPath": m.volume.MountPath,
+			// Writable: a volume exists to outlive the task that writes it,
+			// and RFC 020 declares no read-only mode to honour.
+			"readOnly": false,
+		})
+	}
+	return points
 }
 
 // declareContainerService registers the ECS service and everything it
@@ -179,6 +206,14 @@ func declareContainerService(
 		return nil, err
 	}
 
+	// Resolved before anything is declared: a scope that does not hold what
+	// this service mounts is a failure the user should read here, not half
+	// a stack later (RFC 020 §2.8).
+	mounts, err := lookupMountedFilesystems(ctx, resourceScope(r), r.Volumes)
+	if err != nil {
+		return nil, err
+	}
+
 	albSG, serviceSG, err := declareContainerSecurityGroups(ctx, id, net, p, opts...)
 	if err != nil {
 		return nil, err
@@ -189,7 +224,7 @@ func declareContainerService(
 		return nil, err
 	}
 
-	taskDefinition, err := declareContainerTask(ctx, id, region, cpu, memory, p, opts...)
+	taskDefinition, err := declareContainerTask(ctx, id, region, cpu, memory, p, mounts, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -547,11 +582,12 @@ func declareContainerCertificate(
 }
 
 // declareContainerTask builds the log group, the two roles and the task
-// definition.
+// definition, mounting whatever filesystems the resource declared.
 func declareContainerTask(
 	ctx *pulumi.Context,
 	id, region, cpu, memory string,
 	p container.Properties,
+	mounts []mountedFilesystem,
 	opts ...pulumi.ResourceOption,
 ) (*ecs.TaskDefinition, error) {
 	logGroupName := "/cloudsdd/" + id
@@ -583,19 +619,24 @@ func declareContainerTask(
 		return nil, fmt.Errorf("aws: failed to attach the execution policy for %q: %w", id, err)
 	}
 
-	// The task role is what the *container* can do, and nothing is
-	// attached to it (RFC 017 §2.6). It is declared rather than omitted so
-	// a workload that later needs a permission has somewhere to receive
-	// it, and so the absence is visible in the plan rather than implied.
+	// The task role is what the *container* can do. RFC 017 §2.6 declared
+	// it empty on purpose, and a mount is the first thing it ever carries
+	// (RFC 020 §2.6) — a service that mounts nothing still gets nothing.
+	// It is declared rather than omitted so a workload that later needs a
+	// permission has somewhere to receive it, and so the absence is visible
+	// in the plan rather than implied.
 	taskRole, err := iam.NewRole(ctx, id+"-task-role", &iam.RoleArgs{
 		AssumeRolePolicy: pulumi.String(assumeRole),
-		Description:      pulumi.String(fmt.Sprintf("CloudSDD %s: no permissions are attached", id)),
+		Description:      pulumi.String(taskRoleDescription(id, mounts)),
 	}, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("aws: failed to declare the task role for %q: %w", id, err)
 	}
+	if err := grantFilesystemMounts(ctx, id, taskRole, mounts, opts...); err != nil {
+		return nil, err
+	}
 
-	definition, err := containerDefinition(id, p.Image, region, logGroupName, p.Port)
+	definition, err := containerDefinition(id, p.Image, region, logGroupName, p.Port, mounts)
 	if err != nil {
 		return nil, err
 	}
@@ -609,11 +650,106 @@ func declareContainerTask(
 		ExecutionRoleArn:        executionRole.Arn,
 		TaskRoleArn:             taskRole.Arn,
 		ContainerDefinitions:    pulumi.String(definition),
+		Volumes:                 taskVolumes(mounts),
 	}, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("aws: failed to declare the task definition for %q: %w", id, err)
 	}
 	return taskDefinition, nil
+}
+
+// taskRoleDescription is what an operator reads in the console. A role
+// that grants nothing and a role that grants a mount are the same object
+// with very different consequences, so they do not describe themselves the
+// same way.
+func taskRoleDescription(id string, mounts []mountedFilesystem) string {
+	if len(mounts) == 0 {
+		return fmt.Sprintf("CloudSDD %s: no permissions are attached", id)
+	}
+	return fmt.Sprintf("CloudSDD %s: may mount the %d filesystem(s) it declares", id, len(mounts))
+}
+
+// taskVolumes is the task definition's half of the mount: each volume
+// names its own filesystem and reaches it encrypted, through the access
+// point, as the ordinary user that access point pins.
+func taskVolumes(mounts []mountedFilesystem) ecs.TaskDefinitionVolumeArray {
+	volumes := ecs.TaskDefinitionVolumeArray{}
+	for _, m := range mounts {
+		volumes = append(volumes, &ecs.TaskDefinitionVolumeArgs{
+			Name: pulumi.String(m.volume.Name),
+			EfsVolumeConfiguration: &ecs.TaskDefinitionVolumeEfsVolumeConfigurationArgs{
+				FileSystemId: pulumi.String(m.fileSystemID),
+				// Not decoration: the file system policy of RFC 020 §2.6
+				// denies anything arriving over an unencrypted connection, so
+				// a mount without this is one the filesystem itself refuses.
+				TransitEncryption: pulumi.String("ENABLED"),
+				AuthorizationConfig: &ecs.TaskDefinitionVolumeEfsVolumeConfigurationAuthorizationConfigArgs{
+					AccessPointId: pulumi.String(m.accessPointID),
+					// What makes the grant below apply at all. Without it the
+					// mount is authorized by the network alone.
+					Iam: pulumi.String("ENABLED"),
+				},
+				// No RootDirectory: AWS admits one beside an access point
+				// only when it is "/", and the access point already pins
+				// /<volume>.
+			},
+		})
+	}
+	return volumes
+}
+
+// grantFilesystemMounts gives the task role permission to mount exactly
+// the filesystems this service declared, and nothing else (RFC 020 §2.6).
+//
+// One policy for all of them rather than one each: it is a single decision
+// — "this container may use its own volumes" — and N copies of it would be
+// N places for it to drift.
+func grantFilesystemMounts(
+	ctx *pulumi.Context,
+	id string,
+	role *iam.Role,
+	mounts []mountedFilesystem,
+	opts ...pulumi.ResourceOption,
+) error {
+	if len(mounts) == 0 {
+		return nil
+	}
+
+	arns := make([]string, 0, len(mounts))
+	for _, m := range mounts {
+		arns = append(arns, m.fileSystemARN)
+	}
+
+	doc := iamPolicyDocument{
+		Version: "2012-10-17",
+		Statement: []iamStatement{{
+			Effect: "Allow",
+			// Exactly what a mount needs, which is also how
+			// elasticfilesystem:ClientRootAccess is refused: it is the one
+			// permission that would make the access point's non-root user
+			// pointless, and an allowlist rejects it without naming it.
+			Action: []string{
+				"elasticfilesystem:ClientMount",
+				"elasticfilesystem:ClientWrite",
+			},
+			Resource: arns,
+		}},
+	}
+	policy, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("aws: failed to render the mount policy for %q: %w", id, err)
+	}
+
+	// On the task role, which is what the container runs as. The execution
+	// role belongs to the ECS agent, and a grant there would let the agent
+	// mount while the container still could not.
+	if _, err := iam.NewRolePolicy(ctx, id+"-task-mounts", &iam.RolePolicyArgs{
+		Role:   role.Name,
+		Policy: pulumi.String(string(policy)),
+	}, opts...); err != nil {
+		return fmt.Errorf("aws: failed to declare the mount policy for %q: %w", id, err)
+	}
+	return nil
 }
 
 // ecsAssumeRolePolicy is the trust policy both roles carry: only the ECS

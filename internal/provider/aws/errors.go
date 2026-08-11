@@ -90,6 +90,19 @@ var ErrUnsupportedContainerSize = errors.New("aws: unsupported container size")
 var ErrPublicRequiresDomain = errors.New(
 	"aws: a public container_service requires `domain`; AWS cannot issue a certificate for a load balancer's own name")
 
+// ErrFilesystemMissing indicates that a resource mounts a volume whose
+// filesystem is not in its scope, or whose filesystem carries no access
+// point (RFC 020 §2.8).
+//
+// The Engine provisions a scope's network stack — which owns both — before
+// any resource in it, so this is a broken invariant rather than a race:
+// something was removed out of band. One sentinel covers both halves
+// because they are the same failure with the same remedy; the messages
+// differ where the diagnosis does. Creating a replacement instead would be
+// RFC 020 §1's silent wrong answer: a second, empty share where a shared
+// one was meant to be.
+var ErrFilesystemMissing = errors.New("aws: the scope does not hold the filesystem a resource mounts")
+
 // ErrPublicSubnetsMissing indicates a scope network without the public
 // tier an internet-facing load balancer needs (RFC 017 §2.3.1).
 //

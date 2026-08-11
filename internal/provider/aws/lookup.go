@@ -27,6 +27,21 @@ type scopeNetwork struct {
 	dbSubnetName    string
 }
 
+// resourceScope is the scope a resource belongs to: the partition that
+// names its VPC, its subnets and its filesystems alike.
+//
+// Sealed is deliberately absent. It is a posture, not part of the
+// identity, and every name derived from a scope goes through scopeTag,
+// which does not read it.
+func resourceScope(r spec.Resource) provider.NetworkScope {
+	return provider.NetworkScope{
+		Provider:    spec.ProviderAWS,
+		Account:     r.Account,
+		Environment: r.Scope.Environment,
+		Region:      r.Scope.Region,
+	}
+}
+
 // lookupScopeNetwork finds the VPC the Engine already provisioned for
 // this resource's scope (RFC 016 §2.2).
 //
@@ -37,12 +52,7 @@ type scopeNetwork struct {
 // RFC exists to remove: a resource quietly landing in a network shared
 // with everything else in the account.
 func lookupScopeNetwork(ctx *pulumi.Context, r spec.Resource) (scopeNetwork, error) {
-	scope := provider.NetworkScope{
-		Provider:    spec.ProviderAWS,
-		Account:     r.Account,
-		Environment: r.Scope.Environment,
-		Region:      r.Scope.Region,
-	}
+	scope := resourceScope(r)
 	tag := scopeTag(scope)
 
 	vpc, err := ec2.LookupVpc(ctx, &ec2.LookupVpcArgs{

@@ -45,7 +45,7 @@ func TestDeclareScopeNetwork(t *testing.T) {
 	cidr := netip.MustParsePrefix("10.42.0.0/20")
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		return declareScopeNetwork(ctx, testScope(), cidr)
+		return declareScopeNetwork(ctx, testScope(), cidr, provider.ScopeContents{})
 	})
 
 	vpc := findResource(t, recorded, vpcToken)
@@ -126,7 +126,7 @@ func TestDeclareScopeEgress(t *testing.T) {
 	cidr := netip.MustParsePrefix("10.42.0.0/20")
 
 	recorded := runProgram(t, func(ctx *pulumi.Context) error {
-		return declareScopeNetwork(ctx, testScope(), cidr)
+		return declareScopeNetwork(ctx, testScope(), cidr, provider.ScopeContents{})
 	})
 
 	if n := len(resourcesOfType(recorded, natGatewayToken)); n != 1 {
