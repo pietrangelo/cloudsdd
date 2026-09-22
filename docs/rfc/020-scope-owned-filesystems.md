@@ -612,3 +612,14 @@ looks like a pass. With `GOMAXPROCS=2 GOGC=50 GOMEMLIMIT=4GiB`,
 `govulncheck` finished on this machine for the first time. It reports six
 reachable vulnerabilities in `grpc`, `x/crypto` and `go-git/v6`. None comes
 from this RFC's changes, and they now have their own plan item.
+
+**Phase 5, dependency bump.** The plan's grpc floor (≥ v1.83.1) was one
+patch short: GO-2026-6443 is fixed only in v1.83.2, so grpc went to v1.83.2.
+`x/crypto` went to v0.56.0 and `go-git/v6` to v6.0.0-alpha.5. `go mod tidy`
+also carried minor bumps of the `x/*` family, otel and genproto. There are
+zero reachable findings now. One module-level entry remains, GO-2026-5932
+(`x/crypto/openpgp`, unmaintained, no fix). No package here calls it, so it
+is accepted rather than worked around. On this 7 GB machine, compiling
+`pulumi-gcp/.../compute` gets OOM-killed under default parallelism whenever
+its cache is cold. `go test -p 1 ./...` is the reliable way to run the suite
+after a dependency change; this is not a code failure.
