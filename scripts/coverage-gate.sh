@@ -90,7 +90,7 @@ FLOORS=(
   "cloudsdd/internal/spec:91"
   "cloudsdd/internal/state:91"
   # Pulumi-bound: see the note above.
-  "cloudsdd/internal/provider/aws:65"
+  "cloudsdd/internal/provider/aws:70"
   "cloudsdd/internal/provider/azure:71"
   "cloudsdd/internal/provider/gcp:72"
 )
@@ -98,7 +98,7 @@ FLOORS=(
 # The leaf packages of RFC 011 §1.1H, which RFC 019 §2.1 makes a checked
 # invariant rather than a remembered one: each must have zero internal
 # imports. Their leafness is why they carry 95-100% floors while the
-# Pulumi-bound packages sit at 65-73%, so it is the property every shared
+# Pulumi-bound packages sit at 70-72%, so it is the property every shared
 # helper added to them has to preserve — a helper taking a *decode.Decoder
 # or a provider.NetworkScope would read naturally and cost exactly this.
 LEAVES=(compute container decode network pipeline)
