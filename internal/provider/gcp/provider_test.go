@@ -60,6 +60,13 @@ func pipelineResource(mutate func(*spec.Resource)) spec.Resource {
 	return r
 }
 
+// filestoreVolume is the single mounted filesystem the Filestore capacity
+// rows vary: only the requested size changes between them, and a zero
+// size is how the Specification spells "size_gb absent".
+func filestoreVolume(sizeGB int) []spec.Volume {
+	return []spec.Volume{{Name: "uploads", MountPath: "/var/lib/uploads", SizeGB: sizeGB}}
+}
+
 func TestValidate(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -158,6 +165,30 @@ func TestValidate(t *testing.T) {
 			resource: pipelineResource(nil),
 			policies: spec.Policies{AllowedRegions: []string{"us-east1"}},
 			wantErr:  "not in allowed_regions",
+		},
+		{
+			// RFC 020 §2.7: Filestore's smallest instance is 1 TiB, so a
+			// volume with no size at all still bills for a terabyte. GCP
+			// refuses by name rather than inventing the floor on the
+			// user's behalf (RFC 012 §1.3).
+			name:     "container volume without size_gb",
+			resource: containerResource(func(r *spec.Resource) { r.Volumes = filestoreVolume(0) }),
+			wantErr:  "at least 1024",
+		},
+		{
+			// The worse half of the same bill: a number the user chose,
+			// silently replaced by one twelve times larger.
+			name:     "container volume below Filestore's floor",
+			resource: containerResource(func(r *spec.Resource) { r.Volumes = filestoreVolume(100) }),
+			wantErr:  "at least 1024",
+		},
+		{
+			name:     "container volume at Filestore's floor",
+			resource: containerResource(func(r *spec.Resource) { r.Volumes = filestoreVolume(1024) }),
+		},
+		{
+			name:     "container volume above Filestore's floor",
+			resource: containerResource(func(r *spec.Resource) { r.Volumes = filestoreVolume(2048) }),
 		},
 		{
 			// cross_account_role stands in here now. compute_instance held

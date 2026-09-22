@@ -11,6 +11,7 @@ import (
 	"github.com/pulumi/pulumi-gcp/sdk/v7/go/gcp/serviceaccount"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
+	"cloudsdd/internal/provider"
 	"cloudsdd/internal/provider/container"
 	"cloudsdd/internal/spec"
 )
@@ -51,6 +52,11 @@ const (
 // and serves no certificate for it — the plain-HTTP outcome RFC 017 §2.3
 // refuses.
 const certificateModeAutomatic = "AUTOMATIC"
+
+// executionEnvironmentGen2 is the only Cloud Run environment that mounts
+// NFS. The first generation accepts an NFS volume in the template and
+// fails the revision at start.
+const executionEnvironmentGen2 = "EXECUTION_ENVIRONMENT_GEN2"
 
 // runResources maps a cloud-agnostic size onto Cloud Run CPU and memory
 // limits.
@@ -98,6 +104,53 @@ func decodeContainerServiceProperties(props map[string]any, allowedRegistries []
 	return &p, nil
 }
 
+// mountFilesystems adds each scope filesystem to the template as an NFS
+// volume and mounts it into the workload at the path the resource asked
+// for (RFC 020 §2.8).
+//
+// A service that mounts nothing is left exactly as RFC 017 declared it —
+// no empty volume list and no execution environment — because changing
+// either rolls a new revision of every existing service for a feature it
+// does not use.
+//
+// The Cloud Run volume is named after the instance. That name is already
+// a DNS label, which the Specification's volume name is not, and it is
+// already injective over volume names, so it needs no second derivation.
+// Nothing is granted to the service identity: Filestore's basic tiers
+// authorize by network alone (RFC 020 §4).
+func mountFilesystems(
+	template *cloudrunv2.ServiceTemplateArgs,
+	workload *cloudrunv2.ServiceTemplateContainerArgs,
+	mounts []mountedFilesystem,
+) {
+	if len(mounts) == 0 {
+		return
+	}
+
+	volumes := make(cloudrunv2.ServiceTemplateVolumeArray, 0, len(mounts))
+	volumeMounts := make(cloudrunv2.ServiceTemplateContainerVolumeMountArray, 0, len(mounts))
+	for _, m := range mounts {
+		volumes = append(volumes, &cloudrunv2.ServiceTemplateVolumeArgs{
+			Name: pulumi.String(m.instance),
+			Nfs: &cloudrunv2.ServiceTemplateVolumeNfsArgs{
+				Server: pulumi.String(m.server),
+				Path:   pulumi.String("/" + filestoreShareName),
+				// RFC 020 declares no read-only mode: a volume exists to be
+				// written.
+				ReadOnly: pulumi.Bool(false),
+			},
+		})
+		volumeMounts = append(volumeMounts, &cloudrunv2.ServiceTemplateContainerVolumeMountArgs{
+			Name:      pulumi.String(m.instance),
+			MountPath: pulumi.String(m.volume.MountPath),
+		})
+	}
+
+	template.ExecutionEnvironment = pulumi.String(executionEnvironmentGen2)
+	template.Volumes = volumes
+	workload.VolumeMounts = volumeMounts
+}
+
 // declareContainerService registers the Cloud Run service, the dedicated
 // identity it runs as, and — when public — the IAM binding that lets the
 // internet call it (RFC 017 §2.6).
@@ -127,6 +180,14 @@ func declareContainerService(
 		}
 	}
 
+	// The scope's instances are found before anything is registered, for
+	// the same reason: a missing one is refused rather than leaving a stack
+	// holding a service that mounts nothing where a volume was asked for.
+	mounts, err := lookupMountedFilesystems(ctx, provider.ResourceScope(spec.ProviderGCP, r), r.Volumes)
+	if err != nil {
+		return nil, err
+	}
+
 	// A dedicated identity with nothing attached, following RFC 013's
 	// choice to give a VM no standing credential. Omitting the block
 	// entirely would not do the same thing here as it does for a Compute
@@ -148,50 +209,53 @@ func declareContainerService(
 		ingress = ingressAll
 	}
 
+	workload := &cloudrunv2.ServiceTemplateContainerArgs{
+		Image: pulumi.String(image),
+		Ports: cloudrunv2.ServiceTemplateContainerPortArray{
+			&cloudrunv2.ServiceTemplateContainerPortArgs{
+				ContainerPort: pulumi.Int(p.Port),
+			},
+		},
+		Resources: &cloudrunv2.ServiceTemplateContainerResourcesArgs{
+			Limits: pulumi.StringMap{
+				"cpu":    pulumi.String(cpu),
+				"memory": pulumi.String(memory),
+			},
+		},
+	}
+
+	template := &cloudrunv2.ServiceTemplateArgs{
+		ServiceAccount: account.Email,
+		Scaling: &cloudrunv2.ServiceTemplateScalingArgs{
+			// Zero is the floor, which is Cloud Run's whole point:
+			// nothing runs, and nothing bills, until a request arrives.
+			// Replicas is therefore a ceiling here rather than a fleet
+			// size — the cap that keeps a mistranslated prompt from
+			// scaling into an invoice.
+			MinInstanceCount: pulumi.Int(0),
+			MaxInstanceCount: pulumi.Int(p.EffectiveReplicas()),
+		},
+		// Direct VPC egress into the scope's own subnet, so the service
+		// sits beside the database it was deployed to talk to (RFC 016
+		// §2.3) and leaves through the scope's NAT (RFC 017 §2.7).
+		VpcAccess: &cloudrunv2.ServiceTemplateVpcAccessArgs{
+			Egress: pulumi.String(vpcEgressAll),
+			NetworkInterfaces: cloudrunv2.ServiceTemplateVpcAccessNetworkInterfaceArray{
+				&cloudrunv2.ServiceTemplateVpcAccessNetworkInterfaceArgs{
+					Network:    pulumi.String(networkName),
+					Subnetwork: pulumi.String(networkName + "-subnet"),
+				},
+			},
+		},
+		Containers: cloudrunv2.ServiceTemplateContainerArray{workload},
+	}
+	mountFilesystems(template, workload, mounts)
+
 	service, err := cloudrunv2.NewService(ctx, id, &cloudrunv2.ServiceArgs{
 		Name:     pulumi.String(id),
 		Location: pulumi.String(region),
 		Ingress:  pulumi.String(ingress),
-		Template: &cloudrunv2.ServiceTemplateArgs{
-			ServiceAccount: account.Email,
-			Scaling: &cloudrunv2.ServiceTemplateScalingArgs{
-				// Zero is the floor, which is Cloud Run's whole point:
-				// nothing runs, and nothing bills, until a request arrives.
-				// Replicas is therefore a ceiling here rather than a fleet
-				// size — the cap that keeps a mistranslated prompt from
-				// scaling into an invoice.
-				MinInstanceCount: pulumi.Int(0),
-				MaxInstanceCount: pulumi.Int(p.EffectiveReplicas()),
-			},
-			// Direct VPC egress into the scope's own subnet, so the service
-			// sits beside the database it was deployed to talk to (RFC 016
-			// §2.3) and leaves through the scope's NAT (RFC 017 §2.7).
-			VpcAccess: &cloudrunv2.ServiceTemplateVpcAccessArgs{
-				Egress: pulumi.String(vpcEgressAll),
-				NetworkInterfaces: cloudrunv2.ServiceTemplateVpcAccessNetworkInterfaceArray{
-					&cloudrunv2.ServiceTemplateVpcAccessNetworkInterfaceArgs{
-						Network:    pulumi.String(networkName),
-						Subnetwork: pulumi.String(networkName + "-subnet"),
-					},
-				},
-			},
-			Containers: cloudrunv2.ServiceTemplateContainerArray{
-				&cloudrunv2.ServiceTemplateContainerArgs{
-					Image: pulumi.String(image),
-					Ports: cloudrunv2.ServiceTemplateContainerPortArray{
-						&cloudrunv2.ServiceTemplateContainerPortArgs{
-							ContainerPort: pulumi.Int(p.Port),
-						},
-					},
-					Resources: &cloudrunv2.ServiceTemplateContainerResourcesArgs{
-						Limits: pulumi.StringMap{
-							"cpu":    pulumi.String(cpu),
-							"memory": pulumi.String(memory),
-						},
-					},
-				},
-			},
-		},
+		Template: template,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("gcp: failed to declare the container service %q: %w", id, err)

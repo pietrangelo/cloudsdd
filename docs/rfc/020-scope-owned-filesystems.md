@@ -410,3 +410,67 @@ attempted here.
 ## 8. Implementation notes
 
 *(Filled in as the rollout proceeds.)*
+
+**GCP instance name (§2.5).** `filestoreInstanceNameFor` always appends
+`provider.ShortHash` of the unfolded `ScopeName + "::" + volume`, rather
+than only when the label overflows. A volume name admits uppercase and
+underscores and GCP does not, so folding is lossy (`Cache`/`cache`,
+`a_b`/`a-b`, `a-`/`a` after trimming); hashing every time makes the name
+injective with no truncation branch, and `cloudsdd-fs-` + 32 + `-` + 8
+never exceeds 63. The scope is readable in the instance description
+instead of the name. The golden value is pinned in the test.
+
+**GCP share name.** One constant, `filestoreShareName`, not a
+per-volume derivation: each instance carries exactly one share, so the
+instance name already identifies the volume, and deriving a ≤16-character
+letter-first share name from a 32-character volume would need a second
+truncate-and-hash rule for no gain in identity.
+
+**GCP zone.** Set through `location` (`<region>-a`), not the deprecated
+`zone` input.
+
+**GCP wiring.** `declareScopeNetwork` takes `provider.ScopeContents` as its
+fourth argument, as on AWS, and ends in `declareScopeFilesystems`; the two
+`network_test.go` calls take an empty `ScopeContents{}` — the priced §5
+signature exception, no assertion changed. The instance joins the VPC by
+`vpc.Name` rather than a literal, so Pulumi orders it after the network.
+The zone reuses `instanceZone(region, "")` so Compute Engine and Filestore
+cannot disagree on what "the region's first zone" means. The share is named
+`data`.
+
+**GCP mount contract (tests).** The mock's `getInstance` answers with an
+address derived from the instance name, so the two-volume test can tell
+which server each mount path reaches; one volume is `Shared_Cache`, which
+the Specification admits and a Cloud Run volume name (a DNS label) does
+not, so the Specification's name cannot be passed through verbatim. The
+lookup must name the zone (`instanceZone(region, "")`): basic tiers are
+zonal, and a lookup falling back to the provider default finds nothing.
+A mounting template must set `EXECUTION_ENVIRONMENT_GEN2`, since Cloud Run
+mounts NFS only there; a template that mounts nothing must leave it unset,
+because changing it rolls a new revision of every existing service.
+Mounting grants the service identity nothing — basic Filestore has no
+data-plane IAM (§4). `ErrFilesystemMissing` covers both an absent instance
+and one with no private address, as the AWS sentinel covers both of its
+halves, and the refusal must precede the service account and the service.
+`TestDeclareContainerServiceWithoutVolumesMountsNothing` passes before the
+implementation by design: it pins unchanged behaviour, not new behaviour.
+
+**GCP mount (implementation).** The lookup (`lookupMountedFilesystems`,
+`privateAddress`) lives in `filesystem.go` beside `declareScopeFilesystems`,
+as on AWS, so both readers of `filestoreInstanceNameFor` sit in one file; it
+takes the scope from `provider.ResourceScope`, the same derivation the Engine
+uses, so a scope that gains a field reaches both halves together. It also
+touches `errors.go` (`ErrFilesystemMissing`), which the item did not name.
+**The Cloud Run volume is named after the instance**, not after a second
+derivation from the volume name: the instance name is already a DNS label
+and already injective over volume names. `mountFilesystems` returns early
+when nothing is mounted, so such a template carries no `volumes` key and no
+`executionEnvironment`, which avoids a new revision on every existing service.
+`readOnly: false` is stated explicitly, as on AWS. An instance reporting no
+network, or a network with no address, is refused. The first address of the
+first network is taken without further checks, because the network stack
+declares exactly one network in `MODE_IPV4`. **One test-side change:**
+`container_test.go` gained `stringOrEmpty`, because two mutations (dropping
+the lookup's `location`, dropping `executionEnvironment`) were killed by a
+`StringValue`-on-null panic rather than by their diagnostic. No assertion
+changed; they now fail with their own message.

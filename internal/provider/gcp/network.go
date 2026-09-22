@@ -62,9 +62,9 @@ const (
 // private services access to have any address, so the instance came up
 // with no path to it whatsoever (RFC 016 §1).
 //
-// The scope's contents are not read yet: this stack declares no
-// filesystem until RFC 020 §2.7 lands Filestore here.
-func (p *GCPProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, policies spec.Policies) error {
+// The scope's contents carry the volumes its resources mount, and this
+// stack owns their Filestore instances (RFC 020 §2.1).
+func (p *GCPProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, contents provider.ScopeContents, policies spec.Policies) error {
 	// object_storage is global on GCP and reaches here without a region.
 	// It lives in no network.
 	if s.Region == "" {
@@ -77,7 +77,7 @@ func (p *GCPProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope
 	}
 
 	program := func(pctx *pulumi.Context) error {
-		return declareScopeNetwork(pctx, s, cidr)
+		return declareScopeNetwork(pctx, s, cidr, contents)
 	}
 
 	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", program)
@@ -90,12 +90,14 @@ func (p *GCPProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope
 	return nil
 }
 
-// declareScopeNetwork builds the VPC, the workload subnet, and the
-// private services access peering without which Cloud SQL has no address.
+// declareScopeNetwork builds the VPC, the workload subnet, the private
+// services access peering without which Cloud SQL has no address, and the
+// filesystems the scope's resources mount.
 func declareScopeNetwork(
 	ctx *pulumi.Context,
 	s provider.NetworkScope,
 	cidr netip.Prefix,
+	contents provider.ScopeContents,
 ) error {
 	name := scopeNetworkName(s)
 
@@ -174,7 +176,7 @@ func declareScopeNetwork(
 	// default-allow-ssh, and this network ships nothing. compute_instance
 	// still declares its own deny as defence in depth, retargeted at this
 	// network.
-	return nil
+	return declareScopeFilesystems(ctx, s, vpc, contents.Volumes)
 }
 
 // declareScopeEgress gives the scope's subnet a route out (RFC 017 §2.7).
@@ -292,7 +294,7 @@ func scopeNetworkName(s provider.NetworkScope) string {
 // The Engine establishes that the scope is empty before calling this.
 // Nothing here can check: a scope's contents live in other stacks, and
 // this one knows only about the network.
-func (p *GCPProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, policies spec.Policies) error {
+func (p *GCPProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, contents provider.ScopeContents, policies spec.Policies) error {
 	if s.Region == "" {
 		return nil
 	}
@@ -303,7 +305,7 @@ func (p *GCPProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScop
 	}
 
 	program := func(pctx *pulumi.Context) error {
-		return declareScopeNetwork(pctx, s, cidr)
+		return declareScopeNetwork(pctx, s, cidr, contents)
 	}
 	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", program)
 	if err != nil {

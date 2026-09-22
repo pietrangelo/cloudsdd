@@ -4,6 +4,8 @@
 package gcp
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -42,6 +44,39 @@ func (r *recorder) snapshot() []recordedResource {
 // only what it passes around internally.
 type mockMonitor struct {
 	rec *recorder
+
+	// filestore is what the scope's network stack left behind, as the
+	// lookup of RFC 020 §2.8 sees it. The zero value is the ordinary
+	// scope, which is what every test that is not about a broken one
+	// wants.
+	filestore filestoreScope
+}
+
+// filestoreScope lets a test describe a scope whose Filestore instances
+// are not what the mounting stack expects.
+//
+// Both cases are broken invariants rather than races: the Engine
+// provisions a scope's network stack before any resource in it, so an
+// instance absent here was removed out of band. The provider must refuse,
+// because a Cloud Run revision pointed at an NFS server that is not there
+// fails at start, long after the user approved a plan that looked fine.
+type filestoreScope struct {
+	// missingInstance is an instance name nothing answers to. The real
+	// getInstance invoke fails when nothing matches, and so does this.
+	missingInstance string
+
+	// withoutAddress strips every instance of its private address, which
+	// is what an instance still being created, or one detached from the
+	// scope's VPC, reports. The instance is then present and unreachable.
+	withoutAddress bool
+}
+
+// testFilestoreAddress is the private address the mock reports for an
+// instance. Derived from the name rather than fixed, so a test mounting
+// two volumes can tell which server each one reaches.
+func testFilestoreAddress(instance string) string {
+	sum := sha256.Sum256([]byte(instance))
+	return fmt.Sprintf("10.200.%d.%d", sum[0], sum[1])
 }
 
 func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
@@ -85,6 +120,39 @@ func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error
 			"project":      resource.NewStringProperty(testProjectID),
 			"repositoryId": args.Args["repositoryId"],
 			"location":     args.Args["location"],
+		}, nil
+	}
+	// The Filestore instance a mounting resource stack finds rather than
+	// creates (RFC 020 §2.8), by the name both halves derive from the same
+	// scope and volume name.
+	if args.Token == getFilestoreInstanceToken {
+		m.rec.add(recordedResource{Type: args.Token, Name: getFilestoreInstanceToken, Inputs: args.Args})
+		name := args.Args["name"].StringValue()
+		if name == m.filestore.missingInstance {
+			return nil, fmt.Errorf("no Filestore instance named %q", name)
+		}
+		addresses := []resource.PropertyValue{resource.NewStringProperty(testFilestoreAddress(name))}
+		if m.filestore.withoutAddress {
+			addresses = nil
+		}
+		return resource.PropertyMap{
+			"id":       resource.NewStringProperty(name),
+			"name":     resource.NewStringProperty(name),
+			"location": args.Args["location"],
+			"tier":     resource.NewStringProperty(filestoreTier),
+			"fileShares": resource.NewArrayProperty([]resource.PropertyValue{
+				resource.NewObjectProperty(resource.PropertyMap{
+					"name":       resource.NewStringProperty(filestoreShareName),
+					"capacityGb": resource.NewNumberProperty(1024),
+				}),
+			}),
+			"networks": resource.NewArrayProperty([]resource.PropertyValue{
+				resource.NewObjectProperty(resource.PropertyMap{
+					"network":     resource.NewStringProperty(testNetworkName),
+					"connectMode": resource.NewStringProperty(filestoreConnectMode),
+					"ipAddresses": resource.NewArrayProperty(addresses),
+				}),
+			}),
 		}, nil
 	}
 	return resource.PropertyMap{}, nil

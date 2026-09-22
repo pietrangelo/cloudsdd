@@ -6,10 +6,12 @@ package gcp
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider/container"
@@ -22,6 +24,8 @@ const (
 	cloudRunServiceToken   = "gcp:cloudrunv2/service:Service"
 	cloudRunIamMemberToken = "gcp:cloudrunv2/serviceIamMember:ServiceIamMember"
 	domainMappingToken     = "gcp:cloudrun/domainMapping:DomainMapping"
+
+	getFilestoreInstanceToken = "gcp:filestore/getInstance:getInstance"
 )
 
 // testImage is a digest-pinned reference, which is what the image rules
@@ -634,5 +638,246 @@ func TestDeclareContainerServiceDeclaresNoScheduleResources(t *testing.T) {
 		if hasResource(recorded, token) {
 			t.Errorf("%s was declared for a Cloud Run service", token)
 		}
+	}
+}
+
+// mountingContainerResource is a container service in testScope() that
+// mounts volumes, so the instance names it derives are the ones the
+// network stack declared.
+func mountingContainerResource(volumes []spec.Volume) spec.Resource {
+	return containerResource(func(r *spec.Resource) {
+		r.Scope.Environment = testScope().Environment
+		r.Volumes = volumes
+	})
+}
+
+// cloudRunVolumeName is the charset Cloud Run accepts for a volume's
+// name: a DNS label. A Specification's volume name admits uppercase and
+// underscores, so it cannot be passed through verbatim.
+var cloudRunVolumeName = regexp.MustCompile(`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`)
+
+// TestDeclareContainerServiceMountsItsVolumes covers the GCP row of RFC
+// 020 §2.8's mount table.
+//
+// Two volumes rather than one, because every assertion here is about
+// *which* instance a mount reaches. A single volume would pass just as
+// well against an implementation that looked the first one up and wired
+// every mount to it — which is the shape of the failure §1 describes, two
+// names resolving to one share. One of the two carries uppercase and an
+// underscore, which the Specification admits and Cloud Run does not.
+func TestDeclareContainerServiceMountsItsVolumes(t *testing.T) {
+	volumes := []spec.Volume{
+		{Name: "uploads", MountPath: "/var/lib/uploads", SizeGB: 1024},
+		{Name: "Shared_Cache", MountPath: "/var/cache/app", SizeGB: 2048},
+	}
+	r := mountingContainerResource(volumes)
+	recorded := declaredContainerFor(t, r)
+
+	// Lookup, not create. An instance declared here would be a second one
+	// beside the scope's — a second terabyte on the invoice, and an empty
+	// directory where a shared one was meant to be.
+	if n := len(resourcesOfType(recorded, filestoreInstanceToken)); n != 0 {
+		t.Errorf("the resource stack declared %d Filestore instances; the scope's network stack owns them", n)
+	}
+
+	lookedUp := map[string]string{}
+	for _, l := range resourcesOfType(recorded, getFilestoreInstanceToken) {
+		lookedUp[l.Inputs["name"].StringValue()] = stringOrEmpty(l.Inputs["location"])
+	}
+	if len(lookedUp) != len(volumes) {
+		t.Fatalf("looked up %d distinct instances, want one per volume (%d)", len(lookedUp), len(volumes))
+	}
+
+	// Each volume is reached by the name the network stack gave it, in the
+	// zone the network stack put it. Basic tiers are zonal, and a lookup
+	// that fell back to the provider's default location would find nothing.
+	serverOf := make(map[string]string, len(volumes))
+	for _, v := range volumes {
+		instance := filestoreInstanceNameFor(testScope(), v.Name)
+		location, ok := lookedUp[instance]
+		if !ok {
+			t.Fatalf("volume %q was not looked up by its instance name %q; names sought = %v",
+				v.Name, instance, lookedUp)
+		}
+		if want := instanceZone(r.Scope.Region, ""); location != want {
+			t.Errorf("instance %q was looked up in %q, want the zone the network stack placed it in, %q",
+				instance, location, want)
+		}
+		serverOf[v.MountPath] = testFilestoreAddress(instance)
+	}
+
+	template := findResource(t, recorded, cloudRunServiceToken).Inputs["template"].ObjectValue()
+	assertNfsMounts(t, template, serverOf)
+
+	// Cloud Run mounts NFS only in the second-generation environment. The
+	// first accepts the template and fails the revision at start.
+	if got := stringOrEmpty(template["executionEnvironment"]); got != "EXECUTION_ENVIRONMENT_GEN2" {
+		t.Errorf("executionEnvironment = %q, want EXECUTION_ENVIRONMENT_GEN2; NFS mounts need it", got)
+	}
+
+	// Filestore's basic tiers have no data-plane IAM: access is decided by
+	// the network (RFC 020 §4). Mounting therefore grants the service's
+	// identity nothing, and RFC 017 §2.6's empty identity stays empty.
+	for _, token := range []string{iamMemberToken, customRoleToken} {
+		if hasResource(recorded, token) {
+			t.Errorf("%s was declared for a mount; Filestore basic tiers authorize by network alone", token)
+		}
+	}
+}
+
+// stringOrEmpty reads an input that may have been left unset. An omitted
+// input records as null, and StringValue on null panics — which would kill
+// a mutation without ever printing the diagnostic written for it.
+func stringOrEmpty(v resource.PropertyValue) string {
+	if !v.IsString() {
+		return ""
+	}
+	return v.StringValue()
+}
+
+// assertNfsMounts ties each mount path, through the volume name Cloud Run
+// joins them by, to the NFS server it reaches. serverOf maps the mount
+// path the Specification asked for to the address of the instance that
+// volume names.
+func assertNfsMounts(t *testing.T, template resource.PropertyMap, serverOf map[string]string) {
+	t.Helper()
+
+	declared := template["volumes"].ArrayValue()
+	if len(declared) != len(serverOf) {
+		t.Fatalf("the template declares %d volumes, want one per mount (%d)", len(declared), len(serverOf))
+	}
+
+	serverByVolume := make(map[string]string, len(declared))
+	for _, entry := range declared {
+		volume := entry.ObjectValue()
+		name := volume["name"].StringValue()
+		if !cloudRunVolumeName.MatchString(name) {
+			t.Errorf("volume name %q is not a DNS label; Cloud Run refuses it", name)
+		}
+		if _, seen := serverByVolume[name]; seen {
+			t.Errorf("volume name %q is declared twice; two volumes folded onto one name", name)
+		}
+
+		nfs := volume["nfs"].ObjectValue()
+		serverByVolume[name] = nfs["server"].StringValue()
+		// The instance carries one share, and the export is its name.
+		if got, want := nfs["path"].StringValue(), "/"+filestoreShareName; got != want {
+			t.Errorf("volume %q exports %q, want the instance's one share %q", name, got, want)
+		}
+		// RFC 020 declares no read-only mode: a volume exists to be written.
+		if ro, ok := nfs["readOnly"]; ok && ro.IsBool() && ro.BoolValue() {
+			t.Errorf("volume %q is mounted read-only; RFC 020 declares no read-only mode", name)
+		}
+	}
+
+	containers := template["containers"].ArrayValue()
+	if len(containers) != 1 {
+		t.Fatalf("declared %d containers, want 1", len(containers))
+	}
+	mounts := containers[0].ObjectValue()["volumeMounts"].ArrayValue()
+	if len(mounts) != len(serverOf) {
+		t.Fatalf("the container declares %d volume mounts, want one per volume (%d)", len(mounts), len(serverOf))
+	}
+
+	// The mount path is what the user wrote, and the server is what the
+	// network stack built. Joining the two through the volume name is what
+	// proves each path reaches its own instance and not a neighbour's.
+	for _, entry := range mounts {
+		mount := entry.ObjectValue()
+		path, name := mount["mountPath"].StringValue(), mount["name"].StringValue()
+
+		want, asked := serverOf[path]
+		if !asked {
+			t.Errorf("the container mounts %q at %q, a path the resource never asked for", name, path)
+			continue
+		}
+		got, declaredVolume := serverByVolume[name]
+		if !declaredVolume {
+			t.Errorf("%q mounts volume %q, which the template does not declare", path, name)
+			continue
+		}
+		if got != want {
+			t.Errorf("%q reaches the NFS server %q, want %q — the instance its own volume names", path, got, want)
+		}
+	}
+}
+
+// TestDeclareContainerServiceWithoutVolumesMountsNothing keeps every
+// service that mounts nothing exactly as RFC 017 left it: no lookup, no
+// volume, and no change of execution environment — which would roll a new
+// revision of every existing service for a feature none of them use.
+func TestDeclareContainerServiceWithoutVolumesMountsNothing(t *testing.T) {
+	recorded := declaredContainer(t, nil)
+
+	if hasResource(recorded, getFilestoreInstanceToken) {
+		t.Error("Filestore was queried for a service with no volumes")
+	}
+
+	template := findResource(t, recorded, cloudRunServiceToken).Inputs["template"].ObjectValue()
+	if volumes := template["volumes"]; volumes.IsArray() && len(volumes.ArrayValue()) != 0 {
+		t.Errorf("the template declares %d volumes, want none", len(volumes.ArrayValue()))
+	}
+	if env := template["executionEnvironment"]; env.IsString() && env.StringValue() != "" {
+		t.Errorf("executionEnvironment = %q for a service that mounts nothing, want it left unset", env.StringValue())
+	}
+}
+
+// TestDeclareContainerServiceRefusesAFilesystemTheScopeDoesNotHave covers
+// the lookup-not-create discipline of RFC 020 §2.8.
+//
+// The Engine provisions a scope's network stack before any resource in it,
+// so an instance absent here was removed out of band rather than lost to a
+// race. Creating a replacement would be §1's silent wrong answer — a
+// second, empty terabyte where a shared one was meant to be — so the
+// provider refuses and names what it could not find.
+func TestDeclareContainerServiceRefusesAFilesystemTheScopeDoesNotHave(t *testing.T) {
+	tests := []struct {
+		name      string
+		filestore filestoreScope
+		wantMsg   string
+	}{
+		{
+			name:      "no instance answers to the derived name",
+			filestore: filestoreScope{missingInstance: filestoreInstanceNameFor(testScope(), "uploads")},
+			wantMsg:   "uploads",
+		},
+		{
+			// The instance is there and has no address to mount. An NFS
+			// volume with an empty server is a template Cloud Run accepts
+			// and a revision that fails at start.
+			name:      "the instance has no private address",
+			filestore: filestoreScope{withoutAddress: true},
+			wantMsg:   "address",
+		},
+	}
+
+	r := mountingContainerResource([]spec.Volume{{Name: "uploads", MountPath: "/var/lib/uploads", SizeGB: 1024}})
+	props, err := decodeContainerServiceProperties(r.Properties, nil)
+	if err != nil {
+		t.Fatalf("decodeContainerServiceProperties() = %v", err)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &recorder{}
+			err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+				_, err := declareContainerService(ctx, r, testNetworkName, *props)
+				return err
+			}, pulumi.WithMocks("cloudsdd-gcp", "test", mockMonitor{rec: rec, filestore: tt.filestore}))
+
+			if !errors.Is(err, ErrFilesystemMissing) {
+				t.Fatalf("declareContainerService() = %v, want ErrFilesystemMissing", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Errorf("error = %q, want it to name %q", err, tt.wantMsg)
+			}
+			// The refusal comes before anything is registered, or the stack
+			// holds a service and an identity for a mount that cannot exist.
+			for _, token := range []string{cloudRunServiceToken, serviceAccountToken} {
+				if hasResource(rec.snapshot(), token) {
+					t.Errorf("%s was declared despite the missing filesystem", token)
+				}
+			}
+		})
 	}
 }

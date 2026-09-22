@@ -28,6 +28,12 @@ const passphraseEnv = "CLOUDSDD_PULUMI_PASSPHRASE" // #nosec G101 -- this is an 
 // 005 §2.6), matching the AWS provider's scheme.
 const stackScopeSeparator = "::"
 
+// filestoreMinimumSizeGB is the capacity of Filestore's smallest instance,
+// 1 TiB (RFC 020 §2.7). Both the refusal below and the instance itself
+// read the floor from here, so the number and the message that quotes it
+// cannot drift apart.
+const filestoreMinimumSizeGB = 1024
+
 type GCPProvider struct {
 	stateDir   string
 	passphrase string
@@ -100,6 +106,9 @@ func (p *GCPProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 		if len(r.Scope.Zones) > 0 {
 			return fmt.Errorf("gcp: resource %q: %w", r.ID, ErrZonesNotSupported)
 		}
+		if err := validateFilestoreCapacity(r); err != nil {
+			return err
+		}
 	case spec.ResourceTypeBuildPipeline:
 		if _, err := decodeBuildPipelineProperties(r.Properties); err != nil {
 			return fmt.Errorf("gcp: resource %q: %w", r.ID, err)
@@ -122,6 +131,18 @@ func (p *GCPProvider) Validate(ctx context.Context, r spec.Resource, policies sp
 	}
 	if err := provider.ValidateRegionAllowed(r.Scope.Region, policies.AllowedRegions); err != nil {
 		return fmt.Errorf("gcp: resource %q: %w", r.ID, err)
+	}
+	return nil
+}
+
+// validateFilestoreCapacity refuses a volume Filestore cannot provision at
+// the size it was asked for. Absence and a too-small size are the same
+// refusal: neither yields an instance under 1 TiB (RFC 020 §2.7).
+func validateFilestoreCapacity(r spec.Resource) error {
+	for _, v := range r.Volumes {
+		if v.SizeGB < filestoreMinimumSizeGB {
+			return fmt.Errorf("gcp: resource %q: volume %q: %w", r.ID, v.Name, ErrFilestoreCapacityBelowFloor)
+		}
 	}
 	return nil
 }
