@@ -623,3 +623,23 @@ is accepted rather than worked around. On this 7 GB machine, compiling
 `pulumi-gcp/.../compute` gets OOM-killed under default parallelism whenever
 its cache is cold. `go test -p 1 ./...` is the reliable way to run the suite
 after a dependency change; this is not a code failure.
+
+**Phase 5, floor ratchet.** The floors now sit at the integer part of each
+package's actual coverage: engine 95 → 96 (96.1%), spec 91 → 93 (93.4%),
+azure 71 → 76 (76.2%), gcp 72 → 77 (77.7%). `internal/provider` is already
+at 100 and cannot go higher. The provider packages went *up* even though
+RFC 020 adds Pulumi-bound surface, because the filesystem and mount logic
+around each declaration is asserted under the mock monitor. So the
+exception in the script's header was not needed, and no dated entry was
+added. Moving gcp to 78 fails with `77.7% < 78% floor`, so the new floors
+bind. The script's "sit at 70-72%" comment was changed to 70-77%.
+
+Two faults in the gate turned up along the way. Neither was fixed in this
+item. **(1)** When `go` is not on `PATH`, `go list` fails inside
+`$(… | grep … || true)`. The `|| true` swallows that failure, and all
+eight invariant checks print `ok` while the gate exits 0. This was
+reproduced with `PATH=/usr/bin:/bin`. In other words, the checks pass
+when they cannot run at all. **(2)** Under a comma-decimal locale, awk
+prints the percentages as `94,4`, and `a + 0` then reads them as their
+integer part. That can only make the gate stricter, never looser, so it
+is cosmetic. Run it with `LC_ALL=C`. Fault (1) was added to the plan as its own item.
