@@ -87,9 +87,9 @@ var networkingByEngine = map[string]engineNetworking{
 // also useless: there was no way to put an application next to the
 // database it was meant to talk to.
 //
-// The scope's contents are not read yet: this stack declares no
-// filesystem until RFC 020 §2.5 lands Azure Files here.
-func (p *AzureProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, policies spec.Policies) error {
+// The scope's contents are what the network is built for: the volumes its
+// resources mount become shares in a storage account here (RFC 020 §2.5).
+func (p *AzureProvider) EnsureNetwork(ctx context.Context, s provider.NetworkScope, contents provider.ScopeContents, policies spec.Policies) error {
 	// object_storage reaches here without a region on some scopes and
 	// lives in no network.
 	if s.Region == "" {
@@ -102,7 +102,7 @@ func (p *AzureProvider) EnsureNetwork(ctx context.Context, s provider.NetworkSco
 	}
 
 	program := func(pctx *pulumi.Context) error {
-		return declareScopeNetwork(pctx, s, cidr)
+		return declareScopeNetwork(pctx, s, cidr, contents)
 	}
 
 	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", program)
@@ -116,8 +116,8 @@ func (p *AzureProvider) EnsureNetwork(ctx context.Context, s provider.NetworkSco
 }
 
 // declareScopeNetwork builds the resource group, VNet, subnets, security
-// group and private DNS zones the scope's resources share.
-func declareScopeNetwork(ctx *pulumi.Context, s provider.NetworkScope, cidr netip.Prefix) error {
+// group, private DNS zones and filesystems the scope's resources share.
+func declareScopeNetwork(ctx *pulumi.Context, s provider.NetworkScope, cidr netip.Prefix, contents provider.ScopeContents) error {
 	name := scopeNetworkName(s)
 
 	// The network gets a resource group of its own, separate from the
@@ -199,7 +199,8 @@ func declareScopeNetwork(ctx *pulumi.Context, s provider.NetworkScope, cidr neti
 			return err
 		}
 	}
-	return nil
+
+	return declareScopeFilesystems(ctx, s, rg, vnet, generalSubnet, contents.Volumes)
 }
 
 // declareScopeEgress gives the general subnet a route out (RFC 017 §2.7).
@@ -469,7 +470,7 @@ func subnetBlock(cidr netip.Prefix, index int) (netip.Prefix, error) {
 // The Engine establishes that the scope is empty before calling this.
 // Nothing here can check: a scope's contents live in other stacks, and
 // this one knows only about the network.
-func (p *AzureProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, _ provider.ScopeContents, policies spec.Policies) error {
+func (p *AzureProvider) DestroyNetwork(ctx context.Context, s provider.NetworkScope, contents provider.ScopeContents, policies spec.Policies) error {
 	if s.Region == "" {
 		return nil
 	}
@@ -480,7 +481,7 @@ func (p *AzureProvider) DestroyNetwork(ctx context.Context, s provider.NetworkSc
 	}
 
 	program := func(pctx *pulumi.Context) error {
-		return declareScopeNetwork(pctx, s, cidr)
+		return declareScopeNetwork(pctx, s, cidr, contents)
 	}
 	stack, err := p.upsertStack(ctx, s.Account, s.Environment, s.Region, "", program)
 	if err != nil {

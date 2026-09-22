@@ -1,6 +1,6 @@
 # RFC 020: Scope-Owned Filesystems
 
-- **Status:** Proposed
+- **Status:** Approved
 - **Author:** Claude (Senior Staff Cloud Platform Engineer, AI-assisted)
 - **Date:** 2026-08-09
 - **Depends on:** [RFC 016](016-environment-network.md) §2.2 (the scope
@@ -474,3 +474,59 @@ declares exactly one network in `MODE_IPV4`. **One test-side change:**
 the lookup's `location`, dropping `executionEnvironment`) were killed by a
 `StringValue`-on-null panic rather than by their diagnostic. No assertion
 changed; they now fail with their own message.
+
+**Azure filesystem contract (tests).** Written against the classic
+`pulumi-azure` v5 inputs, so the plan's names map as
+`publicNetworkAccess` → `publicNetworkAccessEnabled: false` and
+`minimumTlsVersion` → `minTlsVersion: TLS1_2`. "SMB 3.1.1 encryption
+required" means `shareProperties.smb` allows only `SMB3.1.1` and
+`AES-256-GCM`: leaving an older dialect enabled next to it would let a client
+negotiate an unencrypted channel. Share soft-delete is
+`shareProperties.retentionPolicy.days: 7`. **The account name** is
+`storageAccountNameFor(subscriptionID, scope)`, pinned as
+`cloudsdd` + the first 16 hex digits of sha256(subscription, NUL,
+`ScopeName`), which is exactly 24 characters. The subscription is included for
+the reason RFC 018 §2.8.1 gave for ACR: the account namespace is global, so the
+network stack must ask `getClientConfig` exactly as the pipeline does. The mock
+already answers that call. A digest of 64 bits rather than `ShortHash`'s 32
+suits a namespace shared with every Azure customer. **The share name** is
+`fileShareNameFor(volume)`, derived from the volume alone because the account
+already identifies the scope, and it always carries `ShortHash(volume)` for the
+injectivity reason given for the GCP instance above. `uploads` → `uploads-9ba88c41`.
+The adversarial table includes `_`, `___` and `---`, which fold to nothing, and
+`a__b`, which folds to a double hyphen that Azure rejects. **The private
+endpoint** sits in the general subnet, because every other subnet in the scope
+is delegated and refuses one. It is a non-manual connection to the `file`
+subresource and registers in a `privatelink.file.core.windows.net` zone linked
+to the VNet. With no volumes, no account, share, endpoint or file zone is
+declared, so `TestDeclareScopeNetwork`'s two-zone count still holds. Its call
+sites in `network_test.go` gain `provider.ScopeContents{}` in the
+implementation item, the priced §5 signature exception, as on GCP.
+`filesystem_test.go` carries nil-safe accessors (`stringOrEmpty` and friends)
+from the start, so a missing input fails with its own diagnostic rather than a
+panic, which is the lesson of the GCP mount notes. **Open, not in this item:** an
+Azure share accepts at most 5120 GiB unless `largeFileShareEnabled` is set,
+while `size_gb` admits up to 65536. Azure's `Validate` does not yet refuse the
+gap, and the plan has no item for it.
+
+**Azure filesystem (implementation).** `filesystem.go` holds the derivations
+and `declareScopeFilesystems`, which `declareScopeNetwork` calls last, handing
+it the general subnet. It returns before `getClientConfig` when there are no
+volumes, so a scope that mounts nothing makes no new invoke and no new
+resource. The production zone constant is `filePrivateDNSZone`, because the
+test file already pins the literal as `fileZoneName` and the two must not be
+one symbol. A test that recomputed the value from the code it checks would
+assert nothing. The account states only what the tests pin, plus the two
+required fields (`Standard`, `LRS`). Blob-side switches such as
+`allowNestedItemsToBePublic` are left at their defaults: with public network
+access disabled they open no path, and setting them without a test would be
+unguarded configuration. `sharedAccessKeyEnabled` stays on, and so do SMB
+`authenticationTypes`, because the Container Apps storage link of the next
+item authenticates with the account key. `DestroyNetwork` passes the contents
+too, so its program describes the same graph that `EnsureNetwork` built. The
+adversarial pass broke 25 guarantees in `filesystem.go` and at the
+`network.go` call site, and all 25 were killed by their own diagnostics.
+`EnsureNetwork`/`DestroyNetwork` forwarding `contents` is not unit-tested,
+because those need a live stack, as on GCP. `gosec` and `govulncheck` are not
+installed on this machine. `staticcheck` reports only two unused constants
+that were already in `compute.go`.

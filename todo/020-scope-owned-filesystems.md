@@ -55,8 +55,8 @@ did not intend to.
 
 ## Phase 4: Azure — Azure Files (RFC 020 §6 step 7)
 
-- [ ] Create `internal/provider/azure/filesystem_test.go`: one storage account per scope and one share per volume under the mock monitor — `publicNetworkAccess` disabled, `minimumTlsVersion` TLS1_2, SMB 3.1.1 encryption required, share soft-delete at 7 days, the quota from `size_gb` defaulting to 100, the private endpoint and private DNS zone in the scope VNet, and the globally-unique account name derived within 24 lowercase alphanumerics (RFC 020 §2.5).
-- [ ] Create `internal/provider/azure/filesystem.go` and update `internal/provider/azure/network.go`: declare those from the scope network program, satisfying the tests above.
+- [x] Create `internal/provider/azure/filesystem_test.go`: one storage account per scope and one share per volume under the mock monitor — `publicNetworkAccess` disabled, `minimumTlsVersion` TLS1_2, SMB 3.1.1 encryption required, share soft-delete at 7 days, the quota from `size_gb` defaulting to 100, the private endpoint and private DNS zone in the scope VNet, and the globally-unique account name derived within 24 lowercase alphanumerics (RFC 020 §2.5). *(Red on the missing `ScopeContents` argument, `storageAccountNameFor` and `fileShareNameFor` only; every other package green. Decisions in RFC 020 §8.)*
+- [x] Create `internal/provider/azure/filesystem.go` and update `internal/provider/azure/network.go`: declare those from the scope network program, satisfying the tests above. *(Green; 25/25 mutants killed; notes in RFC 020 §8.)*
 - [ ] Update `internal/provider/azure/container_test.go`: assert the Container Apps environment declares the storage link and the template mounts it, that the account key is marked secret rather than appearing in plain inputs, and that a missing share is refused; add the key-listing invoke to the mock monitor.
 - [ ] Update `internal/provider/azure/container.go`: declare the `managedEnvironmentsStorage` on the per-resource environment, holding the account key as a Pulumi secret, and add the volume and its mount to the template.
 
