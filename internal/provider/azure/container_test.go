@@ -724,8 +724,9 @@ func TestDeclareContainerServiceMountsItsVolumes(t *testing.T) {
 	environment := findResource(t, recorded, containerEnvToken)
 	shareByStorage := assertEnvironmentStorage(t, recorded, environment, account)
 
-	template := objectOrEmpty(findResource(t, recorded, containerAppToken).Inputs["template"])
-	assertAzureFileMounts(t, template, shareByStorage, shareOf)
+	app := findResource(t, recorded, containerAppToken)
+	assertAzureFileMounts(t, objectOrEmpty(app.Inputs["template"]), shareByStorage, shareOf)
+	assertAppWaitsForEveryLink(t, recorded, app)
 
 	// Azure Files is mounted with the account key the storage link holds,
 	// not with the app's identity. RFC 017 §2.6's empty identity therefore
@@ -734,6 +735,35 @@ func TestDeclareContainerServiceMountsItsVolumes(t *testing.T) {
 	if hasResource(recorded, roleAssignmentToken) {
 		t.Error("a role assignment was declared for a mount; the storage link authenticates with the account key")
 	}
+}
+
+// assertAppWaitsForEveryLink checks that the app is registered after each
+// of its storage links. A template volume names its link by a plain
+// string, not by an output, so nothing in the arguments orders the two:
+// without the explicit dependency, Azure can be asked for a revision
+// mounting a link that does not exist yet.
+func assertAppWaitsForEveryLink(t *testing.T, recorded []recordedResource, app recordedResource) {
+	t.Helper()
+
+	waitsFor := make(map[string]bool, len(app.DependsOn))
+	for _, urn := range app.DependsOn {
+		waitsFor[urn] = true
+	}
+	links := resourcesOfType(recorded, environmentStorageToken)
+	if len(links) == 0 {
+		t.Fatal("no environment storage link was declared to order the app after")
+	}
+	for _, link := range links {
+		if !waitsFor[mockURN(link)] {
+			t.Errorf("the app does not depend on storage link %q; it depends on %v", link.Name, app.DependsOn)
+		}
+	}
+}
+
+// mockURN is the URN the Pulumi mocks give a resource of the test stack
+// declared at the top level of the program.
+func mockURN(r recordedResource) string {
+	return "urn:pulumi:test::cloudsdd-azure::" + r.Type + "::" + r.Name
 }
 
 // assertScopeAccountLookedUp checks that the scope's one storage account
@@ -993,7 +1023,7 @@ func TestDeclareContainerServiceRefusesAFilesystemTheScopeDoesNotHave(t *testing
 		{
 			name:    "no share answers to the derived name",
 			files:   fileScope{missingShare: fileShareNameFor("uploads")},
-			wantMsg: "uploads",
+			wantMsg: fileShareNameFor("uploads"),
 		},
 	}
 

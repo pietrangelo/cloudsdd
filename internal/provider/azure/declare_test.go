@@ -4,7 +4,7 @@
 package azure
 
 import (
-	"fmt"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +17,9 @@ type recordedResource struct {
 	Type   string
 	Name   string
 	Inputs resource.PropertyMap
+	// DependsOn holds the URNs the resource was registered after, both
+	// the explicit DependsOn and those its input outputs imply.
+	DependsOn []string
 }
 
 // recorder collects declared resources. Pulumi registers resources
@@ -48,6 +51,10 @@ type mockMonitor struct {
 // resource stack to find (RFC 020 §2.8). The zero value is a scope holding
 // every account and share asked for; each field removes one of them, which
 // is how a test reaches the refusal of a filesystem gone out of band.
+//
+// A refused lookup names nothing, as Azure's own errors need not, so a
+// test asserting the refusal names the account or share proves the
+// provider says so itself.
 type fileScope struct {
 	missingAccount bool
 	missingShare   string
@@ -63,9 +70,10 @@ func testStorageAccountKey(account string) string {
 
 func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
 	m.rec.add(recordedResource{
-		Type:   args.TypeToken,
-		Name:   args.Name,
-		Inputs: args.Inputs,
+		Type:      args.TypeToken,
+		Name:      args.Name,
+		Inputs:    args.Inputs,
+		DependsOn: args.RegisterRPC.GetDependencies(),
 	})
 
 	outputs := args.Inputs.Copy()
@@ -194,7 +202,7 @@ func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error
 		m.rec.add(recordedResource{Type: args.Token, Name: getStorageAccountToken, Inputs: args.Args})
 		name := args.Args["name"].StringValue()
 		if m.files.missingAccount {
-			return nil, fmt.Errorf("storage account %q was not found", name)
+			return nil, errors.New("storage account not found")
 		}
 		return resource.PropertyMap{
 			"id": resource.NewStringProperty(
@@ -208,7 +216,7 @@ func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error
 		m.rec.add(recordedResource{Type: args.Token, Name: getFileShareToken, Inputs: args.Args})
 		name := args.Args["name"].StringValue()
 		if name == m.files.missingShare {
-			return nil, fmt.Errorf("share %q was not found", name)
+			return nil, errors.New("share not found")
 		}
 		return resource.PropertyMap{
 			"id":                 resource.NewStringProperty("https://files.example/" + name),

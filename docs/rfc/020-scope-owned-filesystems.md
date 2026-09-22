@@ -581,3 +581,20 @@ survived. `key-plain` is equivalent: `NewEnvironmentStorage` already wraps
 `DependsOn` removed) survived because no test pins ordering, and
 `account-no-name` survived because the mock's own error already echoes the
 account name. The last two have a follow-up test item in the plan.
+
+**Azure mount (follow-up pins).** The recorder now keeps each resource's
+dependency URNs, which Pulumi already passes the mock in `RegisterRPC`.
+`assertAppWaitsForEveryLink` then requires the app's dependencies to hold
+the URN of every storage link. The mount test declares two volumes, so a
+`DependsOn` on the first link alone fails as well as none at all. The
+mock's `getAccount` and `getShare` errors no longer echo the name they were
+asked for. That leaves the provider's own message as the only place the
+refusal test can find the account name. The share row now expects the
+derived share name, not the volume name. The volume name was the looser
+check: a message that dropped the share still carried `uploads`. All four
+mutants (`no-links`, `first-link-only`, `account-no-name`, `share-no-name`)
+fail with their own diagnostics. `gosec` and `govulncheck` are installed in
+`~/go/bin`. They were reported missing earlier only because that directory
+is not on `PATH`. `gosec` reports three G703 findings that predate this RFC,
+none in a file this RFC touched. They now have their own plan item.
+`govulncheck` was OOM-killed twice on this 7 GB machine and has not run.
