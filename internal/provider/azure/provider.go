@@ -50,7 +50,7 @@ func NewProvider() (*AzureProvider, error) {
 	stateDir = filepath.Clean(stateDir)
 	// Previously ignored, unlike the GCP twin which checked it (RFC 011
 	// §1.1F3).
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+	if err := os.MkdirAll(stateDir, 0o700); err != nil { // #nosec G703 -- stateDir is operator-controlled (env var), not Specification input
 		return nil, fmt.Errorf("azure: failed to create state dir %q: %w", stateDir, err)
 	}
 

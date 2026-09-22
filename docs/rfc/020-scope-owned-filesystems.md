@@ -598,3 +598,17 @@ fail with their own diagnostics. `gosec` and `govulncheck` are installed in
 is not on `PATH`. `gosec` reports three G703 findings that predate this RFC,
 none in a file this RFC touched. They now have their own plan item.
 `govulncheck` was OOM-killed twice on this 7 GB machine and has not run.
+
+**`gosec` G703 (Phase 5).** The GCP and Azure state dirs and the config dir
+now carry the same `#nosec G703` justification that
+`aws/provider.go` already had, rather than a fix. The path comes from an
+env var the operator sets, or from their home directory. It never comes
+from a Specification or a prompt. A confinement rule such as "must sit
+under `$HOME`" would guard against the one party who already owns the
+filesystem. Removing any one suppression on its own brings its finding
+back. `gosec` finds nothing only if `go` is on its `PATH`: without
+`/usr/local/go/bin` it loads zero files and still reports 0 issues, which
+looks like a pass. With `GOMAXPROCS=2 GOGC=50 GOMEMLIMIT=4GiB`,
+`govulncheck` finished on this machine for the first time. It reports six
+reachable vulnerabilities in `grpc`, `x/crypto` and `go-git/v6`. None comes
+from this RFC's changes, and they now have their own plan item.

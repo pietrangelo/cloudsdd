@@ -63,7 +63,8 @@ did not intend to.
 
 ## Phase 5: The gate and the documentation
 
-- [ ] Resolve the three `gosec` G703 findings (`os.MkdirAll` on a cleaned state/config dir) in `internal/provider/gcp/provider.go`, `internal/provider/azure/provider.go` and `internal/config/config.go`: fix, or suppress with a `#nosec` naming why the path is trusted. They predate RFC 020 and went unseen because `gosec` sits in `~/go/bin`, off `PATH`.
+- [x] Resolve the three `gosec` G703 findings (`os.MkdirAll` on a cleaned state/config dir) in `internal/provider/gcp/provider.go`, `internal/provider/azure/provider.go` and `internal/config/config.go`: fix, or suppress with a `#nosec` naming why the path is trusted. They predate RFC 020 and went unseen because `gosec` sits in `~/go/bin`, off `PATH`. *(Suppressed as `aws/provider.go` already does; each `#nosec` removed alone brings its G703 back; `gosec` 0 issues, suite and gate green. Notes in RFC 020 §8.)*
+- [ ] Update `go.mod` and `go.sum`: raise `google.golang.org/grpc` to ≥ v1.83.1, `golang.org/x/crypto` to ≥ v0.56.0 and `github.com/go-git/go-git/v6` to ≥ v6.0.0-alpha.5 (GO-2026-6443, -6348, -6355, -6354, -6214, -6213, all reachable per `govulncheck`), then re-run `govulncheck ./...` to zero reachable findings.
 - [ ] Update `scripts/coverage-gate.sh`: ratchet the `internal/spec`, `internal/engine`, `internal/provider`, `internal/provider/gcp` and `internal/provider/azure` floors to the new actuals, and confirm the five leaf checks and the three no-engine-import checks still hold.
 - [ ] Update `docs/rfc/018-build-pipeline.md`: add the missing `## 8. Implementation notes`, folding in §2.4.1's commit-SHA hand-off and §2.8.1's Premium-SKU reversal — the two decisions that did not survive contact and are currently recorded only inline. Note there that §2.7's `build_pipeline` mount was withdrawn by RFC 020 §2.4.
 - [ ] Create `README.md`: what CloudSDD is, how to run it, and an index of all twenty RFCs with one line each.

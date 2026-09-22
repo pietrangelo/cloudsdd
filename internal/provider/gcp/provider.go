@@ -54,7 +54,7 @@ func NewProvider() (*GCPProvider, error) {
 		stateDir = filepath.Join(home, ".cloudsdd", "state")
 	}
 	stateDir = filepath.Clean(stateDir)
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+	if err := os.MkdirAll(stateDir, 0o700); err != nil { // #nosec G703 -- stateDir is operator-controlled (env var), not Specification input
 		return nil, fmt.Errorf("gcp: failed to create state dir %q: %w", stateDir, err)
 	}
 

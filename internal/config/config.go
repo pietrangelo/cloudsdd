@@ -76,7 +76,7 @@ func Dir() (string, error) {
 		dir = filepath.Join(home, ".cloudsdd")
 	}
 	dir = filepath.Clean(dir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil { // #nosec G703 -- dir is operator-controlled (env var), not Specification input
 		return "", fmt.Errorf("config: failed to create config dir %q: %w", dir, err)
 	}
 	return dir, nil
