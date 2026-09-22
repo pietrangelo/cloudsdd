@@ -4,6 +4,7 @@
 package azure
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -39,7 +40,25 @@ func (r *recorder) snapshot() []recordedResource {
 
 // mockMonitor captures declared resources without contacting Azure.
 type mockMonitor struct {
-	rec *recorder
+	rec   *recorder
+	files fileScope
+}
+
+// fileScope is what the scope's network stack left behind for a mounting
+// resource stack to find (RFC 020 §2.8). The zero value is a scope holding
+// every account and share asked for; each field removes one of them, which
+// is how a test reaches the refusal of a filesystem gone out of band.
+type fileScope struct {
+	missingAccount bool
+	missingShare   string
+}
+
+// testStorageAccountKey is the key the mock hands out for an account.
+// Derived from the name, so an assertion can tell which account's key
+// reached which storage link, and distinctive, so a walk of every recorded
+// input can find it wherever it leaked.
+func testStorageAccountKey(account string) string {
+	return "storage-key-for-" + account + "=="
 }
 
 func (m mockMonitor) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
@@ -106,6 +125,12 @@ const (
 	// in (RFC 017 §2.3.1). Distinct from the private zones a database
 	// uses.
 	getPublicDNSZoneToken = "azure:dns/getZone:getZone"
+	// The scope's storage account and one share in it, as a mounting
+	// resource stack finds them (RFC 020 §2.8). The account lookup is also
+	// where the key comes from: classic Azure has no separate key-listing
+	// call, and getAccount answers with the primary key.
+	getStorageAccountToken = "azure:storage/getAccount:getAccount"
+	getFileShareToken      = "azure:storage/getShare:getShare"
 )
 
 const (
@@ -162,6 +187,34 @@ func (m mockMonitor) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error
 			"location":          resource.NewStringProperty("westeurope"),
 			"sku":               resource.NewStringProperty(acrSKUBasic),
 			"adminEnabled":      resource.NewBoolProperty(false),
+		}, nil
+	// The scope's storage account as the mounting side of RFC 020 §2.8
+	// finds it, carrying the key the Container Apps storage link needs.
+	case getStorageAccountToken:
+		m.rec.add(recordedResource{Type: args.Token, Name: getStorageAccountToken, Inputs: args.Args})
+		name := args.Args["name"].StringValue()
+		if m.files.missingAccount {
+			return nil, fmt.Errorf("storage account %q was not found", name)
+		}
+		return resource.PropertyMap{
+			"id": resource.NewStringProperty(
+				"/subscriptions/sub-id/resourceGroups/" + args.Args["resourceGroupName"].StringValue() +
+					"/providers/Microsoft.Storage/storageAccounts/" + name),
+			"name":              args.Args["name"],
+			"resourceGroupName": args.Args["resourceGroupName"],
+			"primaryAccessKey":  resource.NewStringProperty(testStorageAccountKey(name)),
+		}, nil
+	case getFileShareToken:
+		m.rec.add(recordedResource{Type: args.Token, Name: getFileShareToken, Inputs: args.Args})
+		name := args.Args["name"].StringValue()
+		if name == m.files.missingShare {
+			return nil, fmt.Errorf("share %q was not found", name)
+		}
+		return resource.PropertyMap{
+			"id":                 resource.NewStringProperty("https://files.example/" + name),
+			"name":               args.Args["name"],
+			"storageAccountName": args.Args["storageAccountName"],
+			"quota":              resource.NewNumberProperty(100),
 		}, nil
 	}
 	return resource.PropertyMap{}, nil

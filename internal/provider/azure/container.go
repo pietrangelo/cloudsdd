@@ -31,6 +31,14 @@ const (
 	// which is HTTPS either way.
 	ingressTransportAuto = "auto"
 
+	// A volume's storage link is read-write: RFC 020 declares no
+	// read-only mode, because a volume exists to be written. AzureFile is
+	// stated on every template volume, because left unset Container Apps
+	// defaults to EmptyDir — a directory that accepts writes and loses
+	// them on the next restart.
+	storageAccessReadWrite = "ReadWrite"
+	storageTypeAzureFile   = "AzureFile"
+
 	// identityUserAssigned attaches an identity CloudSDD declares, rather
 	// than one Azure generates. It matters because the identity has to
 	// exist as a resource for a test to assert that nothing is assigned to
@@ -125,6 +133,14 @@ func declareContainerService(
 		}
 	}
 
+	// The scope's shares are found before anything is registered, for the
+	// same reason: a missing one is refused rather than leaving a stack
+	// holding an environment around a mount that cannot exist.
+	shares, err := lookupMountedShares(ctx, s, r.Volumes)
+	if err != nil {
+		return nil, err
+	}
+
 	rg, err := core.NewResourceGroup(ctx, id+"-rg", &core.ResourceGroupArgs{
 		Location: pulumi.String(location),
 	})
@@ -171,6 +187,11 @@ func declareContainerService(
 		return nil, fmt.Errorf("azure: failed to declare the container environment for %q: %w", id, err)
 	}
 
+	links, err := declareEnvironmentStorage(ctx, id, environment, shares)
+	if err != nil {
+		return nil, err
+	}
+
 	app, err := containerapp.NewApp(ctx, id, &containerapp.AppArgs{
 		Name:                      pulumi.String(id),
 		ResourceGroupName:         rg.Name,
@@ -206,16 +227,20 @@ func declareContainerService(
 			// asking for three replicas usually running one.
 			MinReplicas: pulumi.Int(p.EffectiveReplicas()),
 			MaxReplicas: pulumi.Int(p.EffectiveReplicas()),
+			Volumes:     shares.templateVolumes(),
 			Containers: containerapp.AppTemplateContainerArray{
 				&containerapp.AppTemplateContainerArgs{
-					Name:   pulumi.String(id),
-					Image:  pulumi.String(image),
-					Cpu:    pulumi.Float64(cpu),
-					Memory: pulumi.String(memory),
+					Name:         pulumi.String(id),
+					Image:        pulumi.String(image),
+					Cpu:          pulumi.Float64(cpu),
+					Memory:       pulumi.String(memory),
+					VolumeMounts: shares.volumeMounts(),
 				},
 			},
 		},
-	})
+		// A template volume names its storage link by name, not by an
+		// output, so nothing in the arguments orders the two.
+	}, pulumi.DependsOn(links))
 	if err != nil {
 		return nil, fmt.Errorf("azure: failed to declare the container service %q: %w", id, err)
 	}
@@ -233,6 +258,64 @@ func declareContainerService(
 		return nil, err
 	}
 	return app, nil
+}
+
+// declareEnvironmentStorage links each of the scope's shares to the
+// service's environment (RFC 020 §2.8). The environment is per-resource,
+// so this is the one part of mounting that is a declaration rather than a
+// lookup.
+//
+// The link authenticates with the account key, so the app's identity
+// stays as RFC 017 §2.6 left it: without a single role.
+func declareEnvironmentStorage(
+	ctx *pulumi.Context,
+	id string,
+	environment *containerapp.Environment,
+	shares scopeShares,
+) ([]pulumi.Resource, error) {
+	links := make([]pulumi.Resource, 0, len(shares.mounts))
+	for _, m := range shares.mounts {
+		link, err := containerapp.NewEnvironmentStorage(ctx, id+"-storage-"+m.share, &containerapp.EnvironmentStorageArgs{
+			Name:                      pulumi.String(m.share),
+			ContainerAppEnvironmentId: environment.ID(),
+			AccountName:               pulumi.String(shares.account),
+			ShareName:                 pulumi.String(m.share),
+			AccessKey:                 pulumi.ToSecret(pulumi.String(shares.key)).(pulumi.StringOutput),
+			AccessMode:                pulumi.String(storageAccessReadWrite),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("azure: failed to link the share for volume %q to %q: %w", m.volume.Name, id, err)
+		}
+		links = append(links, link)
+	}
+	return links, nil
+}
+
+// templateVolumes declares one AzureFile volume per mounted share, named
+// after the storage link it reads from. Nil when nothing is mounted, so a
+// service without volumes declares exactly what RFC 017 left it with.
+func (s scopeShares) templateVolumes() containerapp.AppTemplateVolumeArray {
+	var volumes containerapp.AppTemplateVolumeArray
+	for _, m := range s.mounts {
+		volumes = append(volumes, &containerapp.AppTemplateVolumeArgs{
+			Name:        pulumi.String(m.share),
+			StorageName: pulumi.String(m.share),
+			StorageType: pulumi.String(storageTypeAzureFile),
+		})
+	}
+	return volumes
+}
+
+// volumeMounts mounts each volume at the path the Specification asked for.
+func (s scopeShares) volumeMounts() containerapp.AppTemplateContainerVolumeMountArray {
+	var mounts containerapp.AppTemplateContainerVolumeMountArray
+	for _, m := range s.mounts {
+		mounts = append(mounts, &containerapp.AppTemplateContainerVolumeMountArgs{
+			Name: pulumi.String(m.share),
+			Path: pulumi.String(m.volume.MountPath),
+		})
+	}
+	return mounts
 }
 
 // declareContainerDomain binds a custom domain to the app and proves

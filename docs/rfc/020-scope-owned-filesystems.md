@@ -530,3 +530,54 @@ adversarial pass broke 25 guarantees in `filesystem.go` and at the
 because those need a live stack, as on GCP. `gosec` and `govulncheck` are not
 installed on this machine. `staticcheck` reports only two unused constants
 that were already in `compute.go`.
+
+**Azure mount contract (tests).** The key-listing invoke is
+`azure:storage/getAccount:getAccount`: classic `pulumi-azure` v5 has no
+separate list-keys call, and `getAccount` returns `primaryAccessKey`. The same
+lookup also proves the account exists. The mock derives each key from the account name
+(`testStorageAccountKey`), so an assertion can tell which account's key reached
+which link. The account is looked up **exactly once** per service, by
+`storageAccountNameFor(subscription, scope)` in `scopeResourceGroupName`,
+because it is one credential for the scope, read once. Each share is then
+confirmed with `azure:storage/getShare:getShare` under `fileShareNameFor`, and
+a missing account or share is `ErrFilesystemMissing`, refused before the
+resource group, the identity or the environment is registered. The mount is
+proved by a join (mount path → template volume → `storageName` →
+`EnvironmentStorage` → `shareName`) over two volumes, one of them
+`Shared_Cache`, as on GCP. Each link is `ReadWrite`, is tied to this service's
+environment ID and states `storageType: AzureFile`. Left unset, that last field
+defaults to `EmptyDir`, which accepts writes and loses them. **Secrecy is
+pinned twice.** The link's `accessKey` must be a secret. That half holds by
+construction, because `NewEnvironmentStorage` wraps the field with
+`pulumi.ToSecret` itself. `TestDeclareContainerServiceKeepsTheStorageKeySecret`
+therefore also walks every input of every recorded resource and fails if the
+key appears anywhere outside a secret, such as an app secret, an environment
+variable or a tag. That walk is what a hostile edit cannot get past. Mounting
+declares no role assignment, because the link authenticates with the key and
+RFC 017 §2.6's identity stays empty.
+`TestDeclareContainerServiceWithoutVolumesMountsNothing` passes before the
+implementation by design, and also forbids `getClientConfig` for an
+image-named service that mounts nothing. `mockMonitor` gained a `files
+fileScope` field, whose zero value is a scope holding everything asked for.
+`container_test.go` gained `arrayOrEmpty` beside the existing nil-safe
+accessors.
+
+**Azure mount (implementation).** The plan item was amended to name
+`filesystem.go` and `errors.go` as well as `container.go`.
+`lookupMountedShares` sits beside `declareScopeFilesystems`, the side that
+creates what it finds, as it does on GCP. It returns a `scopeShares` value: the
+account, its key, and one `mountedShare` per volume. The zero value mounts
+nothing and asks for no subscription. That value renders its own template
+volumes and container mounts, as nil slices when empty, so a service with no
+volumes declares exactly what RFC 017 gave it, not `volumes: []`. The
+storage link, the template volume and the mount all take the share's name.
+It is at most 41 characters (a 32-character volume name, a hyphen and an
+8-character hash). Whether Container Apps caps an environment storage name
+lower than that is **unverified** against a live subscription. The app
+`DependsOn` every link, because a template volume names its link by name and
+not by an output. The adversarial pass ran 29 mutants and killed 26. Three
+survived. `key-plain` is equivalent: `NewEnvironmentStorage` already wraps
+`accessKey` in `ToSecret`, as the test notes record. `no-links` (the
+`DependsOn` removed) survived because no test pins ordering, and
+`account-no-name` survived because the mock's own error already echoes the
+account name. The last two have a follow-up test item in the plan.

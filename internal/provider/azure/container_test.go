@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"cloudsdd/internal/provider"
@@ -653,5 +654,378 @@ func TestDeclareContainerServiceWithoutScheduleDeclaresNoScheduleResources(t *te
 		if hasResource(recorded, token) {
 			t.Errorf("%s was declared for an unscheduled service", token)
 		}
+	}
+}
+
+const (
+	environmentStorageToken = "azure:containerapp/environmentStorage:EnvironmentStorage"
+	roleAssignmentToken     = "azure:authorization/assignment:Assignment"
+)
+
+// mountingContainerResource is a container service in containerTestScope()
+// that mounts volumes, so the account and share names it derives are the
+// ones the network stack declared.
+func mountingContainerResource(volumes []spec.Volume) spec.Resource {
+	return containerResource(func(r *spec.Resource) {
+		r.Scope.Environment = containerTestScope().Environment
+		r.Volumes = volumes
+	})
+}
+
+// TestDeclareContainerServiceMountsItsVolumes covers the Azure row of RFC
+// 020 §2.8's mount table: environment storage, a template volume naming
+// it, and a mount of that volume.
+//
+// Two volumes rather than one, because every assertion here is about
+// *which* share a mount path reaches, joined through two names the user
+// never sees. A single volume would pass just as well against an
+// implementation that wired every mount to the first share — §1's two
+// names resolving to one filesystem. One carries uppercase and an
+// underscore, which the Specification admits and Azure does not.
+func TestDeclareContainerServiceMountsItsVolumes(t *testing.T) {
+	volumes := []spec.Volume{
+		{Name: "uploads", MountPath: "/var/lib/uploads"},
+		{Name: "Shared_Cache", MountPath: "/var/cache/app"},
+	}
+	recorded := declaredContainerFor(t, mountingContainerResource(volumes), nil)
+
+	// Lookup, not create. An account or share declared here would be a
+	// second one beside the scope's, reachable from the internet unless it
+	// repeated every line of the network stack's hardening.
+	for _, token := range []string{storageAccountToken, fileShareToken, privateEndpointToken} {
+		if hasResource(recorded, token) {
+			t.Errorf("the resource stack declared a %s; the scope's network stack owns it", token)
+		}
+	}
+
+	account := assertScopeAccountLookedUp(t, recorded)
+
+	// Every share is sought by the name the network stack gave it, in the
+	// scope's account.
+	shareOf := make(map[string]string, len(volumes))
+	for _, v := range volumes {
+		shareOf[v.MountPath] = fileShareNameFor(v.Name)
+	}
+	sought := map[string]bool{}
+	for _, l := range resourcesOfType(recorded, getFileShareToken) {
+		sought[stringOrEmpty(l.Inputs["name"])] = true
+		if got := stringOrEmpty(l.Inputs["storageAccountName"]); got != account {
+			t.Errorf("share %q was looked up in account %q, want the scope's %q",
+				stringOrEmpty(l.Inputs["name"]), got, account)
+		}
+	}
+	for _, v := range volumes {
+		if !sought[fileShareNameFor(v.Name)] {
+			t.Errorf("volume %q was not looked up by its share name %q; names sought = %v",
+				v.Name, fileShareNameFor(v.Name), sought)
+		}
+	}
+
+	environment := findResource(t, recorded, containerEnvToken)
+	shareByStorage := assertEnvironmentStorage(t, recorded, environment, account)
+
+	template := objectOrEmpty(findResource(t, recorded, containerAppToken).Inputs["template"])
+	assertAzureFileMounts(t, template, shareByStorage, shareOf)
+
+	// Azure Files is mounted with the account key the storage link holds,
+	// not with the app's identity. RFC 017 §2.6's empty identity therefore
+	// stays empty: a role granted here would be a second, standing path to
+	// the same data.
+	if hasResource(recorded, roleAssignmentToken) {
+		t.Error("a role assignment was declared for a mount; the storage link authenticates with the account key")
+	}
+}
+
+// assertScopeAccountLookedUp checks that the scope's one storage account
+// was looked up, once, by the names the network stack derived, and returns
+// the account name.
+//
+// Once, because the account is the scope's and not the volume's: its key
+// is one credential, read once, and N reads would be N copies of it in
+// flight for nothing.
+func assertScopeAccountLookedUp(t *testing.T, recorded []recordedResource) string {
+	t.Helper()
+
+	lookups := resourcesOfType(recorded, getStorageAccountToken)
+	if len(lookups) != 1 {
+		t.Fatalf("looked up the storage account %d times, want once for the scope", len(lookups))
+	}
+	want := storageAccountNameFor(testSubscriptionID, containerTestScope())
+	if got := stringOrEmpty(lookups[0].Inputs["name"]); got != want {
+		t.Errorf("looked up storage account %q, want the scope's derived %q", got, want)
+	}
+	if got, want := stringOrEmpty(lookups[0].Inputs["resourceGroupName"]), scopeResourceGroupName(containerTestScope()); got != want {
+		t.Errorf("looked up the account in resource group %q, want the scope's %q", got, want)
+	}
+	return want
+}
+
+// assertEnvironmentStorage checks each storage link the environment
+// declares, and returns the share each one names, keyed by the link's
+// name — the name a template volume refers to it by.
+func assertEnvironmentStorage(
+	t *testing.T,
+	recorded []recordedResource,
+	environment recordedResource,
+	account string,
+) map[string]string {
+	t.Helper()
+
+	links := resourcesOfType(recorded, environmentStorageToken)
+	shareByStorage := make(map[string]string, len(links))
+	for _, link := range links {
+		name := stringOrEmpty(link.Inputs["name"])
+		if name == "" {
+			t.Errorf("an environment storage link has no name; a template volume cannot refer to it")
+		}
+		if _, seen := shareByStorage[name]; seen {
+			t.Errorf("environment storage %q is declared twice; two volumes folded onto one link", name)
+		}
+		shareByStorage[name] = stringOrEmpty(link.Inputs["shareName"])
+
+		// The link belongs to this service's environment (RFC 020 §2.6:
+		// the environment is per-resource, so this is the one part of the
+		// consumption side that is a declaration).
+		if got, want := stringOrEmpty(link.Inputs["containerAppEnvironmentId"]), environment.Name+"-id"; got != want {
+			t.Errorf("storage %q is linked to environment %q, want this service's %q", name, got, want)
+		}
+		if got := stringOrEmpty(link.Inputs["accountName"]); got != account {
+			t.Errorf("storage %q names account %q, want the scope's %q", name, got, account)
+		}
+		// RFC 020 declares no read-only mode: a volume exists to be written.
+		if got := stringOrEmpty(link.Inputs["accessMode"]); got != "ReadWrite" {
+			t.Errorf("storage %q has accessMode %q, want ReadWrite", name, got)
+		}
+
+		key := link.Inputs["accessKey"]
+		if !key.IsSecret() {
+			t.Errorf("storage %q holds the account key in plain text; RFC 020 §4 requires a Pulumi secret", name)
+			continue
+		}
+		if got, want := stringOrEmpty(key.SecretValue().Element), testStorageAccountKey(account); got != want {
+			t.Errorf("storage %q holds key %q, want the scope account's own key", name, got)
+		}
+	}
+	return shareByStorage
+}
+
+// assertAzureFileMounts ties each mount path, through the template volume
+// and the storage link it names, to the share it reaches. shareOf maps
+// the mount path the Specification asked for to the share its volume
+// names.
+func assertAzureFileMounts(
+	t *testing.T,
+	template resource.PropertyMap,
+	shareByStorage map[string]string,
+	shareOf map[string]string,
+) {
+	t.Helper()
+
+	declared := arrayOrEmpty(template["volumes"])
+	if len(declared) != len(shareOf) {
+		t.Fatalf("the template declares %d volumes, want one per mount (%d)", len(declared), len(shareOf))
+	}
+
+	storageByVolume := make(map[string]string, len(declared))
+	for _, entry := range declared {
+		volume := objectOrEmpty(entry)
+		name := stringOrEmpty(volume["name"])
+		if _, seen := storageByVolume[name]; seen {
+			t.Errorf("volume name %q is declared twice; two volumes folded onto one name", name)
+		}
+		storageByVolume[name] = stringOrEmpty(volume["storageName"])
+
+		// Left unset, Container Apps defaults a volume to EmptyDir: an
+		// ephemeral directory that accepts writes and loses them on the
+		// next restart, which is the silent wrong answer in its purest form.
+		if got := stringOrEmpty(volume["storageType"]); got != "AzureFile" {
+			t.Errorf("volume %q has storageType %q, want AzureFile", name, got)
+		}
+	}
+
+	containers := arrayOrEmpty(template["containers"])
+	if len(containers) != 1 {
+		t.Fatalf("declared %d containers, want 1", len(containers))
+	}
+	mounts := arrayOrEmpty(objectOrEmpty(containers[0])["volumeMounts"])
+	if len(mounts) != len(shareOf) {
+		t.Fatalf("the container declares %d volume mounts, want one per volume (%d)", len(mounts), len(shareOf))
+	}
+
+	for _, entry := range mounts {
+		mount := objectOrEmpty(entry)
+		path, name := stringOrEmpty(mount["path"]), stringOrEmpty(mount["name"])
+
+		want, asked := shareOf[path]
+		if !asked {
+			t.Errorf("the container mounts %q at %q, a path the resource never asked for", name, path)
+			continue
+		}
+		storage, declaredVolume := storageByVolume[name]
+		if !declaredVolume {
+			t.Errorf("%q mounts volume %q, which the template does not declare", path, name)
+			continue
+		}
+		got, linked := shareByStorage[storage]
+		if !linked {
+			t.Errorf("volume %q names storage %q, which the environment does not declare", name, storage)
+			continue
+		}
+		if got != want {
+			t.Errorf("%q reaches share %q, want %q — the share its own volume names", path, got, want)
+		}
+	}
+}
+
+// TestDeclareContainerServiceKeepsTheStorageKeySecret covers RFC 020 §4:
+// the account key is a credential in the flow, and it may exist in the
+// recorded inputs only as a secret.
+//
+// The storage link is not the only place it could surface. A key passed
+// on as an app secret, an environment variable or a tag would be printed
+// in the plan and stored in state in the clear, so every input of every
+// resource is searched, not just the one field meant to hold it.
+func TestDeclareContainerServiceKeepsTheStorageKeySecret(t *testing.T) {
+	recorded := declaredContainerFor(t, mountingContainerResource([]spec.Volume{
+		{Name: "uploads", MountPath: "/var/lib/uploads"},
+	}), nil)
+
+	key := testStorageAccountKey(storageAccountNameFor(testSubscriptionID, containerTestScope()))
+	if !hasResource(recorded, environmentStorageToken) {
+		t.Fatal("no environment storage was declared, so the key's handling cannot be checked")
+	}
+	for _, r := range recorded {
+		for field, v := range r.Inputs {
+			for _, s := range plainStrings(v) {
+				if strings.Contains(s, key) {
+					t.Errorf("%s %q carries the account key in plain text in %q", r.Type, r.Name, field)
+				}
+			}
+		}
+	}
+}
+
+// plainStrings collects every string in v that is not under a secret. A
+// secret, or an output marked secret, hides everything beneath it.
+func plainStrings(v resource.PropertyValue) []string {
+	switch {
+	case v.IsSecret():
+		return nil
+	case v.IsOutput():
+		if o := v.OutputValue(); !o.Secret {
+			return plainStrings(o.Element)
+		}
+		return nil
+	case v.IsString():
+		return []string{v.StringValue()}
+	case v.IsArray():
+		var out []string
+		for _, e := range v.ArrayValue() {
+			out = append(out, plainStrings(e)...)
+		}
+		return out
+	case v.IsObject():
+		var out []string
+		for _, e := range v.ObjectValue() {
+			out = append(out, plainStrings(e)...)
+		}
+		return out
+	}
+	return nil
+}
+
+func arrayOrEmpty(v resource.PropertyValue) []resource.PropertyValue {
+	if !v.IsArray() {
+		return nil
+	}
+	return v.ArrayValue()
+}
+
+// TestDeclareContainerServiceWithoutVolumesMountsNothing keeps every
+// service that mounts nothing exactly as RFC 017 left it: no lookup, no
+// key read, no storage link and no volume.
+//
+// The lookup matters most. A service that mounts nothing and still reads
+// the account key has a credential in its state for no reason, and fails
+// to deploy in a scope that has no account at all.
+func TestDeclareContainerServiceWithoutVolumesMountsNothing(t *testing.T) {
+	recorded := declaredContainer(t, nil)
+
+	for _, token := range []string{getStorageAccountToken, getFileShareToken, getClientConfigToken} {
+		if hasResource(recorded, token) {
+			t.Errorf("%s was invoked for a service with no volumes", token)
+		}
+	}
+	if hasResource(recorded, environmentStorageToken) {
+		t.Error("environment storage was declared for a service with no volumes")
+	}
+
+	template := objectOrEmpty(findResource(t, recorded, containerAppToken).Inputs["template"])
+	if n := len(arrayOrEmpty(template["volumes"])); n != 0 {
+		t.Errorf("the template declares %d volumes, want none", n)
+	}
+	for _, c := range arrayOrEmpty(template["containers"]) {
+		if n := len(arrayOrEmpty(objectOrEmpty(c)["volumeMounts"])); n != 0 {
+			t.Errorf("the container declares %d volume mounts, want none", n)
+		}
+	}
+}
+
+// TestDeclareContainerServiceRefusesAFilesystemTheScopeDoesNotHave covers
+// the lookup-not-create discipline of RFC 020 §2.8.
+//
+// The Engine provisions a scope's network stack before any resource in it,
+// so an account or share absent here was removed out of band rather than
+// lost to a race. A storage link to a share that does not exist is one
+// Container Apps accepts and a revision that fails at start, so the
+// provider refuses first and names what it could not find.
+func TestDeclareContainerServiceRefusesAFilesystemTheScopeDoesNotHave(t *testing.T) {
+	tests := []struct {
+		name    string
+		files   fileScope
+		wantMsg string
+	}{
+		{
+			name:    "the scope has no storage account",
+			files:   fileScope{missingAccount: true},
+			wantMsg: storageAccountNameFor(testSubscriptionID, containerTestScope()),
+		},
+		{
+			name:    "no share answers to the derived name",
+			files:   fileScope{missingShare: fileShareNameFor("uploads")},
+			wantMsg: "uploads",
+		},
+	}
+
+	r := mountingContainerResource([]spec.Volume{{Name: "uploads", MountPath: "/var/lib/uploads"}})
+	props, err := decodeContainerServiceProperties(r.Properties, nil)
+	if err != nil {
+		t.Fatalf("decodeContainerServiceProperties() = %v", err)
+	}
+	net := scopeNetwork{subnetID: containerAppsSubnetID, addressSpace: "10.42.3.0/24"}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &recorder{}
+			err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+				_, err := declareContainerService(ctx, r, containerTestScope(), net, *props, nil)
+				return err
+			}, pulumi.WithMocks("cloudsdd-azure", "test", mockMonitor{rec: rec, files: tt.files}))
+
+			if !errors.Is(err, ErrFilesystemMissing) {
+				t.Fatalf("declareContainerService() = %v, want ErrFilesystemMissing", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Errorf("error = %q, want it to name %q", err, tt.wantMsg)
+			}
+			// The refusal comes before anything is registered, or the stack
+			// holds a resource group, an identity and an environment around
+			// a mount that cannot exist.
+			for _, token := range []string{rgToken, userAssignedIDToken, containerEnvToken, containerAppToken, environmentStorageToken} {
+				if hasResource(rec.snapshot(), token) {
+					t.Errorf("%s was declared despite the missing filesystem", token)
+				}
+			}
+		})
 	}
 }

@@ -33,3 +33,13 @@ var ErrZonesNotSupported = errors.New("azure: resource type does not support sco
 // share a vocabulary and nothing else, and one error would make a message
 // about VM SKUs appear for a container.
 var ErrUnsupportedContainerSize = errors.New("azure: unsupported container size")
+
+// ErrFilesystemMissing indicates that a resource mounts a volume whose
+// storage account or share is not in its scope (RFC 020 §2.8).
+//
+// The Engine provisions a scope's network stack — which owns the account
+// and its shares — before any resource in it, so this is a broken
+// invariant rather than a race: something was removed out of band.
+// Creating a replacement instead would be RFC 020 §1's silent wrong
+// answer: a second, empty share where a shared one was meant to be.
+var ErrFilesystemMissing = errors.New("azure: the scope does not hold the filesystem a resource mounts")

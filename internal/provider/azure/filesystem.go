@@ -235,3 +235,61 @@ func declareFilePrivateEndpoint(
 	}
 	return nil
 }
+
+// scopeShares is what a Container Apps environment needs to mount a
+// scope's shares: the account, the key its storage links authenticate
+// with, and the share behind each volume. The zero value mounts nothing.
+type scopeShares struct {
+	account string
+	key     string
+	mounts  []mountedShare
+}
+
+// mountedShare is a volume paired with the share the scope's network
+// stack built for it.
+type mountedShare struct {
+	volume spec.Volume
+	share  string
+}
+
+// lookupMountedShares finds the scope account and the share behind each
+// of a resource's volumes (RFC 020 §2.8).
+//
+// It is the mirror of declareScopeFilesystems: the network stack created
+// these, this stack only finds them, and the two meet at the names
+// storageAccountNameFor and fileShareNameFor derive for both. The account
+// is looked up once, because its key is one credential for the scope.
+func lookupMountedShares(ctx *pulumi.Context, s provider.NetworkScope, volumes []spec.Volume) (scopeShares, error) {
+	if len(volumes) == 0 {
+		return scopeShares{}, nil
+	}
+
+	config, err := core.GetClientConfig(ctx)
+	if err != nil {
+		return scopeShares{}, fmt.Errorf("azure: failed to resolve the subscription for the volumes of scope %q: %w",
+			provider.ScopeName(s), err)
+	}
+
+	name := storageAccountNameFor(config.SubscriptionId, s)
+	rg := scopeResourceGroupName(s)
+	account, err := storage.LookupAccount(ctx, &storage.LookupAccountArgs{Name: name, ResourceGroupName: &rg})
+	if err != nil {
+		return scopeShares{}, fmt.Errorf(
+			"%w: scope %q has no storage account named %q. The scope's network is provisioned "+
+				"before the resources in it, so this means it was removed out of band: %w",
+			ErrFilesystemMissing, provider.ScopeName(s), name, err)
+	}
+
+	mounts := make([]mountedShare, 0, len(volumes))
+	for _, v := range volumes {
+		share := fileShareNameFor(v.Name)
+		if _, err := storage.LookupShare(ctx, &storage.LookupShareArgs{Name: share, StorageAccountName: name}); err != nil {
+			return scopeShares{}, fmt.Errorf(
+				"%w: volume %q in scope %q has no share named %q in account %q. The scope's network "+
+					"is provisioned before the resources in it, so this means it was removed out of band: %w",
+				ErrFilesystemMissing, v.Name, provider.ScopeName(s), share, name, err)
+		}
+		mounts = append(mounts, mountedShare{volume: v, share: share})
+	}
+	return scopeShares{account: name, key: account.PrimaryAccessKey, mounts: mounts}, nil
+}
