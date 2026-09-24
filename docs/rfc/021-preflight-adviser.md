@@ -1,6 +1,6 @@
 # RFC 021: The Pre-Flight Adviser
 
-- **Status:** Proposed
+- **Status:** Approved
 - **Author:** Claude (Senior Staff Cloud Platform Engineer, AI-assisted)
 - **Date:** 2026-09-22
 - **Depends on:** [RFC 010](010-configurable-ai-providers.md) (AI providers
@@ -622,6 +622,34 @@ a stale pin on a safety gate is the worse failure.
 
 ## 8. Implementation notes
 
-*(To be filled in as the plan in `todo.md` is executed, per
-`<todo_policy>`. Decisions that did not survive contact with the code are
-recorded here.)*
+### Phase 1 — `internal/judge/judge_test.go`
+
+- **`Criteria` is two typed fields, not one.** §2.3/§2.4 write
+  `Criteria` as a `map[string]string` for `choice` and a `[]string` for
+  `score`. One Go field would have to be `any`, and the type would stop
+  saying which primitive takes which. `Question` carries `Options`
+  (choice) and `Levels` (score). The wire field is still `criteria`; the
+  `jev.go` projection picks whichever one the primitive uses.
+- **The decoder is `DecodeDecision(r io.Reader, asked map[string]Question)`.**
+  It can't enforce §4.3 without the questions that were sent: an unsent
+  option, an unasked question, a missing answer and the score range are
+  all relative to `asked`. It lives in `judge.go` and does no I/O beyond
+  reading `r`, so the rules are tested with no server.
+- **Sentinels beyond the four in §4.3.** `ErrTypeMismatch` (an answer of
+  the wrong primitive) and `ErrMalformed` (bad JSON, unknown fields,
+  trailing data). A **missing value** inside a present answer (a `noul`
+  with no `noul`, a `choice`/`score` with no `confidence`) is also
+  `ErrMalformed`. Its zero value would be a valid answer and a wrong one,
+  delivered as a success. A `null` answer counts as `ErrMissingAnswer`.
+- **Per-option and per-level probabilities are validated too.** They go
+  through the same [0,1] rule, and a probability keyed by an unsent option
+  is `ErrUnknownOption`. Nothing reads them yet. Decoding them into the
+  typed struct and checking them costs nothing, and a later reader can
+  rely on them.
+- **The wire field names are the RFC's reading of the vendor docs, not a
+  capture.** The names used are `choice`, `probabilities`, `confidence`,
+  `score`, `legend`, `noul`, `usage`. `docs.typesafe.ai` is unreachable
+  from the development container, and strict decoding makes a wrong name
+  a hard `ErrMalformed`, which means abstention (§2.5), never a wrong
+  verdict. §7.3's live smoke test is the check. `legend` is assumed to be
+  a string.
