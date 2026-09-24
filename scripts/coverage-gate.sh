@@ -99,6 +99,7 @@ FLOORS=(
   "cloudsdd/cmd/cloudsdd:93"
   "cloudsdd/internal/config:93"
   "cloudsdd/internal/engine:95"
+  "cloudsdd/internal/judge:98"
   "cloudsdd/internal/nlp:96"
   "cloudsdd/internal/provider:100"
   "cloudsdd/internal/provider/compute:100"

@@ -25,7 +25,7 @@ and `docs/architecture.md`, both at the end of each.
 
 - [x] Create `internal/judge/judge_test.go`: 3 tests (33 rejection rows, each a sentinel) + `FuzzDecodeDecision`; red on the undefined vocabulary only.
 - [x] Create `internal/judge/judge.go`: `Question`, `Answer`, `Decision`, the `Judge` interface, the sentinels, and the strict decoder (unknown fields rejected) satisfying the tests above. No HTTP in this file. *(98.6%; 25 mutants killed; 4 rows added to pin per-primitive strictness — RFC 021 §8.)*
-- [ ] Update `scripts/coverage-gate.sh`: add the `internal/judge` floor (98, from 98.6%). *(Added: the gate fails any package without a floor, so leaving this to the Phase 3 gate item would keep CI red for every item in between.)*
+- [x] Update `scripts/coverage-gate.sh`: add the `internal/judge` floor (98, from 98.6%). *(Added: the gate fails any package without a floor, so leaving this to the Phase 3 gate item would keep CI red for every item in between.)* *(Done: 98.6% ≥ 98; a floor of 99 fails.)*
 - [ ] Create `internal/judge/jev_test.go`: against an `httptest` server pointed at by `CLOUDSDD_TYPESAFE_ENDPOINT`, per RFC 011 §5 and the shape of `internal/nlp/http_test.go`. Assert the request body field by field (`model`, `state`, and each question's `type`/`instructions`/`criteria`) so a silently-renamed wire field fails; the happy path for each of the three primitives; `401`/`422`/`429`/`529` each mapped to their sentinel; one backoff retry on `429` then success; a body exceeding `maxResponseBytes`; a truncated body; and the deadline.
 - [ ] Create `internal/judge/jev.go`: the `net/http` client — `POST /v1/systemone`, bearer auth from `TYPESAFE_API_KEY`, the 3 s timeout of §2.5, `maxResponseBytes`, and a single backoff retry on `429`/`529` inside that budget. `encoding/json` and `net/http` only: no new module dependency (§1.1).
 - [ ] Create `internal/judge/factory.go`: `NewJudge(provider, model)`, rejecting an unknown provider the way `nlp.NewTranslator` does. This file is what makes §2.2's departure from the originating proposal real — a second System One model is a fourth file here, not a migration.
@@ -56,7 +56,7 @@ and `docs/architecture.md`, both at the end of each.
 
 ## Phase 6: The gate and the documentation (RFC 021 §6 step 6)
 
-- [ ] Update `scripts/coverage-gate.sh`: add floors for `internal/judge` and `internal/preflight`, and confirm the existing structural checks still hold.
+- [ ] Update `scripts/coverage-gate.sh`: add the `internal/preflight` floor (`internal/judge` already has one, from Phase 1), and confirm the existing structural checks still hold.
 - [ ] Update `docs/architecture.md`: the adviser, the two packages and why they are two, and §2.1's rule.
 - [ ] Update `docs/cli.md`: `--force`, what `--yes` now means, the `preflight` config block, and the §4.1 disclosure of what leaves the machine.
 - [ ] Update `docs/rfc/021-preflight-adviser.md`: fill in `## 8. Implementation notes` with the decisions that did not survive contact, and set the status to Implemented.
