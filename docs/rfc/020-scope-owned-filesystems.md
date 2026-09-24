@@ -681,3 +681,15 @@ skip, so `cmd/cloudsdd`, `config` and `state` read 92.8/89.1/86.0 here. As
 run 35771425790 to the decimal, and the gate exited 0. **Rule going
 forward:** read a floor from CI's log, or from a non-root run, and never
 from a root container alone.
+
+**`go` directive 1.26.5 → 1.26.6.** CI installs Go from
+`go-version-file: go.mod`, so the directive is the only pin to move. There
+is no `toolchain` line to keep in step, and `go mod tidy` changed nothing
+else. Locally, `GOTOOLCHAIN=auto` fetched go1.26.6. The suite is green on
+it and `gosec` exits 0. `govulncheck` cannot reach `vuln.go.dev` through
+this container's proxy (403). So the claim that the four standard-library
+findings are closed is checked by CI's `govulncheck` job, not here. The
+coverage gate under root shows only the known `internal/state` skip
+(86.0%), and every other package holds its floor. A non-root re-run was not
+permitted in this session. The toolchain bump does not touch the code
+those root-skipped tests cover.
