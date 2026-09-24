@@ -685,3 +685,34 @@ a stale pin on a safety gate is the worse failure.
 - **Verification.** `FuzzDecodeDecision` ran for 45 s (1.25 M executions)
   without a crash or a rule violation. `gosec` is clean. `govulncheck`
   cannot run here: the proxy blocks `vuln.go.dev`.
+
+### Phase 1 — `internal/judge/jev_test.go`
+
+- **The API it fixes for `jev.go`.** `NewJev(model) (*Jev, error)`,
+  `DefaultJevModel` (`jev-latest`, sent when the model is empty),
+  `requestTimeout` (asserted to be 3 s) and `maxResponseBytes`.
+  `CLOUDSDD_TYPESAFE_ENDPOINT` is a **base URL**: the test asserts the
+  request path is `/v1/systemone`, so the path belongs to the client and
+  can't drift through configuration.
+- **Four transport sentinels.** `ErrUnauthorized` (401), `ErrRejected`
+  (422), `ErrRateLimited` (429) and `ErrOverloaded` (529). They live in
+  `jev.go` because they describe one vendor's transport, not the
+  vocabulary. The test also counts attempts: a 429 or 529 that persists
+  is exactly two calls, while 401 and 422 are one each, since a retry
+  can't fix them.
+- **Two rows beyond the item's list, both adversarial.** First, the
+  test server's error body echoes the API key, and the test asserts the
+  error doesn't repeat it (§4.7). Second, `NewJev` with
+  `TYPESAFE_API_KEY` unset is an error: a client that can never
+  authenticate must not be built. §2.5's fail-closed `LoadConfig` check
+  is the other half of that and comes in Phase 5.
+- **The size cap is tested so that removing it fails.** The oversized
+  body is a complete, valid response whose `model` string alone exceeds
+  `maxResponseBytes`. Without the cap it would decode as a success.
+- **The request body is decoded strictly on the server side.** A field
+  the client adds without an RFC change is an unknown field and fails
+  the test. `criteria` is asserted in its three shapes: an options map
+  for `choice`, an ordered list for `score`, and absent for `noul`.
+- **The deadline test takes ~3 s.** It asserts the client's own budget
+  with no caller deadline, because that budget is the guarantee.
+  A separate 100 ms test covers the caller's deadline.
