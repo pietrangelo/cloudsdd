@@ -643,3 +643,25 @@ when they cannot run at all. **(2)** Under a comma-decimal locale, awk
 prints the percentages as `94,4`, and `a + 0` then reads them as their
 integer part. That can only make the gate stricter, never looser, so it
 is cosmetic. Run it with `LC_ALL=C`. Fault (1) was added to the plan as its own item.
+
+**Phase 5, gate fault (1) fixed.** Each invariant check now runs `go list`
+by itself and fails if it errors. Only after that does it filter the
+output. `|| true` now sits on the `grep` alone, where an empty match is the
+passing case. Tested with a fake `go` on `PATH`: when it reports
+`cloudsdd/internal/engine`, all eight checks still fail. When it reports
+nothing, all eight pass. When `go` is missing, all eight fail and name
+`go list`. Two mutations were tried. Dropping `|| true` from the grep kills
+a clean run. Ignoring the `go list` status brings back the silent `ok`
+lines. Fault (2) is fixed by `export LC_ALL=C`. That could not be
+reproduced here: this container has `mawk` and no comma-decimal locale.
+
+The check turned up two failures that were already on `main` before this
+item. **(a)** CI's coverage gate has been red since the Phase 5 ratchet.
+CI measures aws 67.7%, azure 73.2% and gcp 74.4%, below the 70/76/77
+floors. The same numbers come out in this container, so the actuals the
+ratchet recorded came from some other measurement. **(b)** CI's
+`govulncheck` reports four standard-library vulnerabilities, fixed in Go
+1.26.6. Each has its own plan item. This container cannot check (b):
+the proxy blocks `vuln.go.dev`. It also runs as root, so the
+permission-denied tests in `config` and `state` skip themselves and those
+two packages read below their floors here, but not in CI.
