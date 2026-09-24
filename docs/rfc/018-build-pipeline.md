@@ -447,3 +447,50 @@ is three translations of decisions already made.
    should show no change to the service. Worth an explicit test rather
    than an assumption, because the obvious implementation rebuilds and
    produces a byte-different image from a non-reproducible layer.
+
+## 8. Implementation notes
+
+Three decisions in the body above did not ship as first written. The body
+keeps its original argument; this section is where to start when one of
+them is questioned.
+
+- **§2.4's "receives the digest" became a commit-SHA tag (§2.4.1).** §2.4
+  promised the consuming `container_service` the digest the build
+  produced. That cannot be wired: CloudSDD runs one Pulumi stack per
+  `Resource.ID`, so the service's program cannot read the pipeline's
+  outputs, and the digest does not exist at plan time anyway. What
+  shipped is the commit SHA as the hand-off. The Engine resolves
+  `source.revision` once, the build tags the image `<image_name>:<sha>`,
+  and the service asks for that tag. The value travels on
+  `spec.Resource.Resolved` (`internal/spec/spec.go`), which is tagged
+  `json:"-"` so no Specification can set it. It is one `Resolved` shape
+  for both ends of the reference, and it deliberately leaves out the
+  registry host, which each provider assembles itself. The tag is as
+  strong as a digest only because the registry refuses to repoint it:
+  `IMMUTABLE` on ECR, immutable tags on Artifact Registry. On Azure it
+  is weaker, as the next note records.
+
+- **§7.2's Premium SKU was reversed (§2.8.1).** The open question assumed
+  that ACR retention needed a Premium registry. It does not help: ACR's
+  native policy is age-based and reaps only untagged manifests, and a
+  pipeline that pushes one commit tag per build leaves almost none. Azure
+  therefore keeps a **Basic** registry (`acrSKUBasic` in
+  `internal/provider/azure/pipeline.go`). It honours `retain` with a
+  timer-triggered ACR Task that runs the first-party
+  `acr purge --keep <retain>`, which counts images the way §2.5 asks and
+  the other two clouds do. The same check found the second gap: ACR has
+  no registry-wide immutable-tags setting. On Azure, the guarantee in
+  §2.4.1 rests on the fact that only the pipeline's own task can push to
+  a registry created for it alone. It does not rest on the registry
+  refusing the write.
+
+- **§2.7's `build_pipeline` mount was withdrawn by
+  [RFC 020 §2.4](020-scope-owned-filesystems.md).** §2.7 supported
+  filesystem volumes on the pipeline as well as on the service. No build
+  service can honour that without contradicting this RFC. CodeBuild
+  mounts EFS only inside a VPC, and this RFC runs the build in
+  CodeBuild's managed network on purpose. Cloud Build and ACR Tasks have
+  no NFS mount at all. `ResourceType.MountsFilesystem`
+  (`internal/spec/spec.go`) now answers true for `container_service`
+  alone, and the filesystems themselves are provisioned per scope as
+  RFC 020 describes.
