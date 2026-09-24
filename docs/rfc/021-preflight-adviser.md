@@ -1,6 +1,6 @@
 # RFC 021: The Pre-Flight Adviser
 
-- **Status:** Proposed
+- **Status:** Approved
 - **Author:** Claude (Senior Staff Cloud Platform Engineer, AI-assisted)
 - **Date:** 2026-09-22
 - **Depends on:** [RFC 010](010-configurable-ai-providers.md) (AI providers
@@ -622,6 +622,140 @@ a stale pin on a safety gate is the worse failure.
 
 ## 8. Implementation notes
 
-*(To be filled in as the plan in `todo.md` is executed, per
-`<todo_policy>`. Decisions that did not survive contact with the code are
-recorded here.)*
+### Phase 1 — `internal/judge/judge_test.go`
+
+- **`Criteria` is two typed fields, not one.** §2.3/§2.4 write
+  `Criteria` as a `map[string]string` for `choice` and a `[]string` for
+  `score`. One Go field would have to be `any`, and the type would stop
+  saying which primitive takes which. `Question` carries `Options`
+  (choice) and `Levels` (score). The wire field is still `criteria`; the
+  `jev.go` projection picks whichever one the primitive uses.
+- **The decoder is `DecodeDecision(r io.Reader, asked map[string]Question)`.**
+  It can't enforce §4.3 without the questions that were sent: an unsent
+  option, an unasked question, a missing answer and the score range are
+  all relative to `asked`. It lives in `judge.go` and does no I/O beyond
+  reading `r`, so the rules are tested with no server.
+- **Sentinels beyond the four in §4.3.** `ErrTypeMismatch` (an answer of
+  the wrong primitive) and `ErrMalformed` (bad JSON, unknown fields,
+  trailing data). A **missing value** inside a present answer (a `noul`
+  with no `noul`, a `choice`/`score` with no `confidence`) is also
+  `ErrMalformed`. Its zero value would be a valid answer and a wrong one,
+  delivered as a success. A `null` answer counts as `ErrMissingAnswer`.
+- **Per-option and per-level probabilities are validated too.** They go
+  through the same [0,1] rule, and a probability keyed by an unsent option
+  is `ErrUnknownOption`. Nothing reads them yet. Decoding them into the
+  typed struct and checking them costs nothing, and a later reader can
+  rely on them.
+- **The wire field names are the RFC's reading of the vendor docs, not a
+  capture.** The names used are `choice`, `probabilities`, `confidence`,
+  `score`, `legend`, `noul`, `usage`. `docs.typesafe.ai` is unreachable
+  from the development container, and strict decoding makes a wrong name
+  a hard `ErrMalformed`, which means abstention (§2.5), never a wrong
+  verdict. §7.3's live smoke test is the check. `legend` is assumed to be
+  a string.
+
+### Phase 1 — `internal/judge/judge.go`
+
+- **Two layers: wire and domain.** `wireDecision` keeps each answer as a
+  `json.RawMessage`. The decoder reads only its `type`, checks it against
+  the question, and then decodes the answer strictly into a struct for
+  that answer type. So a field that belongs to another answer type is an
+  unknown field, and `ErrMalformed`: a `noul` on a `choice` is rejected,
+  not ignored. Values are pointers, so "absent" and "zero" are different
+  things. `Answer` holds only validated values and carries neither the
+  probabilities nor the `legend`, since nothing reads them yet (they are
+  still validated).
+- **Errors are deterministic.** Answers and option probabilities are
+  checked in sorted key order, so a response with several faults always
+  reports the same one.
+- **Level-probability length is not checked.** A `score` answer whose
+  `probabilities` list is shorter or longer than the rubric is accepted,
+  as long as each entry is in [0,1]. Nothing reads the list, and the
+  tests do not pin a length rule. Add one when a reader appears.
+- **Four rows added to `judge_test.go`** during the mutation pass: an
+  unknown field on a `choice` and on a `score` answer, a field of another
+  answer type, and an answer that is not a JSON object. Without them,
+  swapping the strict per-answer decoder for `json.Unmarshal` survived.
+  Four mutants that remove a nil guard (null body, absent
+  `choice`/`score`/`noul`) are caught by the nil-pointer panic those
+  guards exist to prevent, rather than by an assertion. That is expected.
+- **The one uncovered branch** is the default case for a question whose
+  answer type is none of the three. It can only be reached by a caller
+  bug. It returns `ErrTypeMismatch` rather than panicking.
+- **Verification.** `FuzzDecodeDecision` ran for 45 s (1.25 M executions)
+  without a crash or a rule violation. `gosec` is clean. `govulncheck`
+  cannot run here: the proxy blocks `vuln.go.dev`.
+
+### Phase 1 — `internal/judge/jev_test.go`
+
+- **The API it fixes for `jev.go`.** `NewJev(model) (*Jev, error)`,
+  `DefaultJevModel` (`jev-latest`, sent when the model is empty),
+  `requestTimeout` (asserted to be 3 s) and `maxResponseBytes`.
+  `CLOUDSDD_TYPESAFE_ENDPOINT` is a **base URL**: the test asserts the
+  request path is `/v1/systemone`, so the path belongs to the client and
+  can't drift through configuration.
+- **Four transport sentinels.** `ErrUnauthorized` (401), `ErrRejected`
+  (422), `ErrRateLimited` (429) and `ErrOverloaded` (529). They live in
+  `jev.go` because they describe one vendor's transport, not the
+  vocabulary. The test also counts attempts: a 429 or 529 that persists
+  is exactly two calls, while 401 and 422 are one each, since a retry
+  can't fix them.
+- **Two rows beyond the item's list, both adversarial.** First, the
+  test server's error body echoes the API key, and the test asserts the
+  error doesn't repeat it (§4.7). Second, `NewJev` with
+  `TYPESAFE_API_KEY` unset is an error: a client that can never
+  authenticate must not be built. §2.5's fail-closed `LoadConfig` check
+  is the other half of that and comes in Phase 5.
+- **The size cap is tested so that removing it fails.** The oversized
+  body is a complete, valid response whose `model` string alone exceeds
+  `maxResponseBytes`. Without the cap it would decode as a success.
+- **The request body is decoded strictly on the server side.** A field
+  the client adds without an RFC change is an unknown field and fails
+  the test. `criteria` is asserted in its three shapes: an options map
+  for `choice`, an ordered list for `score`, and absent for `noul`.
+- **The deadline test takes ~3 s.** It asserts the client's own budget
+  with no caller deadline, because that budget is the guarantee.
+  A separate 100 ms test covers the caller's deadline.
+
+### Phase 1 — `internal/judge/jev.go`
+
+- **One budget, not two.** `Ask` wraps the caller's context in
+  `requestTimeout`, and that deadline covers both attempts and the
+  backoff between them. The `http.Client` has no `Timeout` of its own.
+  With both, removing either one survived the mutation pass, so one was
+  decorative. The context one is kept because a per-attempt timeout
+  can't bound the retry, and §2.5's three seconds is a total budget.
+- **The backoff is 250 ms, taken once, and it yields to the deadline.**
+  It is short enough that a 429 followed by a normal ~0.114 s answer
+  finishes well inside three seconds. The wait selects on the context,
+  so a caller with less patience is never kept waiting through it.
+- **Redirects are not followed.** The client's `CheckRedirect` returns
+  `http.ErrUseLastResponse`, so a 3xx becomes an undocumented status and
+  an error. A redirect is the one way a bearer key reaches a host nobody
+  configured. `net/http` strips `Authorization` across hosts, but not
+  across a same-host path change or a scheme downgrade.
+- **Undocumented statuses carry no sentinel.** Any status other than 200
+  and the four of §1.1 becomes `judge: jev returned status N`, is not
+  retried, and never echoes the body. All the caller needs to know is
+  that the adviser abstained (§2.5), and the body is untrusted and may
+  repeat what was sent (§4.7).
+- **The status is read before the body.** A well-formed decision under
+  a 503 is still a failure. The mutation pass showed this was unpinned:
+  the 500 row's body was malformed anyway, so skipping the status check
+  survived. A row now sends a valid decision under a 503.
+- **The endpoint is not validated in `NewJev`.** A malformed
+  `CLOUDSDD_TYPESAFE_ENDPOINT` fails on the first `Ask`, which is
+  abstention, not a crash. Phase 5's `LoadConfig` is where configuration
+  errors become fatal, if we decide they should.
+- **Seven rows added to `jev_test.go`.** They cover the default endpoint,
+  an undocumented status with an echoing body, a valid decision under a
+  503, the redirect, an unmarshalable state (never sent), a malformed
+  endpoint, and a backoff cut short by the caller's deadline (asserted
+  on elapsed time, since a `time.Sleep` backoff survived a call-count
+  check alone).
+- **Verification.** `go test ./... -count=1` passes. `gosec ./...` is
+  clean. `govulncheck` can't run here, because the proxy returns 403 for
+  `vuln.go.dev`. `scripts/coverage-gate.sh` passes `internal/judge`
+  (98.6% ≥ 98) but exits 1 on `cmd/cloudsdd`, `internal/config` and
+  `internal/state`. None of those three import `judge`, and their
+  permission-bit tests skip because this container runs as root.

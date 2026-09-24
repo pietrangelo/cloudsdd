@@ -643,3 +643,53 @@ when they cannot run at all. **(2)** Under a comma-decimal locale, awk
 prints the percentages as `94,4`, and `a + 0` then reads them as their
 integer part. That can only make the gate stricter, never looser, so it
 is cosmetic. Run it with `LC_ALL=C`. Fault (1) was added to the plan as its own item.
+
+**Phase 5, gate fault (1) fixed.** Each invariant check now runs `go list`
+by itself and fails if it errors. Only after that does it filter the
+output. `|| true` now sits on the `grep` alone, where an empty match is the
+passing case. Tested with a fake `go` on `PATH`: when it reports
+`cloudsdd/internal/engine`, all eight checks still fail. When it reports
+nothing, all eight pass. When `go` is missing, all eight fail and name
+`go list`. Two mutations were tried. Dropping `|| true` from the grep kills
+a clean run. Ignoring the `go list` status brings back the silent `ok`
+lines. Fault (2) is fixed by `export LC_ALL=C`. That could not be
+reproduced here: this container has `mawk` and no comma-decimal locale.
+
+The check turned up two failures that were already on `main` before this
+item. **(a)** CI's coverage gate has been red since the Phase 5 ratchet.
+CI measures aws 67.7%, azure 73.2% and gcp 74.4%, below the 70/76/77
+floors. The same numbers come out in this container, so the actuals the
+ratchet recorded came from some other measurement. **(b)** CI's
+`govulncheck` reports four standard-library vulnerabilities, fixed in Go
+1.26.6. Each has its own plan item. This container cannot check (b):
+the proxy blocks `vuln.go.dev`. It also runs as root, so the
+permission-denied tests in `config` and `state` skip themselves and those
+two packages read below their floors here, but not in CI.
+
+**Phase 5, failure (a) fixed: floors reset to CI's figures.** engine
+96 → 95, aws 70 → 67, azure 76 → 73, gcp 77 → 74, recorded as a dated
+entry in the gate's own note. The ratchet's 96.1% for engine is
+`internal/provider/pipeline`'s figure. No run has ever measured engine at
+96.1% or azure/gcp at 76/77, so this is a recording error being undone,
+not coverage lost. azure and gcp still end two points above their
+pre-ratchet floors (71, 72). aws alone uses the gate's narrow exception,
+because Phase 2's EFS declarations are Pulumi-bound surface. The ratchet
+never touched it. **Verification without root:** the suite was re-run as
+`nobody`, from a copy of the tree. Under root, the permission-denied tests
+skip, so `cmd/cloudsdd`, `config` and `state` read 92.8/89.1/86.0 here. As
+`nobody` they read 93.2/93.5/91.7, the same as CI. Every figure matched
+run 35771425790 to the decimal, and the gate exited 0. **Rule going
+forward:** read a floor from CI's log, or from a non-root run, and never
+from a root container alone.
+
+**`go` directive 1.26.5 → 1.26.6.** CI installs Go from
+`go-version-file: go.mod`, so the directive is the only pin to move. There
+is no `toolchain` line to keep in step, and `go mod tidy` changed nothing
+else. Locally, `GOTOOLCHAIN=auto` fetched go1.26.6. The suite is green on
+it and `gosec` exits 0. `govulncheck` cannot reach `vuln.go.dev` through
+this container's proxy (403). So the claim that the four standard-library
+findings are closed is checked by CI's `govulncheck` job, not here. The
+coverage gate under root shows only the known `internal/state` skip
+(86.0%), and every other package holds its floor. A non-root re-run was not
+permitted in this session. The toolchain bump does not touch the code
+those root-skipped tests cover.
