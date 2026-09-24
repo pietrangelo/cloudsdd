@@ -351,3 +351,122 @@ func TestJevHonoursTheCallersDeadline(t *testing.T) {
 		t.Errorf("Ask() returned after %v, want it to stop at the caller's 100ms", elapsed)
 	}
 }
+
+// TestNewJevDefaultsToTheVendor pins the production endpoint: with no
+// override, the path is appended to the vendor's base URL.
+func TestNewJevDefaultsToTheVendor(t *testing.T) {
+	t.Setenv("CLOUDSDD_TYPESAFE_ENDPOINT", "")
+	t.Setenv("TYPESAFE_API_KEY", testAPIKey)
+
+	j, err := NewJev("")
+	if err != nil {
+		t.Fatalf("NewJev() error: %v", err)
+	}
+	if want := "https://api.typesafe.ai/v1/systemone"; j.endpoint != want {
+		t.Errorf("endpoint = %q, want %q", j.endpoint, want)
+	}
+}
+
+// TestJevFailsWithoutAnswers covers every other way an Ask can fail: each
+// is an error, never a decision, never a retry, and never the key.
+func TestJevFailsWithoutAnswers(t *testing.T) {
+	tests := []struct {
+		name     string
+		state    any
+		handler  http.HandlerFunc
+		attempts int32
+	}{
+		{
+			name:     "status the vendor does not document",
+			state:    "state",
+			handler:  respond(http.StatusInternalServerError, `{"error":"`+testAPIKey+`"}`),
+			attempts: 1,
+		},
+		{
+			// A well-formed decision under a failure status is still a
+			// failure: the status is read before the body.
+			name:     "valid decision under an undocumented status",
+			state:    "state",
+			handler:  respond(http.StatusServiceUnavailable, answer(goodChoice, goodScore, goodNoul)),
+			attempts: 1,
+		},
+		{
+			// Following it would carry the bearer key to another host.
+			name:  "redirect is not followed",
+			state: "state",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/elsewhere", http.StatusTemporaryRedirect)
+			},
+			attempts: 1,
+		},
+		{
+			name:     "state that cannot be marshalled is never sent",
+			state:    make(chan int),
+			handler:  respond(http.StatusOK, answer(goodChoice, goodScore, goodNoul)),
+			attempts: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			j := jevAgainst(t, "", func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				tt.handler(w, r)
+			})
+
+			got, err := j.Ask(context.Background(), tt.state, asked)
+			if err == nil {
+				t.Fatalf("Ask() error = nil, Decision = %+v", got)
+			}
+			if got.Answers != nil {
+				t.Errorf("Ask() returned answers alongside an error: %+v", got.Answers)
+			}
+			if n := calls.Load(); n != tt.attempts {
+				t.Errorf("server saw %d calls, want %d", n, tt.attempts)
+			}
+			if strings.Contains(err.Error(), testAPIKey) {
+				t.Errorf("error %q echoes the API key", err)
+			}
+		})
+	}
+}
+
+// TestJevRejectsAnUnusableEndpoint: a malformed override is an error on
+// the first Ask, not a panic and not a request somewhere else.
+func TestJevRejectsAnUnusableEndpoint(t *testing.T) {
+	t.Setenv("CLOUDSDD_TYPESAFE_ENDPOINT", "::not a url")
+	t.Setenv("TYPESAFE_API_KEY", testAPIKey)
+
+	j, err := NewJev("")
+	if err != nil {
+		t.Fatalf("NewJev() error: %v", err)
+	}
+	if _, err := j.Ask(context.Background(), "state", asked); err == nil {
+		t.Fatal("Ask() error = nil against an endpoint that is not a URL")
+	}
+}
+
+// TestJevBackoffYieldsToTheCallersDeadline: the retry waits inside the
+// caller's budget, never past it.
+func TestJevBackoffYieldsToTheCallersDeadline(t *testing.T) {
+	var calls atomic.Int32
+	j := jevAgainst(t, "", func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		respond(http.StatusTooManyRequests, `{}`)(w, r)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), retryBackoff/5)
+	defer cancel()
+
+	start := time.Now()
+	if _, err := j.Ask(ctx, "state", asked); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Ask() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("server saw %d calls, want 1: the retry outlived the caller", n)
+	}
+	if elapsed := time.Since(start); elapsed >= retryBackoff {
+		t.Errorf("Ask() returned after %v, want it to stop at the caller's %v, not sit out the %v backoff", elapsed, retryBackoff/5, retryBackoff)
+	}
+}

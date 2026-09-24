@@ -716,3 +716,46 @@ a stale pin on a safety gate is the worse failure.
 - **The deadline test takes ~3 s.** It asserts the client's own budget
   with no caller deadline, because that budget is the guarantee.
   A separate 100 ms test covers the caller's deadline.
+
+### Phase 1 — `internal/judge/jev.go`
+
+- **One budget, not two.** `Ask` wraps the caller's context in
+  `requestTimeout`, and that deadline covers both attempts and the
+  backoff between them. The `http.Client` has no `Timeout` of its own.
+  With both, removing either one survived the mutation pass, so one was
+  decorative. The context one is kept because a per-attempt timeout
+  can't bound the retry, and §2.5's three seconds is a total budget.
+- **The backoff is 250 ms, taken once, and it yields to the deadline.**
+  It is short enough that a 429 followed by a normal ~0.114 s answer
+  finishes well inside three seconds. The wait selects on the context,
+  so a caller with less patience is never kept waiting through it.
+- **Redirects are not followed.** The client's `CheckRedirect` returns
+  `http.ErrUseLastResponse`, so a 3xx becomes an undocumented status and
+  an error. A redirect is the one way a bearer key reaches a host nobody
+  configured. `net/http` strips `Authorization` across hosts, but not
+  across a same-host path change or a scheme downgrade.
+- **Undocumented statuses carry no sentinel.** Any status other than 200
+  and the four of §1.1 becomes `judge: jev returned status N`, is not
+  retried, and never echoes the body. All the caller needs to know is
+  that the adviser abstained (§2.5), and the body is untrusted and may
+  repeat what was sent (§4.7).
+- **The status is read before the body.** A well-formed decision under
+  a 503 is still a failure. The mutation pass showed this was unpinned:
+  the 500 row's body was malformed anyway, so skipping the status check
+  survived. A row now sends a valid decision under a 503.
+- **The endpoint is not validated in `NewJev`.** A malformed
+  `CLOUDSDD_TYPESAFE_ENDPOINT` fails on the first `Ask`, which is
+  abstention, not a crash. Phase 5's `LoadConfig` is where configuration
+  errors become fatal, if we decide they should.
+- **Seven rows added to `jev_test.go`.** They cover the default endpoint,
+  an undocumented status with an echoing body, a valid decision under a
+  503, the redirect, an unmarshalable state (never sent), a malformed
+  endpoint, and a backoff cut short by the caller's deadline (asserted
+  on elapsed time, since a `time.Sleep` backoff survived a call-count
+  check alone).
+- **Verification.** `go test ./... -count=1` passes. `gosec ./...` is
+  clean. `govulncheck` can't run here, because the proxy returns 403 for
+  `vuln.go.dev`. `scripts/coverage-gate.sh` passes `internal/judge`
+  (98.6% ≥ 98) but exits 1 on `cmd/cloudsdd`, `internal/config` and
+  `internal/state`. None of those three import `judge`, and their
+  permission-bit tests skip because this container runs as root.
