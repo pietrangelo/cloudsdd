@@ -71,6 +71,11 @@
 
 set -euo pipefail
 
+# The percentages below are printed and compared by awk, which honours
+# LC_NUMERIC: under a comma-decimal locale it would print 94,4 and read
+# that back as 94. Pin the C locale so the gate means the same everywhere.
+export LC_ALL=C
+
 PROFILE="${1:-coverage.out}"
 
 # package:minimum
@@ -182,12 +187,18 @@ done
 # its tests' — a test file may reach for another package without costing
 # the shipped code its leafness, which is the property being guarded.
 #
-# The `|| true` matters: grep exits 1 when it matches nothing, and nothing
-# is the passing case, so under `pipefail` the clean run is the one that
-# would kill the script.
+# `go list` runs on its own, before the filter: a check that could not run
+# must fail, not read as clean. Piped into `grep … || true`, a missing `go`
+# once printed eight `ok` lines. The `|| true` stays on the grep alone,
+# because grep exits 1 when it matches nothing — and nothing is the pass.
 for leaf in "${LEAVES[@]}"; do
   pkg="cloudsdd/internal/provider/$leaf"
-  imports=$(go list -f '{{join .Imports "\n"}}' "./internal/provider/$leaf" | grep '^cloudsdd/' || true)
+  if ! listed=$(go list -f '{{join .Imports "\n"}}' "./internal/provider/$leaf"); then
+    echo "FAIL  $pkg — go list failed; the leaf invariant was not checked" >&2
+    status=1
+    continue
+  fi
+  imports=$(grep '^cloudsdd/' <<<"$listed" || true)
 
   if [[ -n "$imports" ]]; then
     echo "FAIL  $pkg — leaf package (RFC 019 §2.1) must have no internal imports:" >&2
@@ -212,7 +223,12 @@ done
 # integration test is free to import both.
 for p in "${PROVIDERS[@]}"; do
   pkg="cloudsdd/internal/provider/$p"
-  inverted=$(go list -f '{{join .Deps "\n"}}' "./internal/provider/$p" | grep '^cloudsdd/internal/engine$' || true)
+  if ! listed=$(go list -f '{{join .Deps "\n"}}' "./internal/provider/$p"); then
+    echo "FAIL  $pkg — go list failed; the inversion invariant was not checked" >&2
+    status=1
+    continue
+  fi
+  inverted=$(grep '^cloudsdd/internal/engine$' <<<"$listed" || true)
 
   if [[ -n "$inverted" ]]; then
     echo "FAIL  $pkg — must not depend on cloudsdd/internal/engine (RFC 019 §2.4)" >&2
