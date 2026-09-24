@@ -153,6 +153,10 @@ func TestDecodeDecisionRejectsRatherThanClamps(t *testing.T) {
 		// Structurally malformed bodies.
 		{"unknown top-level field", `{"model":"jev-1.13.0","approved":true,"answers":{"action":` + goodChoice + `,"risk":` + goodScore + `,"unrequested":` + goodNoul + `}}`, ErrMalformed},
 		{"unknown answer field", answer(goodChoice, goodScore, `{"type":"noul","noul":0.1,"override":true}`), ErrMalformed},
+		{"unknown choice field", answer(`{"type":"choice","choice":"deploy","confidence":0.9,"override":true}`, goodScore, goodNoul), ErrMalformed},
+		{"unknown score field", answer(goodChoice, `{"type":"score","score":1,"confidence":0.9,"override":true}`, goodNoul), ErrMalformed},
+		{"another primitive's field", answer(`{"type":"choice","choice":"deploy","confidence":0.9,"noul":1}`, goodScore, goodNoul), ErrMalformed},
+		{"answer that is not an object", answer(goodChoice, goodScore, `0.5`), ErrMalformed},
 		{"string where a number belongs", answer(goodChoice, goodScore, `{"type":"noul","noul":"0.1"}`), ErrMalformed},
 		{"trailing document", answer(goodChoice, goodScore, goodNoul) + `{}`, ErrMalformed},
 		{"truncated body", answer(goodChoice, goodScore, goodNoul)[:40], ErrMalformed},

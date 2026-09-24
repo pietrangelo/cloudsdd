@@ -653,3 +653,35 @@ a stale pin on a safety gate is the worse failure.
   a hard `ErrMalformed`, which means abstention (§2.5), never a wrong
   verdict. §7.3's live smoke test is the check. `legend` is assumed to be
   a string.
+
+### Phase 1 — `internal/judge/judge.go`
+
+- **Two layers: wire and domain.** `wireDecision` keeps each answer as a
+  `json.RawMessage`. The decoder reads only its `type`, checks it against
+  the question, and then decodes the answer strictly into a struct for
+  that answer type. So a field that belongs to another answer type is an
+  unknown field, and `ErrMalformed`: a `noul` on a `choice` is rejected,
+  not ignored. Values are pointers, so "absent" and "zero" are different
+  things. `Answer` holds only validated values and carries neither the
+  probabilities nor the `legend`, since nothing reads them yet (they are
+  still validated).
+- **Errors are deterministic.** Answers and option probabilities are
+  checked in sorted key order, so a response with several faults always
+  reports the same one.
+- **Level-probability length is not checked.** A `score` answer whose
+  `probabilities` list is shorter or longer than the rubric is accepted,
+  as long as each entry is in [0,1]. Nothing reads the list, and the
+  tests do not pin a length rule. Add one when a reader appears.
+- **Four rows added to `judge_test.go`** during the mutation pass: an
+  unknown field on a `choice` and on a `score` answer, a field of another
+  answer type, and an answer that is not a JSON object. Without them,
+  swapping the strict per-answer decoder for `json.Unmarshal` survived.
+  Four mutants that remove a nil guard (null body, absent
+  `choice`/`score`/`noul`) are caught by the nil-pointer panic those
+  guards exist to prevent, rather than by an assertion. That is expected.
+- **The one uncovered branch** is the default case for a question whose
+  answer type is none of the three. It can only be reached by a caller
+  bug. It returns `ErrTypeMismatch` rather than panicking.
+- **Verification.** `FuzzDecodeDecision` ran for 45 s (1.25 M executions)
+  without a crash or a rule violation. `gosec` is clean. `govulncheck`
+  cannot run here: the proxy blocks `vuln.go.dev`.
